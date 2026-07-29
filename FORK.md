@@ -4,8 +4,9 @@ Heretic works by removing a refusal direction from a model's output
 projections. This fork makes that work on fused-MoE architectures, and changes
 what the search optimises for.
 
-Branch: `moe`. Upstream is tracked as `upstream`; the branch rebases cleanly
-because nothing in the original README or CLI surface is touched.
+Changes live on `master`, so `git clone` is all a machine needs. Upstream is
+tracked as `upstream` and rebases cleanly: nothing in the original README or
+CLI surface is touched.
 
 ## 1. Fused MoE experts
 
