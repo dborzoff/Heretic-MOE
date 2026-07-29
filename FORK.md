@@ -41,14 +41,40 @@ shared expert is 250× lighter than the routed ones but runs on every token, so
 what its edit costs per unit of weight is not comparable.
 
 With one knob the search cannot keep the useful part of an edit and drop the
-expensive part. This splits the keys into four and fixes the lower-bound rule
-to key off component *meaning* rather than an exact string, so other
-architectures keep their previous behaviour exactly.
+expensive part.
 
-Search bounds are widened at the same time. The old ones clipped the best
-trials — winners pressed against three of four limits. After widening, the
+The split is done by **adding** two keys rather than renaming the existing ones:
+
+| key | what lands there | which models see it |
+|---|---|---|
+| `attn.o_proj` | full attention output | all, unchanged |
+| `attn.linear.out_proj` | linear attention output | only hybrids that have one |
+| `mlp.down_proj` | dense MLP / routed experts | all, unchanged |
+| `mlp.shared.down_proj` | shared expert | only models that have one |
+
+Any architecture without a linear-attention or shared-expert path therefore
+sees exactly the two keys it saw before, with the same names — which matters
+because parameter names are what a stored study keys on, so renaming them would
+break `--checkpoint-action continue` on existing studies. The lower-bound rule
+keys off component meaning (`mlp.` prefix or `linear` in the name) rather than
+an exact string, for the same reason.
+
+Search bounds are widened at the same time, and this is **the one change that
+affects every model**, not just MoE ones. The old bounds clipped the best
+trials: winners pressed against three of four limits. After widening, the
 record moved from **0.15 to 0.01 refusals**, with the edit peaking at layer 15
-of 40, far earlier than the old floor of 0.6-of-depth allowed.
+of 40 — far earlier than the old floor of 0.6-of-depth allowed.
+
+```
+max_weight            1.5              ->  2.5
+max_weight_position   0.6..1.0 depth   ->  0.0..1.0 depth
+min_weight_distance   1.0..0.6 depth   ->  1.0..1.5 depth
+```
+
+Nothing is taken away: the old optimum is still inside the new space. But the
+space is larger, so on a model where the old bounds happened to be right, a
+fixed trial budget will spend some of itself confirming that. Worth knowing
+before running this on something other than a hybrid MoE.
 
 ## 3. Perplexity as an objective
 
