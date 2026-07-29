@@ -465,7 +465,29 @@ class Model:
         for layer_index in range(len(self.get_layers())):
             components.update(self.get_layer_modules(layer_index).keys())
 
+        # Fused experts are batched parameters, not modules, so get_layer_modules
+        # cannot report them - it only collects nn.Module instances. They still
+        # need a weight schedule of their own, and without this entry the search
+        # never creates one and 92% of the weights go untouched.
+        #
+        # This used to work by accident: the shared expert registered under the
+        # same key. Once it got a key of its own, the routed experts silently
+        # lost theirs.
+        if self._has_fused_experts():
+            components.add("mlp.experts.down_proj")
+
         return sorted(components)
+
+    def _has_fused_experts(self) -> bool:
+        """Есть ли в модели эксперты, упакованные батчем вместо ModuleList."""
+        for layer in self.get_layers():
+            mlp = getattr(layer, "mlp", None)
+            experts = getattr(mlp, "experts", None)
+            if experts is not None and isinstance(
+                getattr(experts, "down_proj", None), torch.nn.Parameter
+            ):
+                return True
+        return False
 
     def abliterate(
         self,
@@ -652,9 +674,9 @@ class Model:
         cached original), so no LoRA adapter is involved and ``get_merged_model()`` needs no
         change.
         """
-        if "mlp.down_proj" not in parameters:
+        if "mlp.experts.down_proj" not in parameters:
             return
-        params = parameters["mlp.down_proj"]
+        params = parameters["mlp.experts.down_proj"]
         try:
             hidden = self.model.config.get_text_config().hidden_size
         except Exception:
