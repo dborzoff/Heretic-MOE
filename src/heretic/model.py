@@ -403,29 +403,32 @@ class Model:
 
         # Standard self-attention out-projection (most models).
         with suppress(Exception):
-            try_add("attn.o_proj", layer.self_attn.o_proj)  # ty:ignore[possibly-missing-attribute]
+            # Разведено на свои ключи: полное и линейное внимание - разные
+            # операторы, и линейных втрое больше по числу слоёв и вчетверо по
+            # весу. Под общим ключом они делили одну кривую по глубине.
+            try_add("attn.self.o_proj", layer.self_attn.o_proj)  # ty:ignore[possibly-missing-attribute]
 
         # Qwen3.5 MoE hybrid layers use GatedDeltaNet (linear attention) instead of
         # standard self-attention, so self_attn.o_proj doesn't exist on those layers.
         with suppress(Exception):
-            try_add("attn.o_proj", layer.linear_attn.out_proj)  # ty:ignore[possibly-missing-attribute]
+            try_add("attn.linear.out_proj", layer.linear_attn.out_proj)  # ty:ignore[possibly-missing-attribute]
 
         # Most dense models.
         with suppress(Exception):
-            try_add("mlp.down_proj", layer.mlp.down_proj)  # ty:ignore[possibly-missing-attribute]
+            try_add("mlp.experts.down_proj", layer.mlp.down_proj)  # ty:ignore[possibly-missing-attribute]
 
         # Some MoE models (e.g. Qwen3).
         with suppress(Exception):
             for expert in layer.mlp.experts:  # ty:ignore[possibly-missing-attribute, not-iterable]
-                try_add("mlp.down_proj", expert.down_proj)  # ty:ignore[possibly-missing-attribute]
+                try_add("mlp.experts.down_proj", expert.down_proj)  # ty:ignore[possibly-missing-attribute]
 
         with suppress(Exception):
-            try_add("mlp.down_proj", layer.mlp.shared_expert.down_proj)  # ty:ignore[possibly-missing-attribute]
+            try_add("mlp.shared.down_proj", layer.mlp.shared_expert.down_proj)  # ty:ignore[possibly-missing-attribute]
 
         # Phi-3.5-MoE (and possibly others).
         with suppress(Exception):
             for expert in layer.block_sparse_moe.experts:  # ty:ignore[possibly-missing-attribute, not-iterable]
-                try_add("mlp.down_proj", expert.w2)  # ty:ignore[possibly-missing-attribute]
+                try_add("mlp.experts.down_proj", expert.w2)  # ty:ignore[possibly-missing-attribute]
 
         # LFM dense operator blocks.
         with suppress(Exception):
@@ -440,7 +443,7 @@ class Model:
 
         with suppress(Exception):
             for expert in layer.feed_forward.experts:  # ty:ignore[possibly-missing-attribute, not-iterable]
-                try_add("mlp.down_proj", expert.w2)  # ty:ignore[possibly-missing-attribute]
+                try_add("mlp.experts.down_proj", expert.w2)  # ty:ignore[possibly-missing-attribute]
 
         # Granite MoE Hybrid - attention layers with shared_mlp.
         with suppress(Exception):

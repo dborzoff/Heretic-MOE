@@ -644,18 +644,40 @@ def run():
             # removing refusals and tends to damage model intelligence more than
             # ablating the attention output, so on many models the optimum is to leave
             # it (mostly) untouched. See issue #202.
-            max_weight_lower_bound = -0.25 if component == "mlp.down_proj" else 0.8
+            # Нижняя граница по смыслу компонента, а не по одной строке имени.
+            # Отрицательная нижняя граница с обрезкой в ноль даёт поиску
+            # возможность полностью выключить правку этого компонента: у
+            # непрерывного распределения ноль иначе недостижим.
+            #
+            # Полному вниманию оставляем прежний порог 0.8 - это классическая
+            # цель абляции, и на ней метод заведомо работает. Всему остальному
+            # разрешаем выключаться: про линейное внимание и про раздельную
+            # правку экспертов мы ничего заранее не знаем, пусть решает поиск.
+            # Правило по смыслу компонента, а не по точному имени: иначе
+            # разделение ключей на нашей архитектуре меняло бы поведение
+            # на всех остальных, где ключи остались прежними.
+            #
+            # Полное внимание сохраняет прежний порог 0.8: это классическая
+            # цель абляции, на ней метод заведомо работает. MLP и линейное
+            # внимание получают отрицательную нижнюю границу с обрезкой в
+            # ноль - так поиск может выключить их правку совсем, чего
+            # непрерывное распределение иначе не позволяет.
+            max_weight_lower_bound = (
+                -0.25
+                if component.startswith("mlp.") or "linear" in component
+                else 0.8
+            )
             max_weight = max(
                 0.0,
                 trial.suggest_float(
                     f"{component}.max_weight",
                     max_weight_lower_bound,
-                    1.5,
+                    2.5,
                 ),
             )
             max_weight_position = trial.suggest_float(
                 f"{component}.max_weight_position",
-                0.6 * last_layer_index,
+                0.0,
                 1.0 * last_layer_index,
             )
             # For sampling purposes, min_weight is expressed as a fraction of max_weight,
@@ -669,7 +691,7 @@ def run():
             min_weight_distance = trial.suggest_float(
                 f"{component}.min_weight_distance",
                 1.0,
-                max(0.6 * last_layer_index, 1.0),
+                max(1.5 * last_layer_index, 1.0),
             )
 
             parameters[component] = AbliterationParameters(
