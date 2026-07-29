@@ -62,10 +62,13 @@ class Model:
     processor: ProcessorMixin | None
     peft_config: LoraConfig
     dtype: torch.dtype
+    # Original weights of fused-expert MoE tensors, cached to keep abliteration reversible.
+    _fused_experts_cache: dict[int, tuple[torch.nn.Parameter, Tensor]]
 
     def __init__(self, settings: Settings):
         self.settings = settings
         self.needs_reload = False
+        self._fused_experts_cache = {}
 
         self.revision_kwargs = {}
         if settings.model_commit is not None:
@@ -333,10 +336,13 @@ class Model:
             for name, module in self.model.named_modules():
                 if "lora_B" in name and hasattr(module, "weight"):
                     torch.nn.init.zeros_(module.weight)
+            for fused, original in self._fused_experts_cache.values():
+                fused.data.copy_(original)
             return
 
         # Purge existing model object from memory to make space.
         self.model = None  # ty:ignore[invalid-assignment]
+        self._fused_experts_cache = {}
         empty_cache()
 
         quantization_config = self._get_quantization_config(
@@ -412,6 +418,9 @@ class Model:
         with suppress(Exception):
             for expert in layer.mlp.experts:  # ty:ignore[possibly-missing-attribute, not-iterable]
                 try_add("mlp.down_proj", expert.down_proj)  # ty:ignore[possibly-missing-attribute]
+
+        with suppress(Exception):
+            try_add("mlp.down_proj", layer.mlp.shared_expert.down_proj)  # ty:ignore[possibly-missing-attribute]
 
         # Phi-3.5-MoE (and possibly others).
         with suppress(Exception):
@@ -618,24 +627,127 @@ class Model:
                     weight_A.data = lora_A.to(weight_A.dtype)
                     weight_B.data = lora_B.to(weight_B.dtype)
 
+        # Fused-expert MoE blocks (e.g. Qwen3.5-MoE) are not reached by the loop above.
+        self._abliterate_fused_experts(
+            residual_directions, residual_direction, parameters
+        )
+
+    def _abliterate_fused_experts(
+        self,
+        refusal_directions: Tensor,
+        refusal_direction: Tensor | None,
+        parameters: dict[str, AbliterationParameters],
+    ) -> None:
+        """Orthogonalize fused-expert MoE blocks.
+
+        Some MoE implementations (e.g. transformers' ``Qwen3_5MoeExperts``) pack all experts
+        into batched tensors instead of a ``ModuleList`` of Linear experts, so
+        ``get_layer_modules()`` (which does ``for expert in layer.mlp.experts``) never reaches
+        them and every routed expert is silently skipped. Since most of a MoE's refusal
+        behaviour lives in the routed experts, abliteration then plateaus far above zero.
+
+        Here the batched ``experts.down_proj`` of shape ``[num_experts, hidden, inter]`` is
+        orthogonalized per expert against the same per-layer refusal direction and weight
+        schedule as the dense path. The base tensor is edited directly (reversibly, via a
+        cached original), so no LoRA adapter is involved and ``get_merged_model()`` needs no
+        change.
+        """
+        if "mlp.down_proj" not in parameters:
+            return
+        params = parameters["mlp.down_proj"]
+        try:
+            hidden = self.model.config.get_text_config().hidden_size
+        except Exception:
+            hidden = getattr(self.model.config, "hidden_size", None)
+        for layer_index, layer in enumerate(self.get_layers()):
+            # Locate the experts container across the architectures Heretic supports.
+            experts = None
+            for block_name in ("mlp", "block_sparse_moe", "feed_forward", "moe"):
+                block = getattr(layer, block_name, None)
+                if block is not None:
+                    experts = getattr(block, "experts", None)
+                    if experts is not None:
+                        break
+            if experts is None:
+                continue
+            # The fused down-projection may be named differently across families.
+            fused = None
+            for param_name in ("down_proj", "w2", "output_linear"):
+                fused = getattr(experts, param_name, None)
+                if fused is not None:
+                    break
+            if not isinstance(fused, torch.nn.Parameter) or fused.dim() != 3:
+                continue
+            # Expect [num_experts, out=hidden, in=inter]; skip on unexpected orientation.
+            if hidden is not None and fused.shape[1] != hidden:
+                continue
+            cache = self._fused_experts_cache
+            if id(fused) not in cache:
+                cache[id(fused)] = (fused, fused.data.clone())
+            _, original = cache[id(fused)]
+            # Restore the original before (re-)abliterating, so trials are independent.
+            fused.data.copy_(original)
+            distance = abs(layer_index - params.max_weight_position)
+            if distance > params.min_weight_distance:
+                continue
+            weight = params.max_weight + (distance / params.min_weight_distance) * (
+                params.min_weight - params.max_weight
+            )
+            if weight == 0:
+                continue
+            if refusal_direction is None:
+                v = refusal_directions[layer_index + 1]
+            else:
+                v = refusal_direction
+            v = F.normalize(v.to(torch.float32).to(fused.device), dim=0)
+            # The cached original was cloned from the parameter, so it is already on device.
+            original_fp32 = original.to(torch.float32)
+            # Projection has shape [num_experts, inter]: v^T W_e, contracting the hidden dim.
+            proj = torch.einsum("h,ehi->ei", v, original_fp32)
+            delta = weight * v.view(1, -1, 1) * proj.unsqueeze(1)
+            fused.data.copy_((original_fp32 - delta).to(fused.dtype))
+
+    def _apply_template_safe(self, chats, **kwargs):
+        """Шаблон модели может не знать роль system - тогда собираем без неё."""
+        try:
+            return self.tokenizer.apply_chat_template(chats, **kwargs)
+        except Exception as error:
+            if "system" not in str(error).lower():
+                raise
+            self._no_system_role = True
+            plain = []
+            for chat in chats:
+                parts = [m["content"] for m in chat if m["content"]]
+                plain.append([{"role": "user", "content": "\n\n".join(parts)}])
+            return self.tokenizer.apply_chat_template(plain, **kwargs)
+
     def generate(
         self,
         prompts: list[Prompt],
         **kwargs: Any,
     ) -> tuple[BatchEncoding, GenerateDecoderOnlyOutput | LongTensor]:
-        chats = [
-            [
-                {"role": "system", "content": prompt.system},
-                {"role": "user", "content": prompt.user},
-            ]
-            for prompt in prompts
-        ]
+        def _build(with_system: bool):
+            out = []
+            for prompt in prompts:
+                if with_system and prompt.system:
+                    out.append([
+                        {"role": "system", "content": prompt.system},
+                        {"role": "user", "content": prompt.user},
+                    ])
+                else:
+                    # шаблон без роли system - подмешиваем её в сообщение пользователя
+                    text = (f"{prompt.system}\n\n{prompt.user}"
+                            if prompt.system else prompt.user)
+                    out.append([{"role": "user", "content": text}])
+            return out
+
+        chats = _build(with_system=not getattr(self, "_no_system_role", False))
 
         # This cast is valid because list[str] is the return type
         # for batched operation with tokenize=False.
         chat_prompts = cast(
             list[str],
-            self.tokenizer.apply_chat_template(
+            self._apply_template_safe(
                 chats,
                 add_generation_prompt=True,
                 tokenize=False,
