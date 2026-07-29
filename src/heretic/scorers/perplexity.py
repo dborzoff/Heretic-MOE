@@ -49,7 +49,7 @@ from heretic.utils import print
 class Settings(BaseModel):
     text: DatasetSpecification = Field(
         default=DatasetSpecification(
-            dataset="wikitext",
+            dataset="Salesforce/wikitext",
             split="test",
             column="text",
         ),
@@ -102,9 +102,13 @@ class Perplexity(Scorer):
         from datasets import load_dataset
 
         spec = self.settings.text
-        ds = load_dataset(spec.dataset, split=spec.split) \
-            if "/" in spec.dataset or spec.dataset != "wikitext" \
-            else load_dataset("wikitext", "wikitext-2-raw-v1", split=spec.split)
+        # У wikitext нужен ещё и вариант набора. И имя теперь обязано быть с
+        # пространством имён: голое "wikitext" хаб больше не принимает, прогон
+        # падал на этом при старте.
+        if spec.dataset.endswith("wikitext"):
+            ds = load_dataset(spec.dataset, "wikitext-2-raw-v1", split=spec.split)
+        else:
+            ds = load_dataset(spec.dataset, split=spec.split)
         text = "\n\n".join(t for t in ds[spec.column] if t.strip())
 
         _, tok = self._model_and_tokenizer(ctx)
