@@ -401,6 +401,30 @@ class Settings(BaseSettings):
         description="Number of trials that use random sampling for the purpose of exploration.",
     )
 
+    seed_trials_from: str | None = Field(
+        default=None,
+        description=(
+            "Path to a journal file from a previous study whose best trials should be"
+            " enqueued into a new one. Use this when the objective changed - stored"
+            " objective values are then meaningless and the study has to start over,"
+            " but the parameter sets that reached the front are still the best guess"
+            " available. Parameters that no longer exist are ignored; ones that are"
+            " new to this search get sampled as usual."
+        ),
+    )
+
+    seed_trials_count: NonNegativeInt = Field(
+        default=12,
+        description=(
+            "How many of the previous study's front points to enqueue. Each costs one"
+            " trial to re-evaluate under the new objective."
+            " Keep this modest when the search space itself changed: a seeded point"
+            " then fixes only the parameters that still mean what they used to, and"
+            " the rest are sampled anyway, so a large seed spends the budget"
+            " re-checking half-random points instead of exploring."
+        ),
+    )
+
     seed: int | None = Field(
         default=None,
         description=(

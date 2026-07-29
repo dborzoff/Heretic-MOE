@@ -774,6 +774,24 @@ def run():
         if start_index > 0:
             print()
             print("Resuming existing study.")
+        elif settings.seed_trials_from:
+            # Когда меняется целевая функция, прежние значения целей теряют
+            # смысл и исследование приходится начинать заново. Но параметры,
+            # которыми были достигнуты хорошие точки, остаются лучшей из
+            # имеющихся догадок - их и ставим в очередь первыми.
+            #
+            # Параметров, которых в новом пространстве нет, Optuna не примет,
+            # поэтому лишние отбрасываем; новые она сама доберёт сэмплером.
+            seeds = load_seed_parameters(
+                settings.seed_trials_from, settings.seed_trials_count
+            )
+            space = set(get_search_space_names(study))
+            for params in seeds:
+                kept = {k: v for k, v in params.items() if not space or k in space}
+                if kept:
+                    study.enqueue_trial(kept, skip_if_exists=True)
+            print()
+            print(f"Enqueued [bold]{len(seeds)}[/] seed trials from a previous study.")
 
         try:
             study.optimize(
@@ -1487,6 +1505,52 @@ def run():
                     else:
                         print(f"[red]Error: {formatted}[/]")
 
+
+
+def get_search_space_names(study) -> list[str]:
+    """Имена параметров нового пространства. Пока ни одного испытания не было,
+    их взять неоткуда - тогда пропускаем всё и полагаемся на Optuna."""
+    for t in study.trials:
+        if t.params:
+            return list(t.params)
+    return []
+
+
+def load_seed_parameters(path: str, count: int) -> list[dict]:
+    """Наборы параметров лучших точек прежнего исследования.
+
+    Читаем журнал напрямую, а не через Optuna: у прежнего исследования другое
+    число целей, и загрузить его в текущее хранилище нельзя. Берём точки
+    недоминируемого фронта, начиная с лучших по первой цели - у нас это доля
+    отказов, и она в новом исследовании остаётся той же.
+    """
+    import json as _json
+    from collections import defaultdict
+
+    params: dict[int, dict] = defaultdict(dict)
+    values: dict[int, list] = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                r = _json.loads(line)
+                if r.get("op_code") == 5:
+                    params[r["trial_id"]][r["param_name"]] = r["param_value_internal"]
+                elif r.get("op_code") == 6 and r.get("values"):
+                    values[r["trial_id"]] = r["values"]
+    except OSError:
+        return []
+
+    front = [
+        (v, t)
+        for t, v in values.items()
+        if not any(
+            all(a <= b for a, b in zip(u, v)) and u != v for u in values.values()
+        )
+    ]
+    front.sort(key=lambda x: x[0])
+    return [params[t] for _, t in front[:count] if params.get(t)]
 
 def main():
     # Install Rich traceback handler.
