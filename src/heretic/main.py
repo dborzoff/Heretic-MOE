@@ -399,9 +399,20 @@ def run():
             return
 
         if action == "continue":
+            _cli = settings
             settings = Settings.model_validate_json(
                 existing_study.user_attrs["settings"]
             )
+            # Podmena nastroek sohranyonnymi steraet peredannoe v komandnoy
+            # stroke. Chast poley (save_directory, upload_repo_id) pomechena
+            # exclude=True i v zhurnal ne popadaet vovse - posle podmeny oni
+            # None, i heretic nachinaet sprashivat put u polzovatelya.
+            for _f in ("save_directory", "model_action", "upload_repo_id",
+                       "trial_index", "batch_size", "export_strategy"):
+                _v = getattr(_cli, _f, None)
+                if _v is not None:
+                    setattr(settings, _f, _v)
+                    print(f"iz komandnoy stroki: {_f}={_v}")
         elif action == "restart":
             os.unlink(study_checkpoint_file)
             backend = JournalFileBackend(study_checkpoint_file, lock_obj=lock_obj)
