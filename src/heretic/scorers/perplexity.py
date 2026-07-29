@@ -1,37 +1,35 @@
 # -*- coding: utf-8 -*-
-r"""Оценщик перплексии для heretic: цена правки, измеренная по тексту.
+r"""Perplexity scorer for Heretic: measure edit cost on text.
 
-Зачем он нужен вместо KL.
+Why use this instead of KL.
 
-Штатный KLDivergence берёт сто безобидных промптов и сравнивает распределение
-ПЕРВОГО токена ответа с исходной моделью. Это сто чисел. Перплексия на полном
-тесте wikitext - двести тысяч токенов. Разница не в масштабе, а в том, что они
-меряют: KL по первому токену видит, изменился ли выбор начала ответа, и почти
-слеп к тому, что происходит дальше.
+The built-in KLDivergence compares the first-token distribution on 100 harmless
+prompts with the baseline model. Perplexity covers 200,000 tokens on the full
+wikitext test set. Scale is not the main difference. First-token KL sees whether
+the opening changed and is nearly blind to what follows.
 
-Наши замеры показали, насколько это расходится. Две точки одного фронта:
+Our measurements exposed the gap. These are two points from the same front:
 
-  сборка      KL (первый токен)   перплексия к оригиналу
-  balanced         0.0021               +3.4%
-  max              0.0126              +18.1%
+  build        KL (first token)   perplexity vs baseline
+  balanced          0.0021                +3.4%
+  max               0.0126               +18.1%
 
-По KL разница шестикратная, а по тексту - пятикратная при куда большей
-абсолютной цене. Поиск расставлял точки на кривой, настоящей цены которой не
-знал: он оптимизировал суррогат.
+KL separates them by a factor of six. Perplexity says the aggressive edit costs
+five times more, at much larger absolute damage. The search was optimizing a
+proxy that could not see the real cost curve.
 
-Раньше перплексию в цикл поиска было не вставить - на процессоре полный прогон
-стоил четырнадцать минут. На карте те же данные считаются за секунды, и
-суррогат больше не нужен.
+A full CPU pass takes fourteen minutes, too long for the search loop. The same
+data takes seconds on a GPU, so the proxy is no longer needed.
 
-Что считает этот оценщик. Средний отрицательный логарифм правдоподобия на
-кусках текста, приведённый к относительному росту против исходной модели:
+This scorer averages negative log-likelihood over fixed text windows and
+returns the relative increase over the baseline model:
 
     value = perplexity / perplexity_baseline - 1
 
-Ноль означает "текст модель предсказывает как раньше", 0.03 - три процента
-хуже. Величина порядка единицы, как требует интерфейс Scorer.
+Zero means the model predicts the text as well as before. A value of 0.03 means
+three percent worse. This keeps the result near the scale expected by Scorer.
 
-Установка: положить рядом со штатными оценщиками и включить в настройках:
+Enable it in the scorer configuration:
 
     [[scorers]]
     plugin = "heretic.scorers.perplexity.Perplexity"
@@ -53,20 +51,21 @@ class Settings(BaseModel):
             split="test",
             column="text",
         ),
-        description="Текстовый набор, на котором меряется перплексия.",
+        description="Text corpus used to measure perplexity.",
     )
     window: int = Field(
         default=512,
-        description="Длина куска в токенах. Та же, что у llama-perplexity, "
-                    "чтобы числа были сопоставимы с замерами на гуфах.",
+        description=(
+            "Tokens per window. This matches llama-perplexity so results can be"
+            " compared with GGUF measurements."
+        ),
     )
     chunks: int = Field(
         default=24,
         description=(
-            "Сколько кусков брать. Двадцать четыре - это 12 тысяч токенов и "
-            "пара секунд на карте. Больше нужно для публикуемой цифры, а для "
-            "сравнения испытаний между собой хватает: текст один и тот же, и "
-            "разница считается на одних и тех же кусках."
+            "Number of windows. The default covers 12,000 tokens and takes a few"
+            " seconds on a GPU. Published figures need more data. Search trials"
+            " do not: every trial uses the same windows."
         ),
     )
 
@@ -88,23 +87,22 @@ class Perplexity(Scorer):
     def score_name(self) -> str:
         return "Perplexity increase"
 
-    # Context намеренно не отдаёт саму модель наружу, а прогон по произвольному
-    # тексту через его методы не выразить: get_logits работает с промптами и
-    # возвращает только последний токен. Берём модель напрямую и держим это
-    # в одном месте, чтобы при обновлении heretic чинить пришлось только здесь.
+    # Context withholds the model, and its public methods cannot score arbitrary
+    # token sequences: get_logits accepts prompts and returns only the final
+    # token. Keep the private access here so upstream API changes have one repair
+    # point.
     @staticmethod
     def _model_and_tokenizer(ctx: Context):
         m = ctx._model            # noqa: SLF001
         return m.model, m.tokenizer
 
     def _windows(self, ctx: Context):
-        """Нарезать текст на куски по window токенов - один раз за прогон."""
+        """Tokenize and split the corpus once per run."""
         from datasets import load_dataset
 
         spec = self.settings.text
-        # У wikitext нужен ещё и вариант набора. И имя теперь обязано быть с
-        # пространством имён: голое "wikitext" хаб больше не принимает, прогон
-        # падал на этом при старте.
+        # Wikitext also requires a configuration name. The Hub now rejects the
+        # bare "wikitext" dataset ID, which used to fail at startup.
         if spec.dataset.endswith("wikitext"):
             ds = load_dataset(spec.dataset, "wikitext-2-raw-v1", split=spec.split)
         else:
@@ -124,10 +122,10 @@ class Perplexity(Scorer):
         total, count = 0.0, 0
         for w in self._windows_cached:
             ids = w.unsqueeze(0).to(device)
-            # Метки те же, что вход: модель сама сдвигает их на один токен.
+            # The model shifts labels by one token internally.
             out = model(ids, labels=ids)
-            # loss - средний NLL по куску; складываем взвешенно по токенам,
-            # чтобы неполный последний кусок не перевесил остальные.
+            # out.loss is mean NLL over n-1 targets. Weight by that count so
+            # windows of different lengths contribute per token.
             total += float(out.loss) * (ids.shape[1] - 1)
             count += ids.shape[1] - 1
         return float(torch.exp(torch.tensor(total / max(count, 1))))
@@ -145,9 +143,8 @@ class Perplexity(Scorer):
     def get_score(self, ctx: Context) -> Score:
         ppl = self._perplexity(ctx)
         rel = ppl / self._baseline - 1.0
-        # Без разметки: это же поле показывается в меню выбора точки фронта,
-        # где Rich не разбирается и теги печатаются как есть - "[bold]51.71[/]".
-        # Штатный KeywordRate по той же причине отдаёт голое "5/100".
+        # The front-selection menu prints this field without Rich parsing.
+        # Markup would appear verbatim, as in "[bold]51.71[/]".
         return Score(
             value=rel,
             rich_display=f"{ppl:.4f} ({rel * 100:+.2f}% vs baseline)",

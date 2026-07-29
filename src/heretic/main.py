@@ -403,16 +403,15 @@ def run():
             settings = Settings.model_validate_json(
                 existing_study.user_attrs["settings"]
             )
-            # Podmena nastroek sohranyonnymi steraet peredannoe v komandnoy
-            # stroke. Chast poley (save_directory, upload_repo_id) pomechena
-            # exclude=True i v zhurnal ne popadaet vovse - posle podmeny oni
-            # None, i heretic nachinaet sprashivat put u polzovatelya.
+            # Restoring stored settings discards command-line values. Some fields,
+            # including save_directory and upload_repo_id, are excluded from the
+            # journal entirely; losing them turns an unattended run interactive.
             for _f in ("save_directory", "model_action", "upload_repo_id",
                        "trial_index", "batch_size", "export_strategy"):
                 _v = getattr(_cli, _f, None)
                 if _v is not None:
                     setattr(settings, _f, _v)
-                    print(f"iz komandnoy stroki: {_f}={_v}")
+                    print(f"From command line: {_f}={_v}")
         elif action == "restart":
             os.unlink(study_checkpoint_file)
             backend = JournalFileBackend(study_checkpoint_file, lock_obj=lock_obj)
@@ -644,24 +643,13 @@ def run():
             # removing refusals and tends to damage model intelligence more than
             # ablating the attention output, so on many models the optimum is to leave
             # it (mostly) untouched. See issue #202.
-            # Нижняя граница по смыслу компонента, а не по одной строке имени.
-            # Отрицательная нижняя граница с обрезкой в ноль даёт поиску
-            # возможность полностью выключить правку этого компонента: у
-            # непрерывного распределения ноль иначе недостижим.
+            # Full attention keeps the upstream 0.8 floor; it is the established
+            # ablation target. MLP and linear attention may clamp to zero because
+            # their value depends on the architecture. A continuous distribution
+            # would otherwise never disable them exactly.
             #
-            # Полному вниманию оставляем прежний порог 0.8 - это классическая
-            # цель абляции, и на ней метод заведомо работает. Всему остальному
-            # разрешаем выключаться: про линейное внимание и про раздельную
-            # правку экспертов мы ничего заранее не знаем, пусть решает поиск.
-            # Правило по смыслу компонента, а не по точному имени: иначе
-            # разделение ключей на нашей архитектуре меняло бы поведение
-            # на всех остальных, где ключи остались прежними.
-            #
-            # Полное внимание сохраняет прежний порог 0.8: это классическая
-            # цель абляции, на ней метод заведомо работает. MLP и линейное
-            # внимание получают отрицательную нижнюю границу с обрезкой в
-            # ноль - так поиск может выключить их правку совсем, чего
-            # непрерывное распределение иначе не позволяет.
+            # Match component meaning rather than exact keys. Splitting components
+            # here must not change the bounds of unchanged keys on other models.
             max_weight_lower_bound = (
                 -0.25
                 if component.startswith("mlp.") or "linear" in component
@@ -775,13 +763,11 @@ def run():
             print()
             print("Resuming existing study.")
         elif settings.seed_trials_from:
-            # Когда меняется целевая функция, прежние значения целей теряют
-            # смысл и исследование приходится начинать заново. Но параметры,
-            # которыми были достигнуты хорошие точки, остаются лучшей из
-            # имеющихся догадок - их и ставим в очередь первыми.
+            # A changed objective invalidates stored scores, but the parameters
+            # that reached the old front are still the best starting points.
             #
-            # Параметров, которых в новом пространстве нет, Optuna не примет,
-            # поэтому лишние отбрасываем; новые она сама доберёт сэмплером.
+            # Drop parameters absent from the new space. Optuna samples any new
+            # ones when it evaluates the queued trial.
             seeds = load_seed_parameters(
                 settings.seed_trials_from,
                 settings.seed_trials_count,
@@ -1509,21 +1495,19 @@ def run():
 
 
 def report_bound_pressure(study, threshold: float = 0.05) -> None:
-    """Сказать вслух, если лучшие точки стоят вплотную к краю пространства.
+    """Warn when Pareto-front trials crowd a search bound.
 
-    Границы поиска - это предположение автора о том, где может лежать ответ.
-    Когда предположение неверно, поиск молча упирается в стенку и отдаёт лучшее
-    из разрешённого, а не лучшее вообще. Отличить одно от другого по числам
-    нельзя - только посмотрев, где стоят найденные точки.
+    Bounds are assumptions about where the answer can lie. A wrong bound makes
+    the search return the best allowed point, not the best point. Objective
+    values alone cannot distinguish the two.
 
-    Нам это стоило дорого: на Qwen3.6 победители жались к трём пределам из
-    четырёх, и после расширения рекорд сдвинулся с 0.15 до 0.01 отказов. Сама
-    правка встала на 15-й слой из 40 - вдвое раньше, чем разрешал прежний
-    нижний предел в 0.6 глубины.
+    This cost us a full Qwen3.6 search. Winners crowded three of four bounds.
+    Widening them moved the record from 0.15 to 0.01 refusals, with the edit
+    peaking at layer 15 of 40, far earlier than the old 0.6-depth floor allowed.
 
-    Двигать границы на ходу нельзя: распределение задаётся при создании
-    исследования, и TPE строит по нему свою модель. Поэтому только предупреждаем
-    - решение за человеком, а перезапуск с новыми границами стоит недорого.
+    Bounds cannot change mid-study. TPE builds its model against distributions
+    fixed when the study starts. This function only warns; restarting with wider
+    bounds and the old front is cheap.
     """
     from optuna.distributions import FloatDistribution, IntDistribution
 
@@ -1544,47 +1528,44 @@ def report_bound_pressure(study, threshold: float = 0.05) -> None:
         at_low = sum(1 for v in values if v - dist.low <= span * threshold)
         at_high = sum(1 for v in values if dist.high - v <= span * threshold)
         if at_high > len(values) / 2:
-            pressed.append((name, "верхнему", dist.high, at_high, len(values)))
+            pressed.append((name, "upper", dist.high, at_high, len(values)))
         elif at_low > len(values) / 2:
-            pressed.append((name, "нижнему", dist.low, at_low, len(values)))
+            pressed.append((name, "lower", dist.low, at_low, len(values)))
 
     if not pressed:
         return
     print()
-    print("[bold yellow]Лучшие точки жмутся к границам поиска:[/]")
+    print("[bold yellow]Pareto-front trials are crowding the search bounds:[/]")
     for name, side, bound, n, total in pressed:
-        print(f"  * [bold]{name}[/]: {n} из {total} точек фронта у {side} "
-              f"пределу ({bound:.3f})")
-    print("  Это значит, что ответ может лежать за границей, а поиск отдал "
-          "лучшее из разрешённого.")
-    print("  Границы стоит расширить и перезапустить, засеяв найденными точками "
+        print(f"  * [bold]{name}[/]: {n} of {total} front trials are near the "
+              f"{side} bound ({bound:.3f})")
+    print("  The optimum may lie outside the search space.")
+    print("  Widen the bounds and restart from these points "
           "(--seed-trials-from).")
 
 
 def load_seed_parameters(path: str, count: int, components: list[str]) -> list[dict]:
-    """Наборы параметров лучших точек прежнего исследования.
+    """Return parameter sets from a previous study's Pareto front.
 
-    Читаем журнал напрямую, а не через Optuna: у прежнего исследования другое
-    число целей, и загрузить его в текущее хранилище нельзя. Берём точки
-    недоминируемого фронта, начиная с лучших по первой цели - у нас это доля
-    отказов, и она в новом исследовании остаётся той же.
+    Read the journal directly because its objective count may differ from the
+    new study. Start with the lowest first objective, which is refusal rate in
+    both studies.
 
-    Две тонкости, на которых это ломалось.
+    Two failure modes matter.
 
-    Журнал хранит ВНУТРЕННЕЕ представление параметра. У категориальных это
-    индекс варианта, а enqueue_trial ждёт сам вариант: 0 надо превратить в
-    "global", иначе Optuna отвергнет набор целиком.
+    Journals store a parameter's internal representation. A categorical value
+    is a choice index, while enqueue_trial expects the choice itself. Index 0
+    must become "global" or Optuna rejects the parameter set.
 
-    Имена компонентов могли смениться. Единственный случай, где перенос
-    осмыслен, - маршрутизируемые эксперты: раньше они лежали под общим ключом
-    с общим экспертом, теперь у них свой. По массе это 32.2 млрд против 0.13,
-    так что старое значение описывает практически то же самое. Всё, чего в
-    новом пространстве нет, отбрасываем - пусть сэмплер подберёт сам.
+    Component names may have changed. Only the routed-expert rename preserves
+    meaning: the old key covered routed and shared experts, but they contain
+    32.2B and 0.13B parameters respectively. Drop everything absent from the new
+    space and let the sampler fill it.
     """
     import json as _json
     from collections import defaultdict
 
-    # Старое имя -> новое. Только там, где смысл сохранился.
+    # Old name -> new name. Only this rename preserves meaning.
     RENAME = {"mlp.down_proj.": "mlp.experts.down_proj."}
 
     params: dict[int, dict] = defaultdict(dict)
@@ -1607,7 +1588,7 @@ def load_seed_parameters(path: str, count: int, components: list[str]) -> list[d
     except OSError:
         return []
 
-    # Имена, которые существуют в новом пространстве.
+    # Names present in the new search space.
     allowed = {"direction_scope", "direction_index"}
     for c in components:
         for suffix in ("max_weight", "max_weight_position",

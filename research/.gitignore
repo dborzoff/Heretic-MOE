@@ -1,0 +1,6 @@
+__pycache__/
+tools/__pycache__/
+*.jsonl
+*.log
+*.safetensors
+*.imatrix
