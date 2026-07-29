@@ -106,12 +106,78 @@ plugin = "heretic.scorers.perplexity.Perplexity"
 optimization = "minimize"
 ```
 
-## 4. CLI settings survive `--checkpoint-action continue`
+## 4. A warning when the front presses against the bounds
+
+Bounds encode an assumption about where the answer can lie. When the assumption
+is wrong, the search quietly hits a wall and returns the best of what it was
+*allowed* — which looks exactly like the best there is, if you only read the
+numbers. You have to look at where the winning points ended up.
+
+That cost us a whole search before we noticed. This checks the front after the
+run and says so:
+
+```
+Лучшие точки жмутся к границам поиска:
+  * mlp.down_proj.max_weight: 7 из 9 точек фронта у верхнему пределу (1.500)
+```
+
+Moving bounds mid-study is *not* the fix and is not attempted here: a
+distribution is fixed when the study is created and TPE builds its model on it,
+so changing it invalidates everything the sampler learned about that parameter.
+The check only reports, and points at the cheap way to act on it — restart with
+wider bounds, seeded from the points already found.
+
+## 5. Seeding a new study from a previous one
+
+`--seed-trials-from <journal>` enqueues the front points of an earlier study
+into a new one. This is what makes a changed objective affordable: stored
+objective values become meaningless and the study has to start over, but the
+parameter sets that reached the front are still the best guess available.
+
+Two things it has to get right, both of which fail silently otherwise — Optuna
+rejects the whole enqueued set and the run dies before its first trial. A
+journal stores the *internal* representation of a parameter, so a categorical
+is an index and has to be mapped back to its choice. And parameters whose
+component no longer exists must be dropped, with one rename applied
+deliberately: routed experts used to share a key with the shared expert and now
+have their own, and by mass that key meant the routed experts anyway.
+
+Default is twelve points, and deliberately modest. A seed helps most when the
+search space is unchanged; ours is not, so a seeded point fixes only the
+parameters that still mean what they used to and the rest get sampled anyway. A
+large seed spends the budget re-checking half-random points instead of exploring
+what is actually new.
+
+## 6. CLI settings survive `--checkpoint-action continue`
 
 Settings were restored wholesale from the study's stored JSON, discarding what
 was passed on the command line. The failure was quiet and expensive:
 `save_directory` is excluded from stored settings, so a resumed run prompted
 for it interactively and died unattended after hours of search.
+
+## Compatibility
+
+Component detection was run against seventeen local models, using this fork's
+own class selection and layer lookup. Fifteen see exactly the two keys upstream
+gives them — `attn.o_proj` and `mlp.down_proj` — so nothing about their
+behaviour changes:
+
+> Ministral-3-3B (both), Qwen2.5-3B-Instruct, Qwen2.5-VL-7B-Instruct,
+> Qwen3-0.6B-Base, Qwen3-4B, Qwen3-8B, Qwen3-VL-4B, Qwen3-VL-8B,
+> ERNIE-Image-pe, gemma-2-2b, gemma-2-2b-it, gemma-3-12b-it, gemma-4-E4B-it
+
+Two are hybrids and pick up the split: Qwen3.5-9B gains
+`attn.linear.out_proj`, and Qwen3.6-35B-A3B gains that plus
+`mlp.shared.down_proj`, with its fused experts on `mlp.experts.down_proj`.
+
+The full pipeline — direction, ablation, both scorers, rollback between trials,
+front selection — has been run end to end on gemma-2-2b-it, a plain dense
+model, as a check that none of this disturbs the ordinary path.
+
+**The widened bounds are the one change that affects every model.** Nothing is
+taken away, but the space is larger, so a fixed trial budget explores it more
+thinly. Worth knowing before running this on something that was already well
+served by the original bounds.
 
 ## Not done yet
 
