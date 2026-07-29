@@ -806,6 +806,8 @@ def run():
         if len(study.trials) == settings.n_trials:
             study.set_user_attr("finished", True)
 
+        report_bound_pressure(study)
+
     trial_loop_active = True
 
     while trial_loop_active:
@@ -1504,6 +1506,59 @@ def run():
                     else:
                         print(f"[red]Error: {formatted}[/]")
 
+
+
+def report_bound_pressure(study, threshold: float = 0.05) -> None:
+    """Сказать вслух, если лучшие точки стоят вплотную к краю пространства.
+
+    Границы поиска - это предположение автора о том, где может лежать ответ.
+    Когда предположение неверно, поиск молча упирается в стенку и отдаёт лучшее
+    из разрешённого, а не лучшее вообще. Отличить одно от другого по числам
+    нельзя - только посмотрев, где стоят найденные точки.
+
+    Нам это стоило дорого: на Qwen3.6 победители жались к трём пределам из
+    четырёх, и после расширения рекорд сдвинулся с 0.15 до 0.01 отказов. Сама
+    правка встала на 15-й слой из 40 - вдвое раньше, чем разрешал прежний
+    нижний предел в 0.6 глубины.
+
+    Двигать границы на ходу нельзя: распределение задаётся при создании
+    исследования, и TPE строит по нему свою модель. Поэтому только предупреждаем
+    - решение за человеком, а перезапуск с новыми границами стоит недорого.
+    """
+    from optuna.distributions import FloatDistribution, IntDistribution
+
+    front = study.best_trials
+    if len(front) < 3:
+        return
+
+    pressed = []
+    for name, dist in (front[0].distributions or {}).items():
+        if not isinstance(dist, (FloatDistribution, IntDistribution)):
+            continue
+        span = dist.high - dist.low
+        if span <= 0:
+            continue
+        values = [t.params[name] for t in front if name in t.params]
+        if not values:
+            continue
+        at_low = sum(1 for v in values if v - dist.low <= span * threshold)
+        at_high = sum(1 for v in values if dist.high - v <= span * threshold)
+        if at_high > len(values) / 2:
+            pressed.append((name, "верхнему", dist.high, at_high, len(values)))
+        elif at_low > len(values) / 2:
+            pressed.append((name, "нижнему", dist.low, at_low, len(values)))
+
+    if not pressed:
+        return
+    print()
+    print("[bold yellow]Лучшие точки жмутся к границам поиска:[/]")
+    for name, side, bound, n, total in pressed:
+        print(f"  * [bold]{name}[/]: {n} из {total} точек фронта у {side} "
+              f"пределу ({bound:.3f})")
+    print("  Это значит, что ответ может лежать за границей, а поиск отдал "
+          "лучшее из разрешённого.")
+    print("  Границы стоит расширить и перезапустить, засеяв найденными точками "
+          "(--seed-trials-from).")
 
 
 def load_seed_parameters(path: str, count: int, components: list[str]) -> list[dict]:
