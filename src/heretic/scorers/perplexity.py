@@ -145,8 +145,11 @@ class Perplexity(Scorer):
     def get_score(self, ctx: Context) -> Score:
         ppl = self._perplexity(ctx)
         rel = ppl / self._baseline - 1.0
+        # Без разметки: это же поле показывается в меню выбора точки фронта,
+        # где Rich не разбирается и теги печатаются как есть - "[bold]51.71[/]".
+        # Штатный KeywordRate по той же причине отдаёт голое "5/100".
         return Score(
             value=rel,
-            rich_display=f"[bold]{ppl:.4f}[/] ([bold]{rel * 100:+.2f}%[/] vs baseline)",
+            rich_display=f"{ppl:.4f} ({rel * 100:+.2f}% vs baseline)",
             md_display=f"{ppl:.4f} ({rel * 100:+.2f}%)",
         )
