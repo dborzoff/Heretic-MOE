@@ -16,6 +16,72 @@ Objective = Callable[[Trial], float | Sequence[float]]
 StudyCallback = Callable[[Study, FrozenTrial], None]
 
 
+def select_spread_points(
+    front: Sequence[tuple[Sequence[float], int]],
+    count: int,
+) -> list[tuple[Sequence[float], int]]:
+    """Select objective-space extremes, then greedily maximize separation."""
+
+    if count <= 0 or not front:
+        return []
+    if count >= len(front):
+        return list(front)
+
+    objective_count = len(front[0][0])
+    if objective_count == 0:
+        return list(front[:count])
+    if any(len(values) != objective_count for values, _ in front):
+        raise ValueError("All Pareto points must have the same objective count")
+
+    lows = [min(values[i] for values, _ in front) for i in range(objective_count)]
+    highs = [max(values[i] for values, _ in front) for i in range(objective_count)]
+
+    def normalized(values: Sequence[float]) -> tuple[float, ...]:
+        return tuple(
+            0.0 if highs[i] == lows[i] else (value - lows[i]) / (highs[i] - lows[i])
+            for i, value in enumerate(values)
+        )
+
+    coordinates = [normalized(values) for values, _ in front]
+    selected_indices: list[int] = []
+
+    for objective_index in range(objective_count):
+        candidate_index = min(
+            range(len(front)),
+            key=lambda index: (
+                front[index][0][objective_index],
+                tuple(front[index][0]),
+                front[index][1],
+            ),
+        )
+        if candidate_index not in selected_indices:
+            selected_indices.append(candidate_index)
+        if len(selected_indices) == count:
+            break
+
+    def squared_distance(left: tuple[float, ...], right: tuple[float, ...]) -> float:
+        return sum((a - b) ** 2 for a, b in zip(left, right))
+
+    while len(selected_indices) < count:
+        remaining = [
+            index for index in range(len(front)) if index not in selected_indices
+        ]
+        next_index = max(
+            remaining,
+            key=lambda index: (
+                min(
+                    squared_distance(coordinates[index], coordinates[selected])
+                    for selected in selected_indices
+                ),
+                tuple(-value for value in front[index][0]),
+                -front[index][1],
+            ),
+        )
+        selected_indices.append(next_index)
+
+    return [front[index] for index in selected_indices]
+
+
 class OptimizationRunner:
     """Run an Optuna study with a selectable exploration design.
 

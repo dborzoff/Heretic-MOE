@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from heretic.config import ScorerConfig, Settings, StartupDesign
+from heretic.config import ScorerConfig, SeedSelection, Settings, StartupDesign
 
 
 class ScorerConfigTests(unittest.TestCase):
@@ -56,6 +56,7 @@ class SearchSettingsTests(unittest.TestCase):
         self.assertEqual(settings.startup_design, StartupDesign.RANDOM)
         self.assertEqual(settings.parameter_importance_interval, 0)
         self.assertFalse(settings.optimization_only)
+        self.assertEqual(settings.seed_selection, SeedSelection.FIRST_OBJECTIVE)
 
     def test_sobol_and_optimization_only_are_explicit(self) -> None:
         with patch("sys.argv", ["test"]):
@@ -64,11 +65,13 @@ class SearchSettingsTests(unittest.TestCase):
                 startup_design="sobol",
                 parameter_importance_interval=20,
                 optimization_only=True,
+                seed_selection="spread",
             )
 
         self.assertEqual(settings.startup_design, StartupDesign.SOBOL)
         self.assertEqual(settings.parameter_importance_interval, 20)
         self.assertTrue(settings.optimization_only)
+        self.assertEqual(settings.seed_selection, SeedSelection.SPREAD)
 
 
 if __name__ == "__main__":

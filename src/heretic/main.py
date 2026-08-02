@@ -68,7 +68,7 @@ from rich.table import Table
 from rich.traceback import install
 
 from .analyzer import Analyzer
-from .config import ExportStrategy, QuantizationMethod
+from .config import ExportStrategy, QuantizationMethod, SeedSelection
 from .evaluator import Evaluator
 from .model import AbliterationParameters, Model, get_model_class
 from .reproduce import (
@@ -76,7 +76,7 @@ from .reproduce import (
     collect_reproducibles,
     load_reproduction_information,
 )
-from .search import OptimizationRunner
+from .search import OptimizationRunner, select_spread_points
 from .study_diagnostics import make_parameter_importance_callbacks
 from .system import empty_cache, get_accelerator_info
 from .utils import (
@@ -793,6 +793,7 @@ def run():
                 settings.seed_trials_from,
                 settings.seed_trials_count,
                 model.get_abliterable_components(),
+                settings.seed_selection,
             )
             for params in seeds:
                 study.enqueue_trial(params, skip_if_exists=True)
@@ -1577,7 +1578,12 @@ def report_bound_pressure(study, threshold: float = 0.05) -> None:
           "(--seed-trials-from).")
 
 
-def load_seed_parameters(path: str, count: int, components: list[str]) -> list[dict]:
+def load_seed_parameters(
+    path: str,
+    count: int,
+    components: list[str],
+    selection: SeedSelection = SeedSelection.FIRST_OBJECTIVE,
+) -> list[dict]:
     """Наборы параметров лучших точек прежнего исследования.
 
     Читаем журнал напрямую, а не через Optuna: у прежнего исследования другое
@@ -1643,9 +1649,13 @@ def load_seed_parameters(path: str, count: int, components: list[str]) -> list[d
         )
     ]
     front.sort(key=lambda x: x[0])
+    if selection == SeedSelection.SPREAD:
+        front = select_spread_points(front, count)
+    else:
+        front = front[:count]
 
     out = []
-    for _, t in front[:count]:
+    for _, t in front:
         kept = {}
         for name, raw in params.get(t, {}).items():
             new_name = name

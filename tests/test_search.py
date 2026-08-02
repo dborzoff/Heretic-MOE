@@ -9,7 +9,7 @@ from optuna.exceptions import ExperimentalWarning
 from optuna.samplers import QMCSampler, TPESampler
 
 from heretic.config import StartupDesign
-from heretic.search import OptimizationRunner
+from heretic.search import OptimizationRunner, select_spread_points
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 warnings.filterwarnings("ignore", category=ExperimentalWarning)
@@ -99,6 +99,26 @@ class OptimizationRunnerTests(unittest.TestCase):
         runner.optimize_to(study, objective, target_trial_count=7)
         self.assertEqual(len(study.trials), 7)
         self.assertIs(study.sampler, runner.tpe_sampler)
+
+
+class SpreadSelectionTests(unittest.TestCase):
+    def test_keeps_extremes_then_selects_interior_separation(self) -> None:
+        front = [
+            ((0.0, 1.0), 10),
+            ((0.2, 0.7), 11),
+            ((0.5, 0.5), 12),
+            ((0.7, 0.2), 13),
+            ((1.0, 0.0), 14),
+        ]
+
+        selected = select_spread_points(front, 3)
+
+        self.assertEqual([trial_id for _, trial_id in selected[:2]], [10, 14])
+        self.assertEqual(selected[2][1], 12)
+
+    def test_count_larger_than_front_keeps_all_points(self) -> None:
+        front = [((0.0, 1.0), 10), ((1.0, 0.0), 11)]
+        self.assertEqual(select_spread_points(front, 10), front)
 
 
 if __name__ == "__main__":

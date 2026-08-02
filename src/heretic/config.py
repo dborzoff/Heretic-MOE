@@ -49,6 +49,11 @@ class StartupDesign(str, Enum):
     SOBOL = "sobol"
 
 
+class SeedSelection(str, Enum):
+    FIRST_OBJECTIVE = "first_objective"
+    SPREAD = "spread"
+
+
 class DatasetSpecification(BaseModel):
     dataset: str = Field(
         description="Hugging Face dataset ID, or path to dataset on disk."
@@ -454,6 +459,15 @@ class Settings(BaseSettings):
             " then fixes only the parameters that still mean what they used to, and"
             " the rest are sampled anyway, so a large seed spends the budget"
             " re-checking half-random points instead of exploring."
+        ),
+    )
+
+    seed_selection: SeedSelection = Field(
+        default=SeedSelection.FIRST_OBJECTIVE,
+        description=(
+            'How to choose Pareto seeds: "first_objective" preserves the legacy '
+            'preference for the lowest first objective; "spread" keeps diverse '
+            "trade-offs across normalized objective space."
         ),
     )
 

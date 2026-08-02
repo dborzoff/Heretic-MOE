@@ -139,6 +139,10 @@ parameter_importance_interval = 0
 # full-fidelity study through seed_trials_from.
 optimization_only = false
 
+# When seed_trials_from is set, choose either the legacy lowest-first-objective
+# prefix or a diverse spread of points across the previous Pareto front.
+seed_selection = "first_objective"
+
 # Directory to save and load study progress to/from.
 study_checkpoint_dir = "checkpoints"
 
