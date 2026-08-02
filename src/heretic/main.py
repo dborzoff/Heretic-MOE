@@ -59,7 +59,6 @@ from huggingface_hub import HfApi, ModelCard, ModelCardData
 from lm_eval.models.huggingface import HFLM
 from optuna import Trial, TrialPruned
 from optuna.exceptions import ExperimentalWarning
-from optuna.samplers import TPESampler
 from optuna.storages import JournalStorage
 from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 from optuna.trial import FrozenTrial, TrialState, create_trial
@@ -77,6 +76,7 @@ from .reproduce import (
     collect_reproducibles,
     load_reproduction_information,
 )
+from .search import OptimizationRunner
 from .study_diagnostics import make_parameter_importance_callbacks
 from .system import empty_cache, get_accelerator_info
 from .utils import (
@@ -761,13 +761,13 @@ def run():
     )
 
     if not reproduction_mode:
+        optimization_runner = OptimizationRunner(
+            startup_design=settings.startup_design,
+            n_startup_trials=settings.n_startup_trials,
+            seed=settings.seed,
+        )
         study = optuna.create_study(
-            sampler=TPESampler(
-                n_startup_trials=settings.n_startup_trials,
-                n_ei_candidates=128,
-                multivariate=True,
-                seed=settings.seed,
-            ),
+            sampler=optimization_runner.initial_sampler,
             storage=storage,
             directions=directions,
             study_name="heretic",
@@ -800,9 +800,10 @@ def run():
             print(f"Enqueued [bold]{len(seeds)}[/] seed trials from a previous study.")
 
         try:
-            study.optimize(
+            optimization_runner.optimize_to(
+                study,
                 objective_wrapper,
-                n_trials=settings.n_trials - len(study.trials),
+                target_trial_count=settings.n_trials,
                 callbacks=study_callbacks,
             )
         except KeyboardInterrupt:
@@ -956,9 +957,10 @@ def run():
                     study.set_user_attr("finished", False)
 
                     try:
-                        study.optimize(
+                        optimization_runner.optimize_to(
+                            study,
                             objective_wrapper,
-                            n_trials=settings.n_trials - len(study.trials),
+                            target_trial_count=settings.n_trials,
                             callbacks=study_callbacks,
                         )
                     except KeyboardInterrupt:

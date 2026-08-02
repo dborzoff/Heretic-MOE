@@ -124,6 +124,11 @@ n_trials = 200
 # Number of trials that use random sampling for the purpose of exploration.
 n_startup_trials = 60
 
+# Exploration design for the first n_startup_trials. "random" preserves the
+# legacy multivariate-TPE startup. "sobol" uses a scrambled Sobol sequence and
+# then switches to multivariate TPE trained on those observations.
+startup_design = "random"
+
 # Write a text-free fANOVA parameter-importance report after every N completed
 # trials. The report is saved next to the study journal and does not influence
 # optimization. Set to 0 to disable.

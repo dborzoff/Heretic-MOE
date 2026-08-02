@@ -44,6 +44,11 @@ class ExportStrategy(str, Enum):
     ADAPTER = "adapter"
 
 
+class StartupDesign(str, Enum):
+    RANDOM = "random"
+    SOBOL = "sobol"
+
+
 class DatasetSpecification(BaseModel):
     dataset: str = Field(
         description="Hugging Face dataset ID, or path to dataset on disk."
@@ -399,6 +404,15 @@ class Settings(BaseSettings):
     n_startup_trials: NonNegativeInt = Field(
         default=60,
         description="Number of trials that use random sampling for the purpose of exploration.",
+    )
+
+    startup_design: StartupDesign = Field(
+        default=StartupDesign.RANDOM,
+        description=(
+            'Exploration design for the first n_startup_trials: "random" keeps '
+            'the legacy multivariate-TPE startup; "sobol" uses a scrambled Sobol '
+            "sequence before switching to multivariate TPE."
+        ),
     )
 
     parameter_importance_interval: NonNegativeInt = Field(
