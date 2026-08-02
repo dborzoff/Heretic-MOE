@@ -424,6 +424,15 @@ class Settings(BaseSettings):
         ),
     )
 
+    optimization_only: bool = Field(
+        default=False,
+        description=(
+            "Exit after optimization and journal diagnostics, without prompting "
+            "to restore, export, or benchmark a selected trial. Useful for a "
+            "discovery stage whose Pareto points seed a separate full-fidelity study."
+        ),
+    )
+
     seed_trials_from: str | None = Field(
         default=None,
         description=(

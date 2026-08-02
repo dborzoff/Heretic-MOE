@@ -134,6 +134,11 @@ startup_design = "random"
 # optimization. Set to 0 to disable.
 parameter_importance_interval = 0
 
+# Exit after optimization without restoring or exporting a selected trial.
+# This is useful for a cheap discovery study that will seed a separate
+# full-fidelity study through seed_trials_from.
+optimization_only = false
+
 # Directory to save and load study progress to/from.
 study_checkpoint_dir = "checkpoints"
 

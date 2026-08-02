@@ -817,6 +817,11 @@ def run():
 
         report_bound_pressure(study)
 
+        if settings.optimization_only:
+            print()
+            print("Optimization-only run completed; journal and diagnostics are saved.")
+            return
+
     trial_loop_active = True
 
     while trial_loop_active:
