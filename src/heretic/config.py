@@ -401,6 +401,15 @@ class Settings(BaseSettings):
         description="Number of trials that use random sampling for the purpose of exploration.",
     )
 
+    parameter_importance_interval: NonNegativeInt = Field(
+        default=0,
+        description=(
+            "Write a text-free fANOVA parameter-importance report after every N "
+            "completed trials (0 disables it). The report is diagnostic only and "
+            "does not alter Optuna sampling."
+        ),
+    )
+
     seed_trials_from: str | None = Field(
         default=None,
         description=(

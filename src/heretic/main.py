@@ -77,6 +77,7 @@ from .reproduce import (
     collect_reproducibles,
     load_reproduction_information,
 )
+from .study_diagnostics import make_parameter_importance_callbacks
 from .system import empty_cache, get_accelerator_info
 from .utils import (
     ask_if_unset,
@@ -752,6 +753,12 @@ def run():
     # Derive objective info from the configured scorers.
     objective_names = evaluator.get_objective_names()
     directions = evaluator.get_objective_directions()
+    study_callbacks = make_parameter_importance_callbacks(
+        interval=settings.parameter_importance_interval,
+        checkpoint_path=study_checkpoint_file,
+        objective_names=objective_names,
+        seed=settings.seed,
+    )
 
     if not reproduction_mode:
         study = optuna.create_study(
@@ -796,6 +803,7 @@ def run():
             study.optimize(
                 objective_wrapper,
                 n_trials=settings.n_trials - len(study.trials),
+                callbacks=study_callbacks,
             )
         except KeyboardInterrupt:
             # This additional handler takes care of the small chance that KeyboardInterrupt
@@ -951,6 +959,7 @@ def run():
                         study.optimize(
                             objective_wrapper,
                             n_trials=settings.n_trials - len(study.trials),
+                            callbacks=study_callbacks,
                         )
                     except KeyboardInterrupt:
                         pass
