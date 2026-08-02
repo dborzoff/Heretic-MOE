@@ -1,0 +1,47 @@
+{
+  "files": {
+    "direction_safe.jsonl": {
+      "rows": 272,
+      "sha256": "99e421b77df30f4c293120ef48d2872bae8f28a0d30525a506eacf4b58fed115",
+      "source_files": 17
+    },
+    "direction_unsafe.jsonl": {
+      "rows": 272,
+      "sha256": "13f0965fea984ac306037fdddd18c8979d8accdec210eec67da487ee41f8227e",
+      "source_files": 17
+    },
+    "final_holdout_safe.jsonl": {
+      "rows": 1700,
+      "sha256": "c578d941c212ae44834bf97b12dfacbc245393af8be3d6f933385fdbafb01c49",
+      "source_files": 17
+    },
+    "final_holdout_unsafe.jsonl": {
+      "rows": 1700,
+      "sha256": "d7844404b0978a580f009344e7b2cdc02078380fab3b1f59e3be651017db8f1d",
+      "source_files": 17
+    },
+    "micro_search_safe.jsonl": {
+      "rows": 68,
+      "sha256": "347b2fa5e581db9ed7e7496cb79493f449d66b6b9a1c7b45f8524d06652adf52",
+      "source_files": 17
+    },
+    "micro_search_unsafe.jsonl": {
+      "rows": 68,
+      "sha256": "d27ec74a0ee21e8ac2728f7aba079d5d03b1cdc56d23eef65c7b3d5d2ceb9422",
+      "source_files": 17
+    },
+    "search_safe.jsonl": {
+      "rows": 136,
+      "sha256": "28fae10688efaa98fc7d807a5d40ca3cc851349af36189bfa97c5beaf1494106",
+      "source_files": 17
+    },
+    "search_unsafe.jsonl": {
+      "rows": 136,
+      "sha256": "755ef3a9eb81c04016b7f4df3bcd51b72605a235e4c510db42ad224358bf8629",
+      "source_files": 17
+    }
+  },
+  "schema_version": 1,
+  "source_manifest": "F:\\AI\\heretic_test\\datasets\\heretic_multilingual_prompts_v1\\v3\\manifest_v3.json",
+  "source_manifest_sha256": "2b1ce7a121bd38bd7361b42ded8129ab1c18e3a146767d0109bfaee127e68b21"
+}
