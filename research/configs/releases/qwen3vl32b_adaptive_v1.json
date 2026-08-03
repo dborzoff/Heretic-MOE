@@ -2,7 +2,7 @@
   "status": "prepared_not_authorized",
   "source_commit": "be8a4160a5d77d1148c2aad2720db065719a2b05",
   "base_model": "Qwen/Qwen3-VL-32B-Instruct",
-  "base_revision": "5d9b308a59ab12e67147f191e184baf704185bd1",
+  "base_revision": "0cfaf48183f594c314753d30a4c4974bc75f3ccb",
   "local_reference": "F:/AI/hf_originals/Qwen__Qwen3-VL-32B-Instruct",
   "minimax_compatible_reference": "F:/AI/hf_originals/MiniMax__MiniMax-H3/HF/text_encoder",
   "target_repo": "DmitryDB/Qwen3-VL-32B-Instruct-Heretic-Adaptive-v1",

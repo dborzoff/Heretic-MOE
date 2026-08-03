@@ -7,7 +7,7 @@ go-ahead.
 ## Release target
 
 - Base: `Qwen/Qwen3-VL-32B-Instruct`
-- Frozen revision: `5d9b308a59ab12e67147f191e184baf704185bd1`
+- Frozen revision: `0cfaf48183f594c314753d30a4c4974bc75f3ccb`
 - New repository: `DmitryDB/Qwen3-VL-32B-Instruct-Heretic-Adaptive-v1`
 - Layout: `balanced/` and `max-removal/`
 - Publish BF16 Transformers checkpoints only. Quantization is deferred to the
