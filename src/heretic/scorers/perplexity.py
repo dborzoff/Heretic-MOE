@@ -56,7 +56,7 @@ from heretic.utils import print
 BUILTIN_PERPLEXITY_CORPORA = {
     "builtin://perplexity-reference-v1": (
         "perplexity_reference_v1.txt",
-        "49d7e8f6f3eeacc3fd95e8436bb28278746fdfd47994be4d1da46a36a6228fc3",
+        "1d6f25ca80bd49255212d67d7eff96763ab01abbd472c04b916ec62318857a9d",
     ),
 }
 
@@ -106,6 +106,10 @@ def load_perplexity_text(spec: DatasetSpecification) -> str:
         payload = (
             resources.files("heretic.data").joinpath(filename).read_bytes()
         )
+        # Git stores the frozen corpus with LF line endings. Normalize a
+        # Windows worktree's CRLF representation before validating and using
+        # it so the same committed corpus is byte-identical on every host.
+        payload = payload.replace(b"\r\n", b"\n")
         actual_sha256 = hashlib.sha256(payload).hexdigest()
         if actual_sha256 != expected_sha256:
             raise ValueError(
