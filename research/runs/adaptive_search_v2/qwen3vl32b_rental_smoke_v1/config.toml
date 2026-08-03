@@ -2,7 +2,8 @@ model = "/workspace/models/Qwen3-VL-32B-Instruct"
 dtypes = ["bfloat16"]
 device_map = "cuda:0"
 offload_outputs_to_cpu = true
-batch_size = 1
+batch_size = 0
+max_batch_size = 16
 max_response_length = 48
 
 row_normalization = "full"
