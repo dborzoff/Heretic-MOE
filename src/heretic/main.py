@@ -61,6 +61,7 @@ from optuna import Trial, TrialPruned
 from optuna.exceptions import ExperimentalWarning
 from optuna.storages import JournalStorage
 from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
+from optuna.study import Study
 from optuna.trial import FrozenTrial, TrialState, create_trial
 from pydantic import ValidationError
 from questionary import Choice, Style
@@ -863,12 +864,67 @@ def run():
     objective_names = evaluator.get_objective_names()
     directions = evaluator.get_objective_directions()
     constraint_names = evaluator.get_constraint_names()
+    primary_objective_index = 0
+    if settings.primary_objective is not None:
+        try:
+            primary_objective_index = objective_names.index(
+                settings.primary_objective
+            )
+        except ValueError as error:
+            raise ValueError(
+                "primary_objective must match one configured objective name; "
+                f"got {settings.primary_objective!r}, available={objective_names!r}"
+            ) from error
+
     study_callbacks = make_parameter_importance_callbacks(
         interval=settings.parameter_importance_interval,
         checkpoint_path=study_checkpoint_file,
         objective_names=objective_names,
         seed=settings.seed,
     )
+
+    if settings.leaderboard_size > 0:
+
+        def print_live_leaderboard(
+            study: Study, completed_trial: FrozenTrial
+        ) -> None:
+            del completed_trial
+            ranked = candidate_trials(
+                study.trials,
+                directions,
+                policy=settings.selection_policy,
+                constraint_count=len(constraint_names),
+                primary_objective_index=primary_objective_index,
+            )
+            if not ranked:
+                return
+
+            print()
+            print(
+                f"[bold cyan]Current top {min(settings.leaderboard_size, len(ranked))} "
+                "candidate(s):[/]"
+            )
+            for rank, candidate in enumerate(
+                ranked[: settings.leaderboard_size], start=1
+            ):
+                feasibility = (
+                    "feasible"
+                    if candidate.user_attrs.get("feasible", not constraint_names)
+                    else "INFEASIBLE"
+                )
+                score_parts = [
+                    f"{record['name']}: {record['score']['rich_display']}"
+                    for record in candidate.user_attrs.get("scores", [])
+                ]
+                display_index = candidate.user_attrs.get(
+                    "index", candidate.number + 1
+                )
+                print(
+                    f"  {rank}. Trial [bold]{display_index}[/] · {feasibility} · "
+                    + ", ".join(score_parts)
+                )
+
+        study_callbacks.append(print_live_leaderboard)
 
     if not reproduction_mode:
         optimization_runner = OptimizationRunner(
@@ -960,17 +1016,6 @@ def run():
             if not completed_trials:
                 raise KeyboardInterrupt
 
-            primary_objective_index = 0
-            if settings.primary_objective is not None:
-                try:
-                    primary_objective_index = objective_names.index(
-                        settings.primary_objective
-                    )
-                except ValueError as error:
-                    raise ValueError(
-                        "primary_objective must match one configured objective name; "
-                        f"got {settings.primary_objective!r}, available={objective_names!r}"
-                    ) from error
             sorted_trials = candidate_trials(
                 completed_trials,
                 directions,

@@ -16,6 +16,7 @@ conditional_components = false
 selection_policy = "feasible_lexicographic"
 primary_objective = "Sparse refusal geometry"
 parameter_importance_interval = 20
+leaderboard_size = 3
 optimization_only = true
 seed = 20260804
 checkpoint_action = "continue"

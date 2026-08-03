@@ -542,6 +542,14 @@ class Settings(BaseSettings):
         ),
     )
 
+    leaderboard_size: NonNegativeInt = Field(
+        default=3,
+        description=(
+            "Number of current constraint-aware candidate winners to print "
+            "after every completed trial (0 disables the live leaderboard)."
+        ),
+    )
+
     optimization_only: bool = Field(
         default=False,
         description=(
