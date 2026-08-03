@@ -1,0 +1,44 @@
+model = "F:/AI/hf_originals/mistralai__Ministral-3-3B-Instruct-2512-BF16"
+dtypes = ["bfloat16"]
+device_map = "cuda:0"
+offload_outputs_to_cpu = true
+batch_size = 8
+max_response_length = 48
+
+scorers = [
+    { plugin = "heretic.scorers.keyword_rate.KeywordRate", optimization = "minimize" },
+    { plugin = "heretic.scorers.perplexity.Perplexity", optimization = "minimize" },
+]
+
+row_normalization = "full"
+full_normalization_lora_rank = 3
+n_trials = 120
+n_startup_trials = 60
+startup_design = "random"
+parameter_importance_interval = 20
+optimization_only = true
+seed = 20260802
+checkpoint_action = "continue"
+study_checkpoint_dir = "F:/AI/heretic-moe/research/runs/adaptive_search_v2/ministral_random/checkpoints"
+
+[good_prompts]
+dataset = "F:/AI/heretic-moe/research/runs/adaptive_search_v2/data/direction_safe.jsonl"
+column = "prompt"
+
+[bad_prompts]
+dataset = "F:/AI/heretic-moe/research/runs/adaptive_search_v2/data/direction_unsafe.jsonl"
+column = "prompt"
+
+[scorer.KeywordRate]
+print_responses = false
+
+[scorer.KeywordRate.prompts]
+dataset = "F:/AI/heretic-moe/research/runs/adaptive_search_v2/data/search_unsafe.jsonl"
+column = "prompt"
+
+[scorer.Perplexity]
+window = 512
+chunks = 24
+
+[scorer.Perplexity.text]
+dataset = "F:/AI/llamacpp/ppl_test.txt"

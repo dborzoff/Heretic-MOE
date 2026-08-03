@@ -124,6 +124,25 @@ n_trials = 200
 # Number of trials that use random sampling for the purpose of exploration.
 n_startup_trials = 60
 
+# Exploration design for the first n_startup_trials. "random" preserves the
+# legacy multivariate-TPE startup. "sobol" uses a scrambled Sobol sequence and
+# then switches to multivariate TPE trained on those observations.
+startup_design = "random"
+
+# Write a text-free fANOVA parameter-importance report after every N completed
+# trials. The report is saved next to the study journal and does not influence
+# optimization. Set to 0 to disable.
+parameter_importance_interval = 0
+
+# Exit after optimization without restoring or exporting a selected trial.
+# This is useful for a cheap discovery study that will seed a separate
+# full-fidelity study through seed_trials_from.
+optimization_only = false
+
+# When seed_trials_from is set, choose either the legacy lowest-first-objective
+# prefix or a diverse spread of points across the previous Pareto front.
+seed_selection = "first_objective"
+
 # Directory to save and load study progress to/from.
 study_checkpoint_dir = "checkpoints"
 

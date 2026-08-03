@@ -36,12 +36,35 @@ Enable it in the scorer configuration:
     optimization = "minimize"
 """
 import torch
+from pathlib import Path
 from pydantic import BaseModel, Field
 
 from heretic.config import DatasetSpecification
 from heretic.plugin import Context
 from heretic.scorer import Score, Scorer
 from heretic.utils import print
+
+
+def load_perplexity_text(spec: DatasetSpecification) -> str:
+    """Load a local UTF-8 text file or a configured Hugging Face dataset column."""
+
+    local_text_path = Path(spec.dataset)
+    if local_text_path.is_file():
+        return local_text_path.read_text(encoding="utf-8")
+
+    from datasets import load_dataset
+
+    if spec.dataset.endswith("wikitext"):
+        dataset = load_dataset(
+            spec.dataset, "wikitext-2-raw-v1", split=spec.split
+        )
+    else:
+        dataset = load_dataset(spec.dataset, split=spec.split)
+    if spec.column is None:
+        raise ValueError(
+            "Perplexity dataset column is required for non-text-file inputs"
+        )
+    return "\n\n".join(text for text in dataset[spec.column] if text.strip())
 
 
 class Settings(BaseModel):
@@ -97,17 +120,9 @@ class Perplexity(Scorer):
         return m.model, m.tokenizer
 
     def _windows(self, ctx: Context):
-        """Tokenize and split the corpus once per run."""
-        from datasets import load_dataset
-
+        """Tokenize and split the configured corpus once per run."""
         spec = self.settings.text
-        # Wikitext also requires a configuration name. The Hub now rejects the
-        # bare "wikitext" dataset ID, which used to fail at startup.
-        if spec.dataset.endswith("wikitext"):
-            ds = load_dataset(spec.dataset, "wikitext-2-raw-v1", split=spec.split)
-        else:
-            ds = load_dataset(spec.dataset, split=spec.split)
-        text = "\n\n".join(t for t in ds[spec.column] if t.strip())
+        text = load_perplexity_text(spec)
 
         _, tok = self._model_and_tokenizer(ctx)
         ids = tok(text, return_tensors="pt").input_ids[0]

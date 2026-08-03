@@ -59,7 +59,6 @@ from huggingface_hub import HfApi, ModelCard, ModelCardData
 from lm_eval.models.huggingface import HFLM
 from optuna import Trial, TrialPruned
 from optuna.exceptions import ExperimentalWarning
-from optuna.samplers import TPESampler
 from optuna.storages import JournalStorage
 from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 from optuna.trial import FrozenTrial, TrialState, create_trial
@@ -69,7 +68,7 @@ from rich.table import Table
 from rich.traceback import install
 
 from .analyzer import Analyzer
-from .config import ExportStrategy, QuantizationMethod
+from .config import ExportStrategy, QuantizationMethod, SeedSelection
 from .evaluator import Evaluator
 from .model import AbliterationParameters, Model, get_model_class
 from .reproduce import (
@@ -77,6 +76,8 @@ from .reproduce import (
     collect_reproducibles,
     load_reproduction_information,
 )
+from .search import OptimizationRunner, select_spread_points
+from .study_diagnostics import make_parameter_importance_callbacks
 from .system import empty_cache, get_accelerator_info
 from .utils import (
     ask_if_unset,
@@ -406,10 +407,22 @@ def run():
             # Restoring stored settings discards command-line values. Some fields,
             # including save_directory and upload_repo_id, are excluded from the
             # journal entirely; losing them turns an unattended run interactive.
-            for _f in ("save_directory", "model_action", "upload_repo_id",
-                       "trial_index", "batch_size", "export_strategy"):
+            for _f in (
+                "save_directory",
+                "model_action",
+                "upload_repo_id",
+                "trial_index",
+                "restore_trial_number",
+                "batch_size",
+                "export_strategy",
+                "optimization_only",
+                "parallel_workers",
+                "worker_trial_budget",
+            ):
                 _v = getattr(_cli, _f, None)
-                if _v is not None:
+                if _v is not None and (
+                    _f != "optimization_only" or _f in _cli.model_fields_set
+                ):
                     setattr(settings, _f, _v)
                     print(f"From command line: {_f}={_v}")
         elif action == "restart":
@@ -600,7 +613,9 @@ def run():
 
     def objective(trial: Trial) -> tuple[float, ...]:
         nonlocal trial_index
-        trial_index += 1
+        # Optuna allocates trial numbers atomically in shared storage. Deriving the
+        # display index from that number keeps it unique across parallel workers.
+        trial_index = trial.number + 1
         trial.set_user_attr("index", trial_index)
 
         direction_scope = trial.suggest_categorical(
@@ -740,15 +755,22 @@ def run():
     # Derive objective info from the configured scorers.
     objective_names = evaluator.get_objective_names()
     directions = evaluator.get_objective_directions()
+    study_callbacks = make_parameter_importance_callbacks(
+        interval=settings.parameter_importance_interval,
+        checkpoint_path=study_checkpoint_file,
+        objective_names=objective_names,
+        seed=settings.seed,
+    )
 
     if not reproduction_mode:
+        optimization_runner = OptimizationRunner(
+            startup_design=settings.startup_design,
+            n_startup_trials=settings.n_startup_trials,
+            seed=settings.seed,
+            parallel_workers=settings.parallel_workers,
+        )
         study = optuna.create_study(
-            sampler=TPESampler(
-                n_startup_trials=settings.n_startup_trials,
-                n_ei_candidates=128,
-                multivariate=True,
-                seed=settings.seed,
-            ),
+            sampler=optimization_runner.initial_sampler,
             storage=storage,
             directions=directions,
             study_name="heretic",
@@ -772,6 +794,7 @@ def run():
                 settings.seed_trials_from,
                 settings.seed_trials_count,
                 model.get_abliterable_components(),
+                settings.seed_selection,
             )
             for params in seeds:
                 study.enqueue_trial(params, skip_if_exists=True)
@@ -779,10 +802,20 @@ def run():
             print(f"Enqueued [bold]{len(seeds)}[/] seed trials from a previous study.")
 
         try:
-            study.optimize(
-                objective_wrapper,
-                n_trials=settings.n_trials - len(study.trials),
-            )
+            if settings.worker_trial_budget is None:
+                optimization_runner.optimize_to(
+                    study,
+                    objective_wrapper,
+                    target_trial_count=settings.n_trials,
+                    callbacks=study_callbacks,
+                )
+            else:
+                optimization_runner.optimize_budget(
+                    study,
+                    objective_wrapper,
+                    trial_budget=settings.worker_trial_budget,
+                    callbacks=study_callbacks,
+                )
         except KeyboardInterrupt:
             # This additional handler takes care of the small chance that KeyboardInterrupt
             # is raised just between trials, which wouldn't be caught by the handler
@@ -793,6 +826,11 @@ def run():
             study.set_user_attr("finished", True)
 
         report_bound_pressure(study)
+
+        if settings.optimization_only:
+            print()
+            print("Optimization-only run completed; journal and diagnostics are saved.")
+            return
 
     trial_loop_active = True
 
@@ -872,7 +910,10 @@ def run():
 
         while trial_loop_active:
             # Ensure a predefined trial is only processed once.
-            if settings.trial_index is not None:
+            if (
+                settings.trial_index is not None
+                or settings.restore_trial_number is not None
+            ):
                 trial_loop_active = False
 
             if reproduction_mode:
@@ -893,10 +934,28 @@ def run():
                 if settings.trial_index is None:
                     print()
 
+                if settings.restore_trial_number is not None:
+                    selected_trial = next(
+                        (
+                            candidate
+                            for candidate in completed_trials
+                            if candidate.number == settings.restore_trial_number
+                        ),
+                        None,
+                    )
+                    if selected_trial is None:
+                        raise ValueError(
+                            "restore_trial_number "
+                            f"{settings.restore_trial_number} does not name a "
+                            "completed trial"
+                        )
+                elif settings.trial_index is not None:
+                    selected_trial = sorted_trials[settings.trial_index]
+                else:
+                    selected_trial = None
+
                 trial = ask_if_unset(
-                    None
-                    if settings.trial_index is None
-                    else sorted_trials[settings.trial_index],
+                    selected_trial,
                     questionary.select(
                         "Which trial do you want to use?",
                         choices=choices,
@@ -934,9 +993,11 @@ def run():
                     study.set_user_attr("finished", False)
 
                     try:
-                        study.optimize(
+                        optimization_runner.optimize_to(
+                            study,
                             objective_wrapper,
-                            n_trials=settings.n_trials - len(study.trials),
+                            target_trial_count=settings.n_trials,
+                            callbacks=study_callbacks,
                         )
                     except KeyboardInterrupt:
                         pass
@@ -1544,7 +1605,12 @@ def report_bound_pressure(study, threshold: float = 0.05) -> None:
           "(--seed-trials-from).")
 
 
-def load_seed_parameters(path: str, count: int, components: list[str]) -> list[dict]:
+def load_seed_parameters(
+    path: str,
+    count: int,
+    components: list[str],
+    selection: SeedSelection = SeedSelection.FIRST_OBJECTIVE,
+) -> list[dict]:
     """Return parameter sets from a previous study's Pareto front.
 
     Read the journal directly because its objective count may differ from the
@@ -1608,9 +1674,13 @@ def load_seed_parameters(path: str, count: int, components: list[str]) -> list[d
         )
     ]
     front.sort(key=lambda x: x[0])
+    if selection == SeedSelection.SPREAD:
+        front = select_spread_points(front, count)
+    else:
+        front = front[:count]
 
     out = []
-    for _, t in front[:count]:
+    for _, t in front:
         kept = {}
         for name, raw in params.get(t, {}).items():
             new_name = name

@@ -44,6 +44,17 @@ class ExportStrategy(str, Enum):
     ADAPTER = "adapter"
 
 
+class StartupDesign(str, Enum):
+    RANDOM = "random"
+    SOBOL = "sobol"
+    HYBRID = "hybrid"
+
+
+class SeedSelection(str, Enum):
+    FIRST_OBJECTIVE = "first_objective"
+    SPREAD = "spread"
+
+
 class DatasetSpecification(BaseModel):
     dataset: str = Field(
         description="Hugging Face dataset ID, or path to dataset on disk."
@@ -401,6 +412,53 @@ class Settings(BaseSettings):
         description="Number of trials that use random sampling for the purpose of exploration.",
     )
 
+    startup_design: StartupDesign = Field(
+        default=StartupDesign.RANDOM,
+        description=(
+            'Exploration design for the first n_startup_trials: "random" keeps '
+            'the legacy multivariate-TPE startup; "sobol" uses a scrambled Sobol '
+            'sequence; "hybrid" alternates Random and scrambled Sobol trials in '
+            "one shared study. Every non-random design then switches to "
+            "multivariate TPE with the complete exploration history."
+        ),
+    )
+
+    parameter_importance_interval: NonNegativeInt = Field(
+        default=0,
+        description=(
+            "Write a text-free fANOVA parameter-importance report after every N "
+            "completed trials (0 disables it). The report is diagnostic only and "
+            "does not alter Optuna sampling."
+        ),
+    )
+
+    optimization_only: bool = Field(
+        default=False,
+        description=(
+            "Exit after optimization and journal diagnostics, without prompting "
+            "to restore, export, or benchmark a selected trial. Useful for a "
+            "discovery stage whose Pareto points seed a separate full-fidelity study."
+        ),
+    )
+
+    parallel_workers: PositiveInt = Field(
+        default=1,
+        description=(
+            "Number of concurrent Optuna workers sharing this study. Values above "
+            "1 enable TPE constant-liar handling for running trials."
+        ),
+    )
+
+    worker_trial_budget: PositiveInt | None = Field(
+        default=None,
+        description=(
+            "Exact number of trials assigned to this process. Intended for a "
+            "parallel continuation whose per-worker budgets sum to the remaining "
+            "global trial target."
+        ),
+        exclude=True,
+    )
+
     seed_trials_from: str | None = Field(
         default=None,
         description=(
@@ -416,6 +474,15 @@ class Settings(BaseSettings):
             "Number of old front points to enqueue. Each consumes one trial under"
             " the new objective. Keep this modest after changing the search space:"
             " a large seed re-evaluates half-sampled points instead of exploring."
+        ),
+    )
+
+    seed_selection: SeedSelection = Field(
+        default=SeedSelection.FIRST_OBJECTIVE,
+        description=(
+            'How to choose Pareto seeds: "first_objective" preserves the legacy '
+            'preference for the lowest first objective; "spread" keeps diverse '
+            "trade-offs across normalized objective space."
         ),
     )
 
@@ -513,6 +580,16 @@ class Settings(BaseSettings):
     trial_index: NonNegativeInt | None = Field(
         default=None,
         description="Index (in the sorted Pareto front) of the trial to use, or unset to prompt the user.",
+    )
+
+    restore_trial_number: NonNegativeInt | None = Field(
+        default=None,
+        description=(
+            "Exact Optuna trial number to restore for unattended export. Unlike "
+            "trial_index, this remains stable when another study changes the "
+            "combined Pareto ordering."
+        ),
+        exclude=True,
     )
 
     n_additional_trials: PositiveInt | None = Field(
