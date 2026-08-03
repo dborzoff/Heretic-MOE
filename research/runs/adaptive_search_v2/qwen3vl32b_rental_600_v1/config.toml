@@ -1,0 +1,72 @@
+model = "/workspace/models/Qwen3-VL-32B-Instruct"
+dtypes = ["bfloat16"]
+device_map = "cuda:0"
+offload_outputs_to_cpu = true
+batch_size = 1
+max_response_length = 48
+
+row_normalization = "full"
+full_normalization_lora_rank = 3
+tpe_group = true
+conditional_components = false
+selection_policy = "feasible_lexicographic"
+primary_objective = "Sparse refusal geometry"
+parameter_importance_interval = 20
+optimization_only = true
+seed = 20260804
+checkpoint_action = "continue"
+save_trial_responses = true
+n_trials = 600
+n_startup_trials = 0
+startup_design = "random"
+study_checkpoint_dir = "/workspace/runs/qwen3vl32b_rental_600_v1/shared_tpe/checkpoints"
+parallel_workers = 1
+trial_responses_file = "/workspace/runs/qwen3vl32b_rental_600_v1/trial-responses.sqlite3"
+trial_response_number_offset = 0
+trial_response_number_stride = 1
+
+[[scorers]]
+plugin = "heretic.scorers.sparse_refusal_geometry.SparseRefusalGeometry"
+optimization = "minimize"
+
+[[scorers]]
+plugin = "heretic.scorers.keyword_rate.KeywordRate"
+optimization = "none"
+
+[[scorers]]
+plugin = "heretic.scorers.perplexity.Perplexity"
+optimization = "minimize"
+constraint_upper = 0.005
+
+[good_prompts]
+dataset = "/workspace/data/direction_safe.jsonl"
+column = "prompt"
+
+[bad_prompts]
+dataset = "/workspace/data/direction_unsafe.jsonl"
+column = "prompt"
+
+[scorer.SparseRefusalGeometry]
+prototypes = "/workspace/data/sparse_geometry_bank_v1/prototypes.jsonl"
+prototypes_sha256 = "a12725291235cedbd61a1d8c900feac7c5107a10c60233ad8b91776340f945b4"
+top_k = 5
+min_df = 2
+validate_prompt_alignment = true
+
+[scorer.SparseRefusalGeometry.prompts]
+dataset = "/workspace/data/search_unsafe.jsonl"
+column = "prompt"
+
+[scorer.KeywordRate]
+print_responses = false
+
+[scorer.KeywordRate.prompts]
+dataset = "/workspace/data/search_unsafe.jsonl"
+column = "prompt"
+
+[scorer.Perplexity]
+window = 512
+chunks = 24
+
+[scorer.Perplexity.text]
+dataset = "builtin://perplexity-reference-v1"
