@@ -419,6 +419,11 @@ def run():
                 "export_strategy",
                 "parallel_workers",
                 "worker_trial_budget",
+                "seed",
+                "save_trial_responses",
+                "trial_responses_file",
+                "trial_response_number_offset",
+                "trial_response_number_stride",
             )
             # These fields are archived in the journal, but an explicitly supplied
             # value is a legitimate continuation control. In particular,
@@ -743,9 +748,12 @@ def run():
         trial.set_user_attr("parameters", {k: asdict(v) for k, v in parameters.items()})
         trial.set_user_attr("component_enabled", component_enabled)
 
+        worker_label = os.environ.get("HERETIC_WORKER_LABEL", "").strip()
+        worker_prefix = f"[bold cyan]{worker_label}[/] | " if worker_label else ""
         print()
         print(
-            f"Running trial [bold]{trial_index}[/] of [bold]{settings.n_trials}[/]..."
+            f"{worker_prefix}Running trial [bold]{trial_index}[/] "
+            f"of [bold]{settings.n_trials}[/]..."
         )
         print("* Parameters:")
         for name, value in get_trial_parameters(trial).items():
@@ -756,7 +764,7 @@ def run():
         model.abliterate(residual_directions, direction_index, parameters)
         edit_telemetry = model.get_last_edit_telemetry()
         print("* Evaluating...")
-        scores = evaluator.get_scores()
+        scores = evaluator.get_scores(response_archive_id=trial.number)
         objective_values = evaluator.get_objective_values(scores)
         constraint_values = evaluator.get_constraint_values(scores)
         trial.set_user_attr("constraints", list(constraint_values))
@@ -775,8 +783,12 @@ def run():
         print()
         print(f"[grey50]Elapsed time: [bold]{format_duration(elapsed_time)}[/][/]")
         if trial_index < settings.n_trials:
+            worker_count = max(settings.parallel_workers, 1)
+            worker_word = "GPU" if worker_count == 1 else "GPUs"
             print(
-                f"[grey50]Estimated remaining time: [bold]{format_duration(remaining_time)}[/][/]"
+                "[grey50]Estimated study remaining time "
+                f"([bold]{worker_count} {worker_word}[/]): "
+                f"[bold]{format_duration(remaining_time)}[/][/]"
             )
         trial.set_user_attr(
             "scores",
@@ -865,9 +877,13 @@ def run():
                 settings.seed_trials_count,
                 model.get_abliterable_components(),
                 settings.seed_selection,
+                settings.seed_trials_additional_numbers,
             )
             for params in seeds:
-                study.enqueue_trial(params, skip_if_exists=True)
+                study.enqueue_trial(
+                    params,
+                    skip_if_exists=not settings.seed_trials_preserve_duplicates,
+                )
             print()
             print(f"Enqueued [bold]{len(seeds)}[/] seed trials from a previous study.")
 

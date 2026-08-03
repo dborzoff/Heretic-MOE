@@ -1055,6 +1055,8 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "questionary" },
     { name = "rich" },
+    { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scikit-learn", version = "1.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "tomli-w" },
     { name = "torch" },
     { name = "torchvision" },
@@ -1068,8 +1070,6 @@ research = [
     { name = "imageio" },
     { name = "matplotlib" },
     { name = "pacmap" },
-    { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scikit-learn", version = "1.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 
 [package.dev-dependencies]
@@ -1099,7 +1099,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = "~=2.13" },
     { name = "questionary", specifier = "~=2.1" },
     { name = "rich", specifier = "~=14.3" },
-    { name = "scikit-learn", marker = "extra == 'research'", specifier = "~=1.7" },
+    { name = "scikit-learn", specifier = "~=1.7" },
     { name = "tomli-w", specifier = "~=1.2" },
     { name = "torch" },
     { name = "torchvision" },

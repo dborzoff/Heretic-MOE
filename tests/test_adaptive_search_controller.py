@@ -51,6 +51,32 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
                     allowed_updates=frozenset({"n_trials"}),
                 )
 
+    def test_total_exploration_is_split_evenly_between_branches(self) -> None:
+        self.assertEqual(controller.split_worker_budget(120, 2), [60, 60])
+
+    def test_remaining_tpe_budget_is_split_between_two_gpus(self) -> None:
+        self.assertEqual(controller.split_worker_budget(600 - 120, 2), [240, 240])
+
+    def test_stage_config_maps_branch_trials_to_even_numbers(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = controller.stage_config(
+                {"model": "example/model", "save_trial_responses": True},
+                checkpoint_dir=root / "checkpoints",
+                n_trials=60,
+                n_startup_trials=60,
+                startup_design="random",
+                response_archive=root / "trial-responses.sqlite3",
+                response_number_offset=0,
+                response_number_stride=2,
+                parallel_workers=1,
+            )
+
+        self.assertEqual(config["n_trials"], 60)
+        self.assertEqual(config["n_startup_trials"], 60)
+        self.assertEqual(config["trial_response_number_offset"], 0)
+        self.assertEqual(config["trial_response_number_stride"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

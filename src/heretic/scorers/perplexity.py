@@ -27,7 +27,10 @@ returns the relative increase over the baseline model:
     value = perplexity / perplexity_baseline - 1
 
 Zero means the model predicts the text as well as before. A value of 0.03 means
-three percent worse. This keeps the result near the scale expected by Scorer.
+three percent worse. A negative value is valid: it means lower perplexity on
+this fixed sample, not negative perplexity. Diagnostics include a paired
+window-level confidence interval so small changes can be distinguished from
+sampling variation. This keeps the result near the scale expected by Scorer.
 
 Enable it in the scorer configuration:
 
@@ -35,6 +38,11 @@ Enable it in the scorer configuration:
     plugin = "heretic.scorers.perplexity.Perplexity"
     optimization = "minimize"
 """
+import hashlib
+from importlib import resources
+from math import expm1, sqrt
+from statistics import fmean, stdev
+
 import torch
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -45,8 +53,65 @@ from heretic.scorer import Score, Scorer
 from heretic.utils import print
 
 
+BUILTIN_PERPLEXITY_CORPORA = {
+    "builtin://perplexity-reference-v1": (
+        "perplexity_reference_v1.txt",
+        "49d7e8f6f3eeacc3fd95e8436bb28278746fdfd47994be4d1da46a36a6228fc3",
+    ),
+}
+
+
+def paired_relative_perplexity_interval(
+    window_nll: list[float],
+    baseline_window_nll: list[float],
+    confidence_z: float = 1.959963984540054,
+) -> dict[str, float | bool | int]:
+    """Estimate uncertainty of the paired relative perplexity change.
+
+    Each edited window is paired with the same baseline window.  The interval is
+    computed in mean-NLL space and transformed back to relative perplexity.  It
+    describes uncertainty across the configured text windows; it is diagnostic
+    only and deliberately does not clamp or replace the raw optimization value.
+    """
+
+    if len(window_nll) != len(baseline_window_nll):
+        raise ValueError("Current and baseline perplexity windows must match")
+    if not window_nll:
+        raise ValueError("At least one perplexity window is required")
+
+    deltas = [
+        current - baseline
+        for current, baseline in zip(window_nll, baseline_window_nll, strict=True)
+    ]
+    mean_delta = fmean(deltas)
+    standard_error = stdev(deltas) / sqrt(len(deltas)) if len(deltas) > 1 else 0.0
+    lower = expm1(mean_delta - confidence_z * standard_error)
+    upper = expm1(mean_delta + confidence_z * standard_error)
+    return {
+        "paired_window_count": len(deltas),
+        "paired_nll_delta_mean": mean_delta,
+        "paired_nll_delta_standard_error": standard_error,
+        "relative_change_ci95_lower": lower,
+        "relative_change_ci95_upper": upper,
+        "statistically_distinguishable_from_baseline": lower > 0.0 or upper < 0.0,
+    }
+
+
 def load_perplexity_text(spec: DatasetSpecification) -> str:
     """Load a local UTF-8 text file or a configured Hugging Face dataset column."""
+
+    builtin = BUILTIN_PERPLEXITY_CORPORA.get(spec.dataset)
+    if builtin is not None:
+        filename, expected_sha256 = builtin
+        payload = (
+            resources.files("heretic.data").joinpath(filename).read_bytes()
+        )
+        actual_sha256 = hashlib.sha256(payload).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise ValueError(
+                f"Built-in perplexity corpus hash mismatch: {actual_sha256}"
+            )
+        return payload.decode("utf-8")
 
     local_text_path = Path(spec.dataset)
     if local_text_path.is_file():
@@ -70,11 +135,12 @@ def load_perplexity_text(spec: DatasetSpecification) -> str:
 class Settings(BaseModel):
     text: DatasetSpecification = Field(
         default=DatasetSpecification(
-            dataset="Salesforce/wikitext",
-            split="test",
-            column="text",
+            dataset="builtin://perplexity-reference-v1",
         ),
-        description="Text corpus used to measure perplexity.",
+        description=(
+            "Text corpus used to measure perplexity. The default is bundled "
+            "with Heretic so offline and remote runs use identical bytes."
+        ),
     )
     window: int = Field(
         default=512,
@@ -167,6 +233,9 @@ class Perplexity(Scorer):
     def get_score(self, ctx: Context) -> Score:
         ppl, window_nll, token_count = self._perplexity(ctx)
         rel = ppl / self._baseline - 1.0
+        uncertainty = paired_relative_perplexity_interval(
+            window_nll, self._baseline_window_nll
+        )
         # The front-selection menu prints this field without Rich parsing.
         # Markup would appear verbatim, as in "[bold]51.71[/]".
         return Score(
@@ -179,5 +248,6 @@ class Perplexity(Scorer):
                 "token_count": token_count,
                 "window_nll": window_nll,
                 "baseline_window_nll": self._baseline_window_nll,
+                **uncertainty,
             },
         )

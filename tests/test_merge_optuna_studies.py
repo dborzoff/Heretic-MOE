@@ -1,10 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 import importlib.util
+import json
+import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import optuna
+from optuna.storages import JournalStorage
+from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 
 
 def load_merge_module():
@@ -20,6 +27,26 @@ merge = load_merge_module()
 
 
 class MergeContractTests(unittest.TestCase):
+    def test_round_robin_merge_assigns_random_even_and_sobol_odd(self) -> None:
+        random = [
+            ("random", SimpleNamespace(number=number)) for number in range(3)
+        ]
+        sobol = [("sobol", SimpleNamespace(number=number)) for number in range(3)]
+
+        ordered = merge.order_source_trials([random, sobol], "round-robin")
+
+        self.assertEqual(
+            [(source, trial.number) for source, trial in ordered],
+            [
+                ("random", 0),
+                ("sobol", 0),
+                ("random", 1),
+                ("sobol", 1),
+                ("random", 2),
+                ("sobol", 2),
+            ],
+        )
+
     def test_stage_controls_do_not_change_contract(self) -> None:
         random_settings = {
             "model": "example/model",
@@ -69,6 +96,77 @@ class MergeContractTests(unittest.TestCase):
 
         self.assertIn("component.enabled", distributions)
         self.assertTrue(set(distributions).issubset({"component.enabled", "component.x"}))
+
+    def test_round_robin_merge_writes_one_resumable_journal(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = []
+            for name, design in (("random", "random"), ("sobol", "sobol")):
+                journal = root / f"{name}.jsonl"
+                storage = JournalStorage(
+                    JournalFileBackend(
+                        str(journal),
+                        lock_obj=JournalFileOpenLock(str(journal)),
+                    )
+                )
+                study = optuna.create_study(
+                    storage=storage,
+                    study_name="heretic",
+                    direction="minimize",
+                )
+                study.set_user_attr(
+                    "settings",
+                    json.dumps(
+                        {
+                            "model": "example/model",
+                            "scorers": [
+                                {
+                                    "plugin": "KeywordRate",
+                                    "optimization": "minimize",
+                                }
+                            ],
+                            "n_trials": 2,
+                            "n_startup_trials": 2,
+                            "startup_design": design,
+                            "seed": 7,
+                            "device_map": "cuda:0",
+                        }
+                    ),
+                )
+                study.set_user_attr("constraint_names", [])
+                study.optimize(
+                    lambda trial: trial.suggest_float("x", 0.0, 1.0),
+                    n_trials=2,
+                )
+                sources.append((name, journal))
+
+            output = root / "merged.jsonl"
+            argv = [
+                "merge_optuna_studies.py",
+                "--source",
+                f"random={sources[0][1]}",
+                "--source",
+                f"sobol={sources[1][1]}",
+                "--output",
+                str(output),
+                "--target-trials",
+                "6",
+                "--order",
+                "round-robin",
+            ]
+            with patch.object(sys, "argv", argv):
+                merge.main()
+
+            merged = merge.load_study(output)
+            self.assertEqual(
+                [trial.user_attrs["merged_source"] for trial in merged.trials],
+                ["random", "sobol", "random", "sobol"],
+            )
+            manifest = json.loads(
+                output.with_suffix(".jsonl.merge.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["merge_order"], "round-robin")
+            self.assertEqual(manifest["merged_prefix_trials"], 4)
 
 
 if __name__ == "__main__":

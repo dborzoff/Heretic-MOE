@@ -22,6 +22,7 @@ def load_seed_parameters(
     count: int,
     components: list[str],
     selection: SeedSelection = SeedSelection.FIRST_OBJECTIVE,
+    additional_trial_numbers: list[int] | None = None,
 ) -> list[dict]:
     """Load external parameter values from a previous feasible Pareto front.
 
@@ -50,14 +51,17 @@ def load_seed_parameters(
     completed = [
         trial for trial in study.trials if trial.state == TrialState.COMPLETE
     ]
-    constraint_count = len(study.user_attrs.get("constraint_names", []))
-    front = candidate_trials(
-        completed,
-        study.directions,
-        policy=SelectionPolicy.FEASIBLE_LEXICOGRAPHIC,
-        constraint_count=constraint_count,
-        primary_objective_index=0,
-    )
+    if selection == SeedSelection.ALL:
+        selected = completed[:count] if count else completed
+    else:
+        constraint_count = len(study.user_attrs.get("constraint_names", []))
+        front = candidate_trials(
+            completed,
+            study.directions,
+            policy=SelectionPolicy.FEASIBLE_LEXICOGRAPHIC,
+            constraint_count=constraint_count,
+            primary_objective_index=0,
+        )
 
     if selection == SeedSelection.SPREAD:
         coordinates = [
@@ -69,8 +73,20 @@ def load_seed_parameters(
             for _, trial_number in select_spread_points(coordinates, count)
         }
         selected = [trial for trial in front if trial.number in selected_numbers]
-    else:
+    elif selection == SeedSelection.FIRST_OBJECTIVE:
         selected = front[:count]
+
+    if additional_trial_numbers:
+        completed_by_number = {trial.number: trial for trial in completed}
+        selected_numbers = {trial.number for trial in selected}
+        for trial_number in additional_trial_numbers:
+            if trial_number not in completed_by_number:
+                raise ValueError(
+                    f"Seed trial {trial_number} is not complete in the source study"
+                )
+            if trial_number not in selected_numbers:
+                selected.append(completed_by_number[trial_number])
+                selected_numbers.add(trial_number)
 
     allowed = {"direction_scope", "direction_index"}
     for component in components:
@@ -88,10 +104,13 @@ def load_seed_parameters(
         kept: dict = {}
         for name, value in trial.params.items():
             new_name = name
-            for old_prefix, new_prefix in RENAMED_COMPONENT_PREFIXES.items():
-                if name.startswith(old_prefix):
-                    new_name = new_prefix + name[len(old_prefix) :]
-                    break
+            if name not in allowed:
+                for old_prefix, new_prefix in RENAMED_COMPONENT_PREFIXES.items():
+                    if name.startswith(old_prefix):
+                        renamed = new_prefix + name[len(old_prefix) :]
+                        if renamed in allowed:
+                            new_name = renamed
+                        break
             if new_name in allowed:
                 kept[new_name] = value
         if kept:

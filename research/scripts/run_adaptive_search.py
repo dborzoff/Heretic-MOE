@@ -22,6 +22,9 @@ from pathlib import Path
 from typing import Any
 
 import tomli_w
+import optuna
+from optuna.storages import JournalStorage
+from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 
 
 @dataclass(frozen=True)
@@ -43,12 +46,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-config", type=Path, required=True)
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument("--heretic", type=Path, required=True)
-    parser.add_argument("--branch-trials", type=int, default=120)
-    parser.add_argument("--startup-trials", type=int, default=60)
+    parser.add_argument(
+        "--exploration-trials",
+        type=int,
+        default=120,
+        help=(
+            "Total exploration prefix across both GPUs. It is split evenly: "
+            "half Random and half scrambled Sobol."
+        ),
+    )
     parser.add_argument("--target-trials", type=int, default=600)
     parser.add_argument("--random-device", default="0")
     parser.add_argument("--sobol-device", default="1")
-    parser.add_argument("--parallel", action="store_true")
+    parser.add_argument(
+        "--sequential-exploration",
+        action="store_true",
+        help="Debug mode: run Random and Sobol one after another.",
+    )
+    parser.add_argument(
+        "--visible-worker-windows",
+        action="store_true",
+        help=(
+            "On Windows, run every GPU stage in a separately titled console "
+            "and tee its output to a stage-local log."
+        ),
+    )
     parser.add_argument(
         "--continue-shared-only",
         action="store_true",
@@ -86,6 +108,10 @@ def stage_config(
     n_trials: int,
     n_startup_trials: int,
     startup_design: str,
+    response_archive: Path,
+    response_number_offset: int,
+    response_number_stride: int,
+    parallel_workers: int,
 ) -> dict[str, Any]:
     config = dict(base)
     config.update(
@@ -97,6 +123,10 @@ def stage_config(
             "optimization_only": True,
             "checkpoint_action": "continue",
             "study_checkpoint_dir": checkpoint_dir.as_posix(),
+            "parallel_workers": parallel_workers,
+            "trial_responses_file": response_archive.as_posix(),
+            "trial_response_number_offset": response_number_offset,
+            "trial_response_number_stride": response_number_stride,
         }
     )
     return config
@@ -145,6 +175,10 @@ def build_stage(
     n_startup_trials: int,
     startup_design: str,
     device: str | None,
+    response_archive: Path,
+    response_number_offset: int,
+    response_number_stride: int,
+    parallel_workers: int,
     dry_run: bool,
     allowed_config_updates: frozenset[str] = frozenset(),
 ) -> Stage:
@@ -157,6 +191,10 @@ def build_stage(
         n_trials=n_trials,
         n_startup_trials=n_startup_trials,
         startup_design=startup_design,
+        response_archive=response_archive,
+        response_number_offset=response_number_offset,
+        response_number_stride=response_number_stride,
+        parallel_workers=parallel_workers,
     )
     write_managed_config(
         config_path,
@@ -174,18 +212,34 @@ def process_environment(device: str | None) -> dict[str, str]:
     environment.setdefault("TRANSFORMERS_OFFLINE", "1")
     if device is not None:
         environment["CUDA_VISIBLE_DEVICES"] = device
+        environment["HERETIC_WORKER_LABEL"] = f"GPU {device}"
     return environment
 
 
-def start_stage(stage: Stage, executable: Path, *, dry_run: bool) -> subprocess.Popen:
-    command = [str(executable)]
+def powershell_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def start_stage(
+    stage: Stage,
+    executable: Path,
+    *,
+    dry_run: bool,
+    command_args: tuple[str, ...] = (),
+    display_name: str | None = None,
+    device: str | None = None,
+    visible_worker_window: bool = False,
+) -> subprocess.Popen:
+    command = [str(executable), *command_args]
+    effective_device = stage.device if device is None else device
+    effective_name = display_name or stage.name
     print(
         json.dumps(
             {
                 "event": "stage_start",
-                "stage": stage.name,
+                "stage": effective_name,
                 "cwd": str(stage.directory),
-                "device": stage.device,
+                "device": effective_device,
                 "command": command,
             },
             sort_keys=True,
@@ -197,10 +251,37 @@ def start_stage(stage: Stage, executable: Path, *, dry_run: bool) -> subprocess.
             [sys.executable, "-c", "pass"],
             cwd=Path.cwd(),
         )
+    if visible_worker_window:
+        if os.name != "nt":
+            raise ValueError("--visible-worker-windows is supported only on Windows")
+        log_path = stage.directory / f"{effective_name}.console.log"
+        title = f"CODEX | Heretic | {effective_name} | GPU {effective_device}"
+        native_command_line = subprocess.list2cmdline(command) + " 2>&1"
+        powershell_command = (
+            "$ErrorActionPreference='Continue'; "
+            f"$Host.UI.RawUI.WindowTitle={powershell_quote(title)}; "
+            "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); "
+            f"& cmd.exe /d /s /c {powershell_quote(native_command_line)} | "
+            f"Tee-Object -FilePath {powershell_quote(str(log_path))}; "
+            "$code=$LASTEXITCODE; exit $code"
+        )
+        return subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                powershell_command,
+            ],
+            cwd=stage.directory,
+            env=process_environment(effective_device),
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
     return subprocess.Popen(
         command,
         cwd=stage.directory,
-        env=process_environment(stage.device),
+        env=process_environment(effective_device),
     )
 
 
@@ -224,12 +305,101 @@ def wait_stage(stage: Stage, process: subprocess.Popen) -> None:
     )
 
 
-def run_stage(stage: Stage, executable: Path, *, dry_run: bool) -> None:
-    process = start_stage(stage, executable, dry_run=dry_run)
+def run_stage(
+    stage: Stage,
+    executable: Path,
+    *,
+    dry_run: bool,
+    visible_worker_window: bool = False,
+) -> None:
+    process = start_stage(
+        stage,
+        executable,
+        dry_run=dry_run,
+        visible_worker_window=visible_worker_window,
+    )
     if dry_run:
         process.wait()
         return
     wait_stage(stage, process)
+
+
+def wait_parallel(
+    stages: list[tuple[Stage, subprocess.Popen]],
+) -> None:
+    failures: list[str] = []
+    for stage, process in stages:
+        try:
+            wait_stage(stage, process)
+        except Exception as error:
+            failures.append(f"{stage.name}: {error}")
+    if failures:
+        raise RuntimeError("Parallel stage failure(s): " + "; ".join(failures))
+
+
+def journal_trial_count(journal: Path) -> int:
+    storage = JournalStorage(
+        JournalFileBackend(
+            str(journal),
+            lock_obj=JournalFileOpenLock(str(journal)),
+        )
+    )
+    summaries = storage.get_all_studies()
+    if len(summaries) != 1:
+        raise ValueError(f"Expected one study in {journal}, found {len(summaries)}")
+    study = optuna.load_study(study_name=summaries[0].study_name, storage=storage)
+    return len(study.trials)
+
+
+def require_constraint_metadata(stage: Stage) -> None:
+    storage = JournalStorage(
+        JournalFileBackend(
+            str(stage.journal),
+            lock_obj=JournalFileOpenLock(str(stage.journal)),
+        )
+    )
+    summaries = storage.get_all_studies()
+    if len(summaries) != 1:
+        raise ValueError(
+            f"Expected one study in {stage.journal}, found {len(summaries)}"
+        )
+    study = optuna.load_study(
+        study_name=summaries[0].study_name,
+        storage=storage,
+    )
+    complete = [
+        trial
+        for trial in study.trials
+        if trial.state == optuna.trial.TrialState.COMPLETE
+    ]
+    missing = [
+        trial.number for trial in complete if "constraints" not in trial.system_attrs
+    ]
+    if missing:
+        preview = ", ".join(str(number) for number in missing[:8])
+        raise RuntimeError(
+            "Constraint metadata incomplete: "
+            f"{len(complete) - len(missing)}/{len(complete)}; "
+            f"missing trials: {preview}"
+        )
+    print(f"Constraints: {len(complete)}/{len(complete)} OK", flush=True)
+
+
+def require_trial_count(stage: Stage, expected: int) -> None:
+    actual = journal_trial_count(stage.journal)
+    if actual != expected:
+        raise RuntimeError(
+            f"Stage {stage.name} has {actual} trials, expected exactly {expected}"
+        )
+
+
+def split_worker_budget(remaining_trials: int, worker_count: int = 2) -> list[int]:
+    if remaining_trials < 0:
+        raise ValueError("remaining_trials cannot be negative")
+    if worker_count <= 0:
+        raise ValueError("worker_count must be positive")
+    quotient, remainder = divmod(remaining_trials, worker_count)
+    return [quotient + (1 if index < remainder else 0) for index in range(worker_count)]
 
 
 def merge_branches(
@@ -252,6 +422,8 @@ def merge_branches(
         str(shared_stage.journal),
         "--target-trials",
         str(target_trials),
+        "--order",
+        "round-robin",
     ]
     print(json.dumps({"event": "merge", "command": command}), flush=True)
     if dry_run:
@@ -275,17 +447,33 @@ def write_run_manifest(
     args: argparse.Namespace,
     base_config: Path,
     stages: list[Stage],
+    status: str,
 ) -> None:
+    created_unix = time.time()
+    if path.is_file():
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            created_unix = float(previous.get("created_unix", created_unix))
+        except (ValueError, TypeError, json.JSONDecodeError):
+            pass
+    response_archive = path.parent / "trial-responses.sqlite3"
     record = {
-        "schema_version": 1,
-        "created_unix": time.time(),
+        "schema_version": 2,
+        "status": status,
+        "created_unix": created_unix,
+        "updated_unix": time.time(),
         "base_config": str(base_config),
         "base_config_sha256": sha256(base_config),
-        "branch_trials": args.branch_trials,
-        "startup_trials": args.startup_trials,
+        "exploration_trials": args.exploration_trials,
+        "trials_per_exploration_branch": args.exploration_trials // 2,
         "target_trials": args.target_trials,
-        "parallel": args.parallel,
+        "parallel_exploration": not args.sequential_exploration,
+        "visible_worker_windows": args.visible_worker_windows,
         "continue_shared_only": args.continue_shared_only,
+        "response_archive": str(response_archive),
+        "response_archive_size": (
+            response_archive.stat().st_size if response_archive.is_file() else 0
+        ),
         "stages": [
             {
                 "name": stage.name,
@@ -296,6 +484,9 @@ def write_run_manifest(
                 "journal_sha256": sha256(stage.journal)
                 if stage.journal.is_file()
                 else None,
+                "trial_count": journal_trial_count(stage.journal)
+                if stage.journal.is_file()
+                else 0,
                 "device": stage.device,
             }
             for stage in stages
@@ -309,13 +500,13 @@ def write_run_manifest(
 
 def main() -> None:
     args = parse_args()
-    if args.branch_trials <= 0 or args.startup_trials < 0 or args.target_trials <= 0:
-        raise ValueError("Trial budgets must be positive (startup may be zero)")
-    if args.startup_trials > args.branch_trials:
-        raise ValueError("--startup-trials cannot exceed --branch-trials")
-    if not args.continue_shared_only and args.target_trials <= 2 * args.branch_trials:
+    if args.exploration_trials <= 0 or args.target_trials <= 0:
+        raise ValueError("Trial budgets must be positive")
+    if args.exploration_trials % 2:
+        raise ValueError("--exploration-trials must be even for a 50/50 split")
+    if not args.continue_shared_only and args.target_trials <= args.exploration_trials:
         raise ValueError(
-            "--target-trials must exceed the combined two-branch prefix"
+            "--target-trials must exceed the combined exploration prefix"
         )
 
     base_config = args.base_config.resolve()
@@ -329,24 +520,34 @@ def main() -> None:
         root.mkdir(parents=True, exist_ok=True)
 
     base = read_config(base_config)
+    branch_trials = args.exploration_trials // 2
+    response_archive = root / "trial-responses.sqlite3"
     random_stage = build_stage(
         root,
         "random_branch",
         base,
-        n_trials=args.branch_trials,
-        n_startup_trials=args.startup_trials,
+        n_trials=branch_trials,
+        n_startup_trials=branch_trials,
         startup_design="random",
         device=args.random_device,
+        response_archive=response_archive,
+        response_number_offset=0,
+        response_number_stride=2,
+        parallel_workers=1,
         dry_run=args.dry_run,
     )
     sobol_stage = build_stage(
         root,
         "sobol_branch",
         base,
-        n_trials=args.branch_trials,
-        n_startup_trials=args.startup_trials,
+        n_trials=branch_trials,
+        n_startup_trials=branch_trials,
         startup_design="sobol",
         device=args.sobol_device,
+        response_archive=response_archive,
+        response_number_offset=1,
+        response_number_stride=2,
+        parallel_workers=1,
         dry_run=args.dry_run,
     )
     shared_stage = build_stage(
@@ -357,23 +558,63 @@ def main() -> None:
         n_startup_trials=0,
         startup_design="random",
         device=args.random_device,
+        response_archive=response_archive,
+        response_number_offset=0,
+        response_number_stride=1,
+        parallel_workers=2,
         dry_run=args.dry_run,
         allowed_config_updates=frozenset({"n_trials"}),
     )
+    manifest_path = root / "adaptive_run_manifest.json"
+    if not args.dry_run:
+        write_run_manifest(
+            manifest_path,
+            args=args,
+            base_config=base_config,
+            stages=[random_stage, sobol_stage, shared_stage],
+            status="planned",
+        )
 
     if not args.continue_shared_only:
-        if args.parallel:
-            random_process = start_stage(random_stage, executable, dry_run=args.dry_run)
-            sobol_process = start_stage(sobol_stage, executable, dry_run=args.dry_run)
+        if not args.sequential_exploration:
+            random_process = start_stage(
+                random_stage,
+                executable,
+                dry_run=args.dry_run,
+                visible_worker_window=args.visible_worker_windows,
+            )
+            sobol_process = start_stage(
+                sobol_stage,
+                executable,
+                dry_run=args.dry_run,
+                visible_worker_window=args.visible_worker_windows,
+            )
             if args.dry_run:
                 random_process.wait()
                 sobol_process.wait()
             else:
-                wait_stage(random_stage, random_process)
-                wait_stage(sobol_stage, sobol_process)
+                wait_parallel(
+                    [
+                        (random_stage, random_process),
+                        (sobol_stage, sobol_process),
+                    ]
+                )
         else:
-            run_stage(random_stage, executable, dry_run=args.dry_run)
-            run_stage(sobol_stage, executable, dry_run=args.dry_run)
+            run_stage(
+                random_stage,
+                executable,
+                dry_run=args.dry_run,
+                visible_worker_window=args.visible_worker_windows,
+            )
+            run_stage(
+                sobol_stage,
+                executable,
+                dry_run=args.dry_run,
+                visible_worker_window=args.visible_worker_windows,
+            )
+        if not args.dry_run:
+            require_trial_count(random_stage, branch_trials)
+            require_trial_count(sobol_stage, branch_trials)
         merge_branches(
             random_stage,
             sobol_stage,
@@ -381,18 +622,93 @@ def main() -> None:
             target_trials=args.target_trials,
             dry_run=args.dry_run,
         )
+        if not args.dry_run:
+            write_run_manifest(
+                manifest_path,
+                args=args,
+                base_config=base_config,
+                stages=[random_stage, sobol_stage, shared_stage],
+                status="exploration_merged",
+            )
     elif not args.dry_run and not shared_stage.journal.is_file():
         raise FileNotFoundError(
             f"No shared journal to continue: {shared_stage.journal}"
         )
 
-    run_stage(shared_stage, executable, dry_run=args.dry_run)
+    if args.dry_run:
+        completed_trials = args.exploration_trials
+    else:
+        completed_trials = journal_trial_count(shared_stage.journal)
+    if completed_trials > args.target_trials:
+        raise ValueError(
+            f"Shared study already has {completed_trials} trials, above target "
+            f"{args.target_trials}"
+        )
+    remaining_trials = args.target_trials - completed_trials
+    if not args.dry_run:
+        require_constraint_metadata(shared_stage)
+    worker_budgets = split_worker_budget(remaining_trials)
     if not args.dry_run:
         write_run_manifest(
-            root / "adaptive_run_manifest.json",
+            manifest_path,
             args=args,
             base_config=base_config,
             stages=[random_stage, sobol_stage, shared_stage],
+            status="tpe_running" if remaining_trials else "complete",
+        )
+    worker_seed_base = int(base.get("seed") or 0) + 10_000
+    worker_processes: list[tuple[Stage, subprocess.Popen]] = []
+    for worker_index, (device, budget) in enumerate(
+        zip((args.random_device, args.sobol_device), worker_budgets, strict=True)
+    ):
+        if budget == 0:
+            continue
+        display_name = f"shared_tpe_gpu{device}"
+        worker_stage = Stage(
+            display_name,
+            shared_stage.directory,
+            shared_stage.config,
+            shared_stage.journal,
+            device,
+        )
+        process = start_stage(
+            worker_stage,
+            executable,
+            dry_run=args.dry_run,
+            display_name=display_name,
+            device=device,
+            command_args=(
+                "--n-trials",
+                str(args.target_trials),
+                "--n-startup-trials",
+                "0",
+                "--parallel-workers",
+                "2",
+                "--worker-trial-budget",
+                str(budget),
+                f"--seed={worker_seed_base + worker_index}",
+            ),
+            visible_worker_window=args.visible_worker_windows,
+        )
+        worker_processes.append((worker_stage, process))
+    if args.dry_run:
+        for _, process in worker_processes:
+            process.wait()
+    else:
+        wait_parallel(worker_processes)
+        final_trial_count = journal_trial_count(shared_stage.journal)
+        if final_trial_count != args.target_trials:
+            raise RuntimeError(
+                f"Shared study ended at {final_trial_count}, expected "
+                f"{args.target_trials}"
+            )
+    if not args.dry_run:
+        write_run_manifest(
+            manifest_path,
+            args=args,
+            base_config=base_config,
+            stages=[random_stage, sobol_stage, shared_stage],
+            status="complete",
         )
 
 

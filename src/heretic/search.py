@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 from optuna import Trial
+from optuna.distributions import CategoricalDistribution
 from optuna.samplers import BaseSampler, QMCSampler, RandomSampler, TPESampler
 from optuna.study import Study
 from optuna.trial import FrozenTrial
@@ -14,6 +15,38 @@ from .config import StartupDesign
 
 Objective = Callable[[Trial], float | Sequence[float]]
 StudyCallback = Callable[[Study, FrozenTrial], None]
+
+
+class StratifiedQMCSampler(QMCSampler):
+    """Sobol sampler with deterministic coverage for known categorical axes.
+
+    Optuna's QMC sampler intentionally falls back to independent RandomSampler
+    draws for categorical distributions.  Heretic has one always-present
+    categorical axis, ``direction_scope``.  Alternating its choices by trial
+    number gives exact 50/50 coverage while leaving every continuous parameter
+    to scrambled Sobol.  Unknown future categorical parameters still delegate
+    to Optuna and retain its warning.
+    """
+
+    def sample_independent(
+        self,
+        study: Study,
+        trial: FrozenTrial,
+        param_name: str,
+        param_distribution,
+    ):
+        if (
+            param_name == "direction_scope"
+            and isinstance(param_distribution, CategoricalDistribution)
+        ):
+            choices = param_distribution.choices
+            return choices[trial.number % len(choices)]
+        return super().sample_independent(
+            study,
+            trial,
+            param_name,
+            param_distribution,
+        )
 
 
 def select_spread_points(
@@ -138,7 +171,7 @@ class OptimizationRunner:
             else None
         )
         self.sobol_sampler = (
-            QMCSampler(
+            StratifiedQMCSampler(
                 qmc_type="sobol",
                 scramble=True,
                 seed=seed,

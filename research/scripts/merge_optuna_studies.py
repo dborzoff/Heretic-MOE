@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--target-trials", type=int, required=True)
     parser.add_argument("--study-name", default="heretic")
+    parser.add_argument(
+        "--order",
+        choices=("sequential", "round-robin"),
+        default="sequential",
+        help=(
+            "How source trials are placed in the merged prefix. round-robin "
+            "alternates sources while preserving each source's local order."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -78,6 +88,8 @@ STAGE_ONLY_SETTING_KEYS = {
     "seed",
     "startup_design",
     "study_checkpoint_dir",
+    "trial_response_number_offset",
+    "trial_response_number_stride",
     "worker_trial_budget",
 }
 
@@ -115,6 +127,22 @@ def distribution_map(study: optuna.study.Study) -> dict[str, str]:
     return distributions
 
 
+def order_source_trials(
+    groups: list[list[tuple[str, optuna.trial.FrozenTrial]]],
+    order: str,
+) -> list[tuple[str, optuna.trial.FrozenTrial]]:
+    if order == "sequential":
+        return [item for group in groups for item in group]
+    if order == "round-robin":
+        return [
+            item
+            for row in zip_longest(*groups)
+            for item in row
+            if item is not None
+        ]
+    raise ValueError(f"Unsupported merge order: {order}")
+
+
 def main() -> None:
     args = parse_args()
     sources = [parse_source(spec) for spec in args.source]
@@ -129,7 +157,7 @@ def main() -> None:
         )
 
     source_records: list[dict[str, Any]] = []
-    source_trials: list[tuple[str, optuna.trial.FrozenTrial]] = []
+    source_trial_groups: list[list[tuple[str, optuna.trial.FrozenTrial]]] = []
     source_settings: dict[str, Any] | None = None
     source_contract: dict[str, Any] | None = None
     shared_distributions: dict[str, str] = {}
@@ -190,7 +218,11 @@ def main() -> None:
                 "contract_sha256": canonical_hash(current_contract),
             }
         )
-        source_trials.extend((source_name, trial) for trial in study.trials)
+        source_trial_groups.append(
+            [(source_name, trial) for trial in study.trials]
+        )
+
+    source_trials = order_source_trials(source_trial_groups, args.order)
 
     if args.target_trials <= len(source_trials):
         raise ValueError(
@@ -203,6 +235,7 @@ def main() -> None:
 
     signatures: dict[str, int] = {}
     duplicate_parameter_sets = 0
+    constraint_metadata_restored = 0
     clones = []
     for merged_index, (source_name, trial) in enumerate(source_trials, start=1):
         signature = canonical_params(trial.params)
@@ -220,6 +253,17 @@ def main() -> None:
                 "merged_source_display_index": trial.user_attrs.get("index"),
             }
         )
+        system_attrs = dict(trial.system_attrs)
+        if "constraints" not in system_attrs:
+            archived_constraints = user_attrs.get("constraints")
+            if isinstance(archived_constraints, list):
+                system_attrs["constraints"] = archived_constraints
+                constraint_metadata_restored += 1
+            elif constraint_names:
+                raise ValueError(
+                    f"Source {source_name} trial {trial.number} has no "
+                    "archived constraint values"
+                )
         clones.append(
             create_trial(
                 state=TrialState.COMPLETE,
@@ -227,7 +271,7 @@ def main() -> None:
                 params=trial.params,
                 distributions=trial.distributions,
                 user_attrs=user_attrs,
-                system_attrs=trial.system_attrs,
+                system_attrs=system_attrs,
                 intermediate_values=trial.intermediate_values,
             )
         )
@@ -239,6 +283,8 @@ def main() -> None:
             "startup_design": "random",
             "optimization_only": True,
             "study_checkpoint_dir": str(output.parent),
+            "trial_response_number_offset": 0,
+            "trial_response_number_stride": 1,
         }
     )
 
@@ -268,6 +314,7 @@ def main() -> None:
             "sources": source_records,
             "merged_prefix_trials": len(clones),
             "target_trials": args.target_trials,
+            "order": args.order,
         },
     )
 
@@ -278,9 +325,19 @@ def main() -> None:
         )
     if any(trial.state != TrialState.COMPLETE for trial in reloaded.trials):
         raise RuntimeError("Merged journal reload contains non-complete prefix trials")
+    missing_constraints = [
+        trial.number
+        for trial in reloaded.trials
+        if constraint_names and "constraints" not in trial.system_attrs
+    ]
+    if missing_constraints:
+        raise RuntimeError(
+            "Merged journal is missing constraint metadata for trials: "
+            + ", ".join(str(number) for number in missing_constraints[:8])
+        )
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "output": str(output),
         "output_sha256": sha256(output),
         "sources": source_records,
@@ -292,6 +349,16 @@ def main() -> None:
         "target_trials": args.target_trials,
         "continuation_trials": args.target_trials - len(clones),
         "duplicate_parameter_sets": duplicate_parameter_sets,
+        "constraint_metadata_restored": constraint_metadata_restored,
+        "merge_order": args.order,
+        "merged_trial_map": [
+            {
+                "merged_trial_number": merged_number,
+                "source": source_name,
+                "source_trial_number": trial.number,
+            }
+            for merged_number, (source_name, trial) in enumerate(source_trials)
+        ],
         "startup_after_merge": "none; multivariate TPE continuation only",
     }
     manifest_path.write_text(

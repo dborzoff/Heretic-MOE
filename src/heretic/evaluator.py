@@ -175,14 +175,20 @@ class Evaluator:
             is_builtin_plugin(entry.config.plugin) for entry in self._scorer_entries
         )
 
-    def get_scores(self) -> list[tuple[str, Score]]:
+    def get_scores(
+        self, response_archive_id: str | int | None = None
+    ) -> list[tuple[str, Score]]:
         """
         Run all scorers and return their scores and names
 
         Returns:
             List of `Score` from each scorer and its name.
         """
-        ctx = Context(settings=self.settings, model=self.model)
+        ctx = Context(
+            settings=self.settings,
+            model=self.model,
+            response_archive_id=response_archive_id,
+        )
         return [
             (entry.name, entry.scorer.get_score(ctx)) for entry in self._scorer_entries
         ]
@@ -194,7 +200,11 @@ class Evaluator:
         Returns:
             List of `Score` from each scorer and its name.
         """
-        ctx = Context(settings=self.settings, model=self.model)
+        ctx = Context(
+            settings=self.settings,
+            model=self.model,
+            response_archive_id="baseline",
+        )
         return [
             (entry.name, entry.scorer.get_baseline_score(ctx))
             for entry in self._scorer_entries

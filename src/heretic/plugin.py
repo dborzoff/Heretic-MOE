@@ -3,9 +3,12 @@
 
 import importlib
 import importlib.util
+import hashlib
 import inspect
+import sqlite3
 import sys
 import types
+from contextlib import closing
 from pathlib import Path
 from types import ModuleType
 from typing import Annotated, Any, TypeVar, Union, get_args, get_origin, get_type_hints
@@ -157,9 +160,15 @@ class Context:
     Direct access to the underlying Model is intentionally not exposed.
     """
 
-    def __init__(self, settings: HereticSettings, model: Model) -> None:
+    def __init__(
+        self,
+        settings: HereticSettings,
+        model: Model,
+        response_archive_id: str | int | None = None,
+    ) -> None:
         self._model = model
         self._settings = settings
+        self._response_archive_id = response_archive_id
         self._responses_cache: dict[tuple[tuple[str, str], ...], list[str]] = {}
 
     def _cache_key(self, prompts: list[Prompt]) -> tuple[tuple[str, str], ...]:
@@ -172,7 +181,135 @@ class Context:
             self._responses_cache[key] = self._model.get_responses_batched(
                 prompts, skip_special_tokens=True
             )
+            self._archive_responses(prompts, self._responses_cache[key])
         return self._responses_cache[key]
+
+    def _archive_responses(
+        self, prompts: list[Prompt], responses: list[str]
+    ) -> None:
+        if not self._settings.save_trial_responses:
+            return
+        archive_file = self._settings.trial_responses_file
+        archive_id = self._response_archive_id
+        if archive_id is None:
+            return
+        if len(prompts) != len(responses):
+            raise ValueError("Prompt and response counts differ during archiving")
+
+        prompt_hashes = [
+            hashlib.sha256(
+                (prompt.system + "\0" + prompt.user).encode("utf-8")
+            ).hexdigest()
+            for prompt in prompts
+        ]
+        batch_hash = hashlib.sha256("".join(prompt_hashes).encode("ascii")).hexdigest()
+        destination = Path(archive_file)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(archive_id, int):
+            trial_number = (
+                getattr(self._settings, "trial_response_number_offset", 0)
+                + archive_id
+                * getattr(self._settings, "trial_response_number_stride", 1)
+            )
+            trial_id = f"trial:{trial_number}"
+        else:
+            trial_id = str(archive_id)
+            trial_number = None
+
+        with closing(sqlite3.connect(destination, timeout=60.0)) as database:
+            with database:
+                database.execute("PRAGMA journal_mode=WAL")
+                database.execute("PRAGMA synchronous=NORMAL")
+                database.execute("PRAGMA foreign_keys=ON")
+                database.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS prompt_batches (
+                        batch_hash TEXT PRIMARY KEY,
+                        prompt_count INTEGER NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS prompts (
+                        batch_hash TEXT NOT NULL,
+                        prompt_index INTEGER NOT NULL,
+                        system_prompt TEXT NOT NULL,
+                        question TEXT NOT NULL,
+                        prompt_sha256 TEXT NOT NULL,
+                        PRIMARY KEY (batch_hash, prompt_index),
+                        FOREIGN KEY (batch_hash) REFERENCES prompt_batches(batch_hash)
+                    );
+                    CREATE TABLE IF NOT EXISTS trial_answers (
+                        batch_hash TEXT NOT NULL,
+                        prompt_index INTEGER NOT NULL,
+                        trial_id TEXT NOT NULL,
+                        trial_number INTEGER,
+                        answer TEXT NOT NULL,
+                        answer_sha256 TEXT NOT NULL,
+                        PRIMARY KEY (batch_hash, prompt_index, trial_id),
+                        FOREIGN KEY (batch_hash, prompt_index)
+                            REFERENCES prompts(batch_hash, prompt_index)
+                    );
+                    CREATE INDEX IF NOT EXISTS trial_answers_by_trial
+                        ON trial_answers(trial_number, batch_hash, prompt_index);
+                    CREATE VIEW IF NOT EXISTS answers_by_question AS
+                        SELECT
+                            prompts.batch_hash,
+                            prompts.prompt_index,
+                            prompts.system_prompt,
+                            prompts.question,
+                            prompts.prompt_sha256,
+                            COUNT(trial_answers.trial_id) AS answer_count,
+                            json_group_array(
+                                json_object(
+                                    'trial_id', trial_answers.trial_id,
+                                    'trial_number', trial_answers.trial_number,
+                                    'answer', trial_answers.answer,
+                                    'answer_sha256', trial_answers.answer_sha256
+                                )
+                            ) AS answers_json
+                        FROM prompts
+                        JOIN trial_answers USING (batch_hash, prompt_index)
+                        GROUP BY prompts.batch_hash, prompts.prompt_index;
+                    """
+                )
+                database.execute(
+                    "INSERT OR IGNORE INTO prompt_batches VALUES (?, ?)",
+                    (batch_hash, len(prompts)),
+                )
+                database.executemany(
+                    """
+                    INSERT OR IGNORE INTO prompts (
+                        batch_hash, prompt_index, system_prompt, question, prompt_sha256
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            batch_hash,
+                            index,
+                            prompt.system,
+                            prompt.user,
+                            prompt_hashes[index],
+                        )
+                        for index, prompt in enumerate(prompts)
+                    ],
+                )
+                database.executemany(
+                    """
+                    INSERT OR IGNORE INTO trial_answers (
+                        batch_hash, prompt_index, trial_id, trial_number,
+                        answer, answer_sha256
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            batch_hash,
+                            index,
+                            trial_id,
+                            trial_number,
+                            response,
+                            hashlib.sha256(response.encode("utf-8")).hexdigest(),
+                        )
+                        for index, response in enumerate(responses)
+                    ],
+                )
 
     def get_logits(self, prompts: list[Prompt]) -> Tensor:
         return self._model.get_logits_batched(prompts)

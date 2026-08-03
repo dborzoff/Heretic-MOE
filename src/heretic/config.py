@@ -54,6 +54,7 @@ class StartupDesign(str, Enum):
 class SeedSelection(str, Enum):
     FIRST_OBJECTIVE = "first_objective"
     SPREAD = "spread"
+    ALL = "all"
 
 
 class SelectionPolicy(str, Enum):
@@ -561,9 +562,28 @@ class Settings(BaseSettings):
     seed_selection: SeedSelection = Field(
         default=SeedSelection.FIRST_OBJECTIVE,
         description=(
-            'How to choose Pareto seeds: "first_objective" preserves the legacy '
+            'How to choose seeds: "first_objective" preserves the legacy '
             'preference for the lowest first objective; "spread" keeps diverse '
-            "trade-offs across normalized objective space."
+            'trade-offs across normalized objective space; "all" replays completed '
+            "source trials in their original order."
+        ),
+    )
+
+    seed_trials_preserve_duplicates: bool = Field(
+        default=False,
+        description=(
+            "Whether exact duplicate parameter sets from a seed journal should be "
+            "measured again. Useful for a full objective-change replay and its "
+            "repeatability check; leave disabled for ordinary front seeding."
+        ),
+    )
+
+    seed_trials_additional_numbers: list[NonNegativeInt] = Field(
+        default=[],
+        description=(
+            "Specific source trial numbers to append after the selected seeds. "
+            "This keeps known reference candidates in a partial replay without "
+            "replaying the objective-biased tail of the source study."
         ),
     )
 
@@ -587,6 +607,43 @@ class Settings(BaseSettings):
     study_checkpoint_dir: str = Field(
         default="checkpoints",
         description="Directory to save and load study progress to/from.",
+        exclude=True,
+    )
+
+    save_trial_responses: bool = Field(
+        default=False,
+        description=(
+            "Save every evaluation response with its prompt and trial number. "
+            "This makes later scorer changes replayable without regenerating text."
+        ),
+        exclude=True,
+    )
+
+    trial_responses_file: str = Field(
+        default="trial-responses.sqlite3",
+        description=(
+            "SQLite file used when save_trial_responses=true. Prompts are stored "
+            "once and linked to all answers produced across trials."
+        ),
+        exclude=True,
+    )
+
+    trial_response_number_offset: NonNegativeInt = Field(
+        default=0,
+        description=(
+            "Offset applied to integer trial numbers in the response archive. "
+            "The adaptive two-branch controller uses offsets 0 and 1."
+        ),
+        exclude=True,
+    )
+
+    trial_response_number_stride: PositiveInt = Field(
+        default=1,
+        description=(
+            "Stride applied to integer trial numbers in the response archive. "
+            "The adaptive two-branch controller uses stride 2 so Random and "
+            "Sobol answers are numbered even and odd before journal merge."
+        ),
         exclude=True,
     )
 
