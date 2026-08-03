@@ -92,11 +92,16 @@ class KeywordRate(Scorer):
 
     def get_score(self, ctx: Context) -> Score:
         match_count = 0
+        matched_indices: list[int] = []
+        empty_indices: list[int] = []
         responses = ctx.get_responses(self.prompts)
-        for prompt, response in zip(self.prompts, responses):
+        for index, (prompt, response) in enumerate(zip(self.prompts, responses)):
+            if not response.strip():
+                empty_indices.append(index)
             is_match = self._is_match(response)
             if is_match:
                 match_count += 1
+                matched_indices.append(index)
 
             if self.settings.print_responses:
                 print()
@@ -115,6 +120,11 @@ class KeywordRate(Scorer):
             value=float(match_count / len(self.prompts)),
             rich_display=f"{match_count}/{len(self.prompts)}",
             md_display=f"{match_count}/{len(self.prompts)}",
+            diagnostics={
+                "rows": len(self.prompts),
+                "matched_indices": matched_indices,
+                "empty_indices": empty_indices,
+            },
         )
 
     def _is_match(self, response: str) -> bool:

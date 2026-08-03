@@ -100,18 +100,36 @@ class OptimizationRunner:
         n_startup_trials: int,
         seed: int | None,
         parallel_workers: int = 1,
+        constraint_count: int = 0,
+        tpe_group: bool = False,
     ) -> None:
         if parallel_workers <= 0:
             raise ValueError("parallel_workers must be positive")
+        if constraint_count < 0:
+            raise ValueError("constraint_count cannot be negative")
         self.startup_design = startup_design
         self.n_startup_trials = n_startup_trials
+        self.constraint_count = constraint_count
+
+        def constraints_func(trial: FrozenTrial) -> Sequence[float]:
+            values = trial.user_attrs.get("constraints")
+            if values is None:
+                # A study resumed after adding constraints must not treat legacy
+                # trials with unknown feasibility as valid evidence.
+                return [float("inf")] * constraint_count
+            if not isinstance(values, (list, tuple)) or len(values) != constraint_count:
+                return [float("inf")] * constraint_count
+            return [float(value) for value in values]
+
         self.tpe_sampler = TPESampler(
             n_startup_trials=(
                 n_startup_trials if startup_design == StartupDesign.RANDOM else 0
             ),
             n_ei_candidates=128,
             multivariate=True,
+            group=tpe_group,
             constant_liar=parallel_workers > 1,
+            constraints_func=(constraints_func if constraint_count else None),
             seed=seed,
         )
         self.random_sampler = (

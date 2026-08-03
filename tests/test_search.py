@@ -228,6 +228,36 @@ class OptimizationRunnerTests(unittest.TestCase):
                 all(trial.state == TrialState.COMPLETE for trial in reloaded.trials)
             )
 
+    def test_grouped_tpe_supports_conditional_component_space(self) -> None:
+        runner = OptimizationRunner(
+            startup_design=StartupDesign.RANDOM,
+            n_startup_trials=4,
+            seed=17,
+            constraint_count=1,
+            tpe_group=True,
+        )
+        study = optuna.create_study(
+            directions=["minimize", "minimize"],
+            sampler=runner.initial_sampler,
+        )
+
+        def conditional_objective(trial: optuna.Trial) -> tuple[float, float]:
+            enabled = trial.suggest_categorical("component.enabled", [True, False])
+            x = trial.suggest_float("component.x", -1.0, 1.0) if enabled else 0.0
+            violation = abs(x) - 0.75
+            trial.set_user_attr("constraints", [violation])
+            return x * x, abs(x)
+
+        runner.optimize_to(study, conditional_objective, target_trial_count=12)
+
+        self.assertEqual(len(study.trials), 12)
+        self.assertTrue(
+            all("constraints" in trial.user_attrs for trial in study.trials)
+        )
+        self.assertTrue(
+            any("component.x" not in trial.params for trial in study.trials)
+        )
+
 
 class SpreadSelectionTests(unittest.TestCase):
     def test_keeps_extremes_then_selects_interior_separation(self) -> None:

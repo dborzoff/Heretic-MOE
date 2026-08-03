@@ -10,6 +10,7 @@ from pydantic import (
     NonNegativeInt,
     PositiveInt,
     field_validator,
+    model_validator,
 )
 from pydantic_settings import (
     BaseSettings,
@@ -53,6 +54,11 @@ class StartupDesign(str, Enum):
 class SeedSelection(str, Enum):
     FIRST_OBJECTIVE = "first_objective"
     SPREAD = "spread"
+
+
+class SelectionPolicy(str, Enum):
+    PARETO = "pareto"
+    FEASIBLE_LEXICOGRAPHIC = "feasible_lexicographic"
 
 
 class DatasetSpecification(BaseModel):
@@ -135,6 +141,22 @@ class ScorerConfig(BaseModel):
         ),
     )
 
+    constraint_lower: float | None = Field(
+        default=None,
+        description=(
+            "Optional lower feasibility bound for this score. The trial is "
+            "infeasible when score < constraint_lower."
+        ),
+    )
+
+    constraint_upper: float | None = Field(
+        default=None,
+        description=(
+            "Optional upper feasibility bound for this score. The trial is "
+            "infeasible when score > constraint_upper."
+        ),
+    )
+
     @field_validator("instance_name")
     @classmethod
     def validate_instance_name(cls, value: str | None) -> str | None:
@@ -151,6 +173,16 @@ class ScorerConfig(BaseModel):
             raise ValueError("whitespace is not allowed")
 
         return value
+
+    @model_validator(mode="after")
+    def validate_constraint_interval(self) -> "ScorerConfig":
+        if (
+            self.constraint_lower is not None
+            and self.constraint_upper is not None
+            and self.constraint_lower > self.constraint_upper
+        ):
+            raise ValueError("constraint_lower cannot exceed constraint_upper")
+        return self
 
 
 class BenchmarkSpecification(BaseModel):
@@ -391,6 +423,22 @@ class Settings(BaseSettings):
         ),
     )
 
+    fused_expert_chunk_size: PositiveInt = Field(
+        default=8,
+        description=(
+            "Number of fused routed experts edited in FP32 at once. Smaller "
+            "chunks reduce peak VRAM during exact fused-expert normalization."
+        ),
+    )
+
+    record_edit_telemetry: bool = Field(
+        default=True,
+        description=(
+            "Record text-free per-component and per-layer realized edit norms "
+            "in every completed trial."
+        ),
+    )
+
     winsorization_quantile: float = Field(
         default=1.0,
         description=(
@@ -420,6 +468,39 @@ class Settings(BaseSettings):
             'sequence; "hybrid" alternates Random and scrambled Sobol trials in '
             "one shared study. Every non-random design then switches to "
             "multivariate TPE with the complete exploration history."
+        ),
+    )
+
+    tpe_group: bool = Field(
+        default=False,
+        description=(
+            "Use Optuna's group-decomposed multivariate TPE. Required when "
+            "conditional_components enables a dynamic search space."
+        ),
+    )
+
+    conditional_components: bool = Field(
+        default=False,
+        description=(
+            "Sample an explicit enabled flag per editable component and omit "
+            "curve parameters for disabled components."
+        ),
+    )
+
+    selection_policy: SelectionPolicy = Field(
+        default=SelectionPolicy.FEASIBLE_LEXICOGRAPHIC,
+        description=(
+            'Trial selection policy. "pareto" preserves the legacy menu; '
+            '"feasible_lexicographic" filters by scorer constraints and then '
+            "orders the feasible Pareto front by the primary objective."
+        ),
+    )
+
+    primary_objective: str | None = Field(
+        default=None,
+        description=(
+            "Objective display name used first by feasible lexicographic "
+            "selection. Unset means the first configured optimization objective."
         ),
     )
 
@@ -493,6 +574,15 @@ class Settings(BaseSettings):
             "Applies to Python's random module, NumPy, PyTorch, and Optuna."
         ),
     )
+
+    @model_validator(mode="after")
+    def validate_adaptive_search_settings(self) -> "Settings":
+        if self.conditional_components and not self.tpe_group:
+            raise ValueError(
+                "conditional_components requires tpe_group=true so Optuna can "
+                "model the dynamic component subspaces"
+            )
+        return self
 
     study_checkpoint_dir: str = Field(
         default="checkpoints",

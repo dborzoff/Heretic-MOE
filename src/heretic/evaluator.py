@@ -265,3 +265,29 @@ class Evaluator:
             parse_study_direction(entry.config.optimization)
             for entry in self._objective_entries()
         ]
+
+    def get_constraint_names(self) -> list[str]:
+        """Return stable names for configured lower/upper score constraints."""
+
+        names: list[str] = []
+        for entry in self._scorer_entries:
+            if entry.config.constraint_lower is not None:
+                names.append(f"{entry.name} >= {entry.config.constraint_lower}")
+            if entry.config.constraint_upper is not None:
+                names.append(f"{entry.name} <= {entry.config.constraint_upper}")
+        return names
+
+    def get_constraint_values(
+        self, scores: list[tuple[str, Score]]
+    ) -> tuple[float, ...]:
+        """Return Optuna-style inequalities; values <= 0 are feasible."""
+
+        score_by_name = {name: score for name, score in scores}
+        constraints: list[float] = []
+        for entry in self._scorer_entries:
+            value = score_by_name[entry.name].value
+            if entry.config.constraint_lower is not None:
+                constraints.append(entry.config.constraint_lower - value)
+            if entry.config.constraint_upper is not None:
+                constraints.append(value - entry.config.constraint_upper)
+        return tuple(constraints)

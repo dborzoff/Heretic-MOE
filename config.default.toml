@@ -88,8 +88,11 @@ residual_plot_style = "dark_background"
 
 # List of scorers to evaluate.
 # Each entry is an object:
-# { plugin = <plugin>, optimization = <optimization>, instance_name = <optional> }
+# { plugin = <plugin>, optimization = <optimization>, instance_name = <optional>,
+#   constraint_lower = <optional>, constraint_upper = <optional> }
 # where <optimization> is one of "minimize", "maximize", "none" (do not optimize)
+# and constraints define hard feasibility gates. For example, a perplexity
+# fraction scorer can use constraint_upper = 0.005 to cap degradation at 0.5%.
 scorers = [
     { plugin = "heretic.scorers.keyword_rate.KeywordRate", optimization = "minimize"},
     { plugin = "heretic.scorers.kl_divergence.KLDivergence", optimization = "minimize"},
@@ -111,6 +114,14 @@ row_normalization = "full"
 # larger output files and may slow down evaluation.
 full_normalization_lora_rank = 3
 
+# Number of fused routed experts transformed in FP32 at once. This keeps exact
+# FULL row normalization practical on MoE models without allocating one giant
+# FP32 copy of all experts.
+fused_expert_chunk_size = 8
+
+# Store text-free realized edit norms and runtime/VRAM telemetry per trial.
+record_edit_telemetry = true
+
 # The symmetric winsorization to apply to the per-prompt, per-layer residual vectors,
 # expressed as the quantile to clamp to (between 0 and 1). Disabled by default.
 # This can tame so-called "massive activations" that occur in some models.
@@ -128,6 +139,21 @@ n_startup_trials = 60
 # legacy multivariate-TPE startup. "sobol" uses a scrambled Sobol sequence and
 # then switches to multivariate TPE trained on those observations.
 startup_design = "random"
+
+# Use grouped multivariate TPE. Enable this together with
+# conditional_components so Optuna models each dynamic subspace separately.
+tpe_group = false
+
+# Let the search disable entire editable components instead of spending four
+# zero-ish curve parameters on them. Requires tpe_group = true.
+conditional_components = false
+
+# Candidate selection after optimization. The default removes infeasible trials
+# first, then orders the feasible Pareto front by primary_objective.
+selection_policy = "feasible_lexicographic"
+
+# Optional exact scorer display name to prioritize in lexicographic selection.
+# primary_objective = "KeywordRate"
 
 # Write a text-free fANOVA parameter-importance report after every N completed
 # trials. The report is saved next to the study journal and does not influence

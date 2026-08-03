@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import optuna
+from optuna.distributions import distribution_to_json
 from optuna.storages import JournalStorage
 from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 from optuna.trial import TrialState, create_trial
@@ -67,6 +68,53 @@ def canonical_params(params: dict[str, Any]) -> str:
     return json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
 
 
+STAGE_ONLY_SETTING_KEYS = {
+    "checkpoint_action",
+    "device_map",
+    "n_startup_trials",
+    "n_trials",
+    "optimization_only",
+    "parallel_workers",
+    "seed",
+    "startup_design",
+    "study_checkpoint_dir",
+    "worker_trial_budget",
+}
+
+
+def study_contract(settings: dict[str, Any]) -> dict[str, Any]:
+    """Drop stage controls while retaining the model/scorer/search contract."""
+
+    return {
+        key: value
+        for key, value in settings.items()
+        if key not in STAGE_ONLY_SETTING_KEYS
+    }
+
+
+def canonical_hash(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def distribution_map(study: optuna.study.Study) -> dict[str, str]:
+    distributions: dict[str, str] = {}
+    for trial in study.trials:
+        for name, distribution in trial.distributions.items():
+            serialized = distribution_to_json(distribution)
+            previous = distributions.setdefault(name, serialized)
+            if previous != serialized:
+                raise ValueError(
+                    f"Study changes the distribution for parameter {name!r}"
+                )
+    return distributions
+
+
 def main() -> None:
     args = parse_args()
     sources = [parse_source(spec) for spec in args.source]
@@ -83,7 +131,10 @@ def main() -> None:
     source_records: list[dict[str, Any]] = []
     source_trials: list[tuple[str, optuna.trial.FrozenTrial]] = []
     source_settings: dict[str, Any] | None = None
+    source_contract: dict[str, Any] | None = None
+    shared_distributions: dict[str, str] = {}
     directions: list[str] | None = None
+    constraint_names: list[str] | None = None
 
     for source_name, source_path in sources:
         study = load_study(source_path)
@@ -102,11 +153,32 @@ def main() -> None:
             raise ValueError(
                 f"Source {source_name} contains non-complete trials: {noncomplete}"
             )
+        raw_settings = study.user_attrs.get("settings")
+        if not isinstance(raw_settings, str):
+            raise ValueError(f"Source {source_name} has no archived settings JSON")
+        current_settings = json.loads(raw_settings)
+        current_contract = study_contract(current_settings)
         if source_settings is None:
-            raw_settings = study.user_attrs.get("settings")
-            if not isinstance(raw_settings, str):
-                raise ValueError(f"Source {source_name} has no archived settings JSON")
-            source_settings = json.loads(raw_settings)
+            source_settings = current_settings
+            source_contract = current_contract
+        elif current_contract != source_contract:
+            raise ValueError(
+                f"Source {source_name} uses a different model/scorer/search contract"
+            )
+
+        current_constraints = list(study.user_attrs.get("constraint_names", []))
+        if constraint_names is None:
+            constraint_names = current_constraints
+        elif current_constraints != constraint_names:
+            raise ValueError("Source studies use different scorer constraints")
+
+        current_distributions = distribution_map(study)
+        for name in set(shared_distributions) & set(current_distributions):
+            if shared_distributions[name] != current_distributions[name]:
+                raise ValueError(
+                    f"Source studies disagree on distribution for parameter {name!r}"
+                )
+        shared_distributions.update(current_distributions)
 
         source_records.append(
             {
@@ -115,6 +187,7 @@ def main() -> None:
                 "sha256": sha256(source_path),
                 "trials": len(study.trials),
                 "finished": bool(study.user_attrs.get("finished", False)),
+                "contract_sha256": canonical_hash(current_contract),
             }
         )
         source_trials.extend((source_name, trial) for trial in study.trials)
@@ -125,6 +198,7 @@ def main() -> None:
             f"of {len(source_trials)} trials"
         )
     assert source_settings is not None
+    assert source_contract is not None
     assert directions is not None
 
     signatures: dict[str, int] = {}
@@ -187,6 +261,7 @@ def main() -> None:
         json.dumps(source_settings, separators=(",", ":")),
     )
     merged.set_user_attr("finished", False)
+    merged.set_user_attr("constraint_names", constraint_names or [])
     merged.set_user_attr(
         "merge_provenance",
         {
@@ -210,6 +285,9 @@ def main() -> None:
         "output_sha256": sha256(output),
         "sources": source_records,
         "objective_directions": directions,
+        "constraint_names": constraint_names or [],
+        "contract_sha256": canonical_hash(source_contract),
+        "search_space_distributions": shared_distributions,
         "merged_prefix_trials": len(clones),
         "target_trials": args.target_trials,
         "continuation_trials": args.target_trials - len(clones),

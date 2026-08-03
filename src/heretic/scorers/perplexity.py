@@ -131,19 +131,26 @@ class Perplexity(Scorer):
         return [ids[i * w:(i + 1) * w] for i in range(n)]
 
     @torch.no_grad()
-    def _perplexity(self, ctx: Context) -> float:
+    def _perplexity(self, ctx: Context) -> tuple[float, list[float], int]:
         model, _ = self._model_and_tokenizer(ctx)
         device = next(model.parameters()).device
         total, count = 0.0, 0
+        window_nll: list[float] = []
         for w in self._windows_cached:
             ids = w.unsqueeze(0).to(device)
             # The model shifts labels by one token internally.
             out = model(ids, labels=ids)
             # out.loss is mean NLL over n-1 targets. Weight by that count so
             # windows of different lengths contribute per token.
-            total += float(out.loss) * (ids.shape[1] - 1)
+            loss = float(out.loss)
+            window_nll.append(loss)
+            total += loss * (ids.shape[1] - 1)
             count += ids.shape[1] - 1
-        return float(torch.exp(torch.tensor(total / max(count, 1))))
+        return (
+            float(torch.exp(torch.tensor(total / max(count, 1)))),
+            window_nll,
+            count,
+        )
 
     def init(self, ctx: Context) -> None:
         print()
@@ -152,11 +159,13 @@ class Perplexity(Scorer):
         print(f"* [bold]{len(self._windows_cached)}[/] windows of "
               f"[bold]{self.settings.window}[/] tokens")
         print("* Measuring baseline perplexity...")
-        self._baseline = self._perplexity(ctx)
+        self._baseline, self._baseline_window_nll, self._baseline_token_count = (
+            self._perplexity(ctx)
+        )
         print(f"* Baseline perplexity: [bold]{self._baseline:.4f}[/]")
 
     def get_score(self, ctx: Context) -> Score:
-        ppl = self._perplexity(ctx)
+        ppl, window_nll, token_count = self._perplexity(ctx)
         rel = ppl / self._baseline - 1.0
         # The front-selection menu prints this field without Rich parsing.
         # Markup would appear verbatim, as in "[bold]51.71[/]".
@@ -164,4 +173,11 @@ class Perplexity(Scorer):
             value=rel,
             rich_display=f"{ppl:.4f} ({rel * 100:+.2f}% vs baseline)",
             md_display=f"{ppl:.4f} ({rel * 100:+.2f}%)",
+            diagnostics={
+                "perplexity": ppl,
+                "baseline_perplexity": self._baseline,
+                "token_count": token_count,
+                "window_nll": window_nll,
+                "baseline_window_nll": self._baseline_window_nll,
+            },
         )
