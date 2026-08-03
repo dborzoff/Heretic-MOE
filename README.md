@@ -8,7 +8,57 @@
 > keeps the original CLI while adding architecture-aware editing, perplexity
 > optimization, reproducible journal exports, mixed Random/Sobol exploration,
 > multivariate-TPE continuation, and optional shared-study workers. See
-> [FORK.md](FORK.md) for the exact changes, evidence, and compatibility notes.
+> [FORK.md](FORK.md) for the complete implementation notes, measured evidence,
+> limitations, and reproducibility links.
+
+## Heretic Adaptive fork
+
+The fork keeps upstream Heretic's directional-ablation method and changes the
+parts that made modern architectures hard to search or reproduce:
+
+| Problem | Change in this fork |
+|---|---|
+| Batched 3D expert tensors were skipped | Detect and edit supported fused-MoE down projections in reversible chunks |
+| Hybrid blocks shared one depth schedule | Separate full attention, linear attention, routed experts, and shared experts |
+| First-token KL missed later degradation | Add GPU perplexity with frozen local text and a larger post-export check |
+| One startup sequence left coverage gaps | Combine Random and scrambled Sobol exploration before multivariate TPE |
+| Parallel runs could duplicate work | Share one locked Optuna journal with constant-liar TPE and exact worker budgets |
+| Pareto ordering changed over time | Restore and export by immutable Optuna trial number |
+| Semantic judging made every trial slow | Keep fast proxies in the search loop and judge only exported finalists |
+
+The current reference study completed 600 trials on Ministral-3-3B. The two
+selected BF16 models are published together as
+[Ministral-3-3B-Instruct-2512 Heretic Adaptive v1](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1).
+
+<p align="center">
+  <img width="960" alt="Exact exported-model validation for Heretic Adaptive max and balanced variants" src="docs/assets/adaptive-finalists.svg" />
+</p>
+
+| System | Delivered | Policy refusal | Evasion | Refusal + evasion | Exact PPL change |
+|---|---:|---:|---:|---:|---:|
+| Base | 43/136 | 47/136 | 45/136 | 92/136 | 0% |
+| [`max`](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1/tree/main/max) | 101/136 | 2/136 | 32/136 | 34/136 | +0.04696% |
+| [`balanced`](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1/tree/main/balanced) | 85/136 | 7/136 | 42/136 | 49/136 | +0.00380% |
+
+The semantic pass was blind, multilingual, and used up to 2,048 new tokens.
+Exact PPL used 400 × 512-token windows after export and reload. These are
+results for one frozen evaluation, not a claim of universal behavior.
+
+<details>
+<summary><strong>Show the real 600-trial search animation</strong></summary>
+
+<br>
+
+<p align="center">
+  <img width="960" alt="Animation of the Heretic Adaptive Pareto front across 600 trials" src="docs/assets/adaptive-search-progress.gif" />
+</p>
+
+The run used 60 Random startup trials, 60 follow-up TPE trials, 60 scrambled
+Sobol startup trials, 60 follow-up TPE trials, and 360 shared multivariate-TPE
+trials after merging both histories. The animation uses the fast search-time
+proxies; the table and static graph use the larger post-export validation.
+
+</details>
 
 [![#1 Repository of the Day](https://trendshift.io/api/badge/repositories/20538)](https://trendshift.io/repositories/20538)
 
