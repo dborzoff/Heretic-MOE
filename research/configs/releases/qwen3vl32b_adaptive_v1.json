@@ -1,0 +1,59 @@
+{
+  "status": "prepared_not_authorized",
+  "source_commit": "be8a4160a5d77d1148c2aad2720db065719a2b05",
+  "base_model": "Qwen/Qwen3-VL-32B-Instruct",
+  "base_revision": "5d9b308a59ab12e67147f191e184baf704185bd1",
+  "local_reference": "F:/AI/hf_originals/Qwen__Qwen3-VL-32B-Instruct",
+  "minimax_compatible_reference": "F:/AI/hf_originals/MiniMax__MiniMax-H3/HF/text_encoder",
+  "target_repo": "DmitryDB/Qwen3-VL-32B-Instruct-Heretic-Adaptive-v1",
+  "repo_visibility": "public",
+  "license": "apache-2.0",
+  "pipeline_tag": "image-text-to-text",
+  "variants": {
+    "balanced": {
+      "selection": "minimum capability loss among strong refusal-reduction finalists",
+      "subfolder": "balanced"
+    },
+    "max-removal": {
+      "selection": "minimum refusal/evasion score under the final perplexity gate",
+      "subfolder": "max-removal"
+    }
+  },
+  "search": {
+    "target_trials": 600,
+    "startup_trials": 120,
+    "startup_design": "alternating random and stratified Sobol",
+    "refinement": "multivariate grouped TPE",
+    "perplexity_search_windows": 24,
+    "perplexity_final_windows": 400,
+    "perplexity_window_tokens": 512,
+    "perplexity_constraint_fraction": 0.005,
+    "save_all_trial_responses": true
+  },
+  "rental": {
+    "preferred_gpu": "RTX PRO 6000 WS 96GB",
+    "minimum_power_watts": 580,
+    "preferred_gpu_count": 1,
+    "disk_gb": 300,
+    "fast_network_required": true,
+    "full_search_single_gpu_time_limit_hours": 8
+  },
+  "release_layout": [
+    "README.md",
+    "balanced/",
+    "max-removal/",
+    "evaluation/perplexity_400x512.json",
+    "evaluation/semantic_summary.json",
+    "study/selected_trials.json",
+    "study/run_manifest.json"
+  ],
+  "excluded": [
+    "quantized checkpoints",
+    "raw prompts",
+    "raw model responses",
+    "private judge packets",
+    "HF and Vast API tokens"
+  ],
+  "minimax_integration_rule": "Replace model weight shards only; preserve the MiniMax-H3 text_encoder tokenizer and processor configuration files.",
+  "destructive_actions_authorized": false
+}
