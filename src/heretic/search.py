@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 from optuna import Trial
-from optuna.samplers import BaseSampler, QMCSampler, TPESampler
+from optuna.samplers import BaseSampler, QMCSampler, RandomSampler, TPESampler
 from optuna.study import Study
 from optuna.trial import FrozenTrial
 
@@ -87,9 +87,10 @@ class OptimizationRunner:
 
     The legacy path remains a single multivariate TPE sampler with its built-in
     random startup. The Sobol path uses a scrambled low-discrepancy design for
-    the requested prefix, then lets multivariate TPE learn from those completed
-    observations. Samplers are retained across calls so interactive extension
-    does not reset their in-process random state.
+    the requested prefix. The hybrid path alternates explicit Random and Sobol
+    trials in one study, which keeps an interrupted prefix balanced while still
+    giving TPE one combined exploration history. Samplers are retained across
+    calls so interactive extension does not reset their in-process random state.
     """
 
     def __init__(
@@ -98,7 +99,10 @@ class OptimizationRunner:
         startup_design: StartupDesign,
         n_startup_trials: int,
         seed: int | None,
+        parallel_workers: int = 1,
     ) -> None:
+        if parallel_workers <= 0:
+            raise ValueError("parallel_workers must be positive")
         self.startup_design = startup_design
         self.n_startup_trials = n_startup_trials
         self.tpe_sampler = TPESampler(
@@ -107,7 +111,13 @@ class OptimizationRunner:
             ),
             n_ei_candidates=128,
             multivariate=True,
+            constant_liar=parallel_workers > 1,
             seed=seed,
+        )
+        self.random_sampler = (
+            RandomSampler(seed=seed)
+            if startup_design == StartupDesign.HYBRID
+            else None
         )
         self.sobol_sampler = (
             QMCSampler(
@@ -115,12 +125,14 @@ class OptimizationRunner:
                 scramble=True,
                 seed=seed,
             )
-            if startup_design == StartupDesign.SOBOL
+            if startup_design in (StartupDesign.SOBOL, StartupDesign.HYBRID)
             else None
         )
 
     @property
     def initial_sampler(self) -> BaseSampler:
+        if self.random_sampler is not None:
+            return self.random_sampler
         if self.sobol_sampler is not None:
             return self.sobol_sampler
         return self.tpe_sampler
@@ -138,16 +150,32 @@ class OptimizationRunner:
         if target_trial_count < len(study.trials):
             raise ValueError("target_trial_count is below the existing trial count")
 
-        if self.sobol_sampler is not None and len(study.trials) < min(
-            self.n_startup_trials, target_trial_count
-        ):
+        startup_target = min(self.n_startup_trials, target_trial_count)
+        if self.random_sampler is not None and len(study.trials) < startup_target:
+            assert self.sobol_sampler is not None
+            while len(study.trials) < startup_target:
+                study.sampler = (
+                    self.random_sampler
+                    if len(study.trials) % 2 == 0
+                    else self.sobol_sampler
+                )
+                study.optimize(
+                    objective,
+                    n_trials=1,
+                    callbacks=list(callbacks),
+                )
+        elif self.sobol_sampler is not None and len(study.trials) < startup_target:
             study.sampler = self.sobol_sampler
-            startup_target = min(self.n_startup_trials, target_trial_count)
             study.optimize(
                 objective,
                 n_trials=startup_target - len(study.trials),
                 callbacks=list(callbacks),
             )
+
+        if self.sobol_sampler is not None and len(study.trials) < min(
+            self.n_startup_trials, target_trial_count
+        ):
+            raise RuntimeError("Startup sampler did not reach its requested target")
 
         remaining_trials = target_trial_count - len(study.trials)
         if remaining_trials > 0:
@@ -157,3 +185,26 @@ class OptimizationRunner:
                 n_trials=remaining_trials,
                 callbacks=list(callbacks),
             )
+
+    def optimize_budget(
+        self,
+        study: Study,
+        objective: Objective,
+        *,
+        trial_budget: int,
+        callbacks: Sequence[StudyCallback] = (),
+    ) -> None:
+        """Run this worker's exact TPE budget against a shared study."""
+
+        if trial_budget <= 0:
+            raise ValueError("trial_budget must be positive")
+        if len(study.trials) < self.n_startup_trials:
+            raise ValueError(
+                "Parallel worker budgets require the exploration prefix to be complete"
+            )
+        study.sampler = self.tpe_sampler
+        study.optimize(
+            objective,
+            n_trials=trial_budget,
+            callbacks=list(callbacks),
+        )

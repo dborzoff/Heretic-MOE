@@ -2,6 +2,14 @@
 
 # Heretic: Fully automatic censorship removal for language models<br><br>[![Discord](https://img.shields.io/discord/1447831134212984903?color=5865F2&label=discord&labelColor=black&logo=discord&logoColor=white&style=for-the-badge)](https://discord.gg/gdXc48gSyT) [![Matrix](https://img.shields.io/badge/Matrix-black?logo=matrix&style=for-the-badge)](https://matrix.to/#/#heretic:matrix.org) [![Follow us on Hugging Face](https://huggingface.co/datasets/huggingface/badges/resolve/main/follow-us-on-hf-md-dark.svg)](https://huggingface.co/heretic-org) [![Codeberg mirror](https://img.shields.io/badge/Codeberg%20mirror-black?logo=codeberg&style=for-the-badge)](https://codeberg.org/p-e-w/heretic)
 
+> [!NOTE]
+>
+> This repository is **Heretic Adaptive**, the `dborzoff/heretic` fork. It
+> keeps the original CLI while adding architecture-aware editing, perplexity
+> optimization, reproducible journal exports, mixed Random/Sobol exploration,
+> multivariate-TPE continuation, and optional shared-study workers. See
+> [FORK.md](FORK.md) for the exact changes, evidence, and compatibility notes.
+
 [![#1 Repository of the Day](https://trendshift.io/api/badge/repositories/20538)](https://trendshift.io/repositories/20538)
 
 Heretic is a tool that removes censorship (aka "safety alignment") from

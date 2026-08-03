@@ -47,6 +47,7 @@ class ExportStrategy(str, Enum):
 class StartupDesign(str, Enum):
     RANDOM = "random"
     SOBOL = "sobol"
+    HYBRID = "hybrid"
 
 
 class SeedSelection(str, Enum):
@@ -416,7 +417,9 @@ class Settings(BaseSettings):
         description=(
             'Exploration design for the first n_startup_trials: "random" keeps '
             'the legacy multivariate-TPE startup; "sobol" uses a scrambled Sobol '
-            "sequence before switching to multivariate TPE."
+            'sequence; "hybrid" alternates Random and scrambled Sobol trials in '
+            "one shared study. Every non-random design then switches to "
+            "multivariate TPE with the complete exploration history."
         ),
     )
 
@@ -436,6 +439,24 @@ class Settings(BaseSettings):
             "to restore, export, or benchmark a selected trial. Useful for a "
             "discovery stage whose Pareto points seed a separate full-fidelity study."
         ),
+    )
+
+    parallel_workers: PositiveInt = Field(
+        default=1,
+        description=(
+            "Number of concurrent Optuna workers sharing this study. Values above "
+            "1 enable TPE constant-liar handling for running trials."
+        ),
+    )
+
+    worker_trial_budget: PositiveInt | None = Field(
+        default=None,
+        description=(
+            "Exact number of trials assigned to this process. Intended for a "
+            "parallel continuation whose per-worker budgets sum to the remaining "
+            "global trial target."
+        ),
+        exclude=True,
     )
 
     seed_trials_from: str | None = Field(
@@ -565,6 +586,16 @@ class Settings(BaseSettings):
     trial_index: NonNegativeInt | None = Field(
         default=None,
         description="Index (in the sorted Pareto front) of the trial to use, or unset to prompt the user.",
+    )
+
+    restore_trial_number: NonNegativeInt | None = Field(
+        default=None,
+        description=(
+            "Exact Optuna trial number to restore for unattended export. Unlike "
+            "trial_index, this remains stable when another study changes the "
+            "combined Pareto ordering."
+        ),
+        exclude=True,
     )
 
     n_additional_trials: PositiveInt | None = Field(

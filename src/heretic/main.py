@@ -408,10 +408,22 @@ def run():
             # stroke. Chast poley (save_directory, upload_repo_id) pomechena
             # exclude=True i v zhurnal ne popadaet vovse - posle podmeny oni
             # None, i heretic nachinaet sprashivat put u polzovatelya.
-            for _f in ("save_directory", "model_action", "upload_repo_id",
-                       "trial_index", "batch_size", "export_strategy"):
+            for _f in (
+                "save_directory",
+                "model_action",
+                "upload_repo_id",
+                "trial_index",
+                "restore_trial_number",
+                "batch_size",
+                "export_strategy",
+                "optimization_only",
+                "parallel_workers",
+                "worker_trial_budget",
+            ):
                 _v = getattr(_cli, _f, None)
-                if _v is not None:
+                if _v is not None and (
+                    _f != "optimization_only" or _f in _cli.model_fields_set
+                ):
                     setattr(settings, _f, _v)
                     print(f"iz komandnoy stroki: {_f}={_v}")
         elif action == "restart":
@@ -602,7 +614,9 @@ def run():
 
     def objective(trial: Trial) -> tuple[float, ...]:
         nonlocal trial_index
-        trial_index += 1
+        # Optuna allocates trial numbers atomically in shared storage. Deriving the
+        # display index from that number keeps it unique across parallel workers.
+        trial_index = trial.number + 1
         trial.set_user_attr("index", trial_index)
 
         direction_scope = trial.suggest_categorical(
@@ -765,6 +779,7 @@ def run():
             startup_design=settings.startup_design,
             n_startup_trials=settings.n_startup_trials,
             seed=settings.seed,
+            parallel_workers=settings.parallel_workers,
         )
         study = optuna.create_study(
             sampler=optimization_runner.initial_sampler,
@@ -801,12 +816,20 @@ def run():
             print(f"Enqueued [bold]{len(seeds)}[/] seed trials from a previous study.")
 
         try:
-            optimization_runner.optimize_to(
-                study,
-                objective_wrapper,
-                target_trial_count=settings.n_trials,
-                callbacks=study_callbacks,
-            )
+            if settings.worker_trial_budget is None:
+                optimization_runner.optimize_to(
+                    study,
+                    objective_wrapper,
+                    target_trial_count=settings.n_trials,
+                    callbacks=study_callbacks,
+                )
+            else:
+                optimization_runner.optimize_budget(
+                    study,
+                    objective_wrapper,
+                    trial_budget=settings.worker_trial_budget,
+                    callbacks=study_callbacks,
+                )
         except KeyboardInterrupt:
             # This additional handler takes care of the small chance that KeyboardInterrupt
             # is raised just between trials, which wouldn't be caught by the handler
@@ -901,7 +924,10 @@ def run():
 
         while trial_loop_active:
             # Ensure a predefined trial is only processed once.
-            if settings.trial_index is not None:
+            if (
+                settings.trial_index is not None
+                or settings.restore_trial_number is not None
+            ):
                 trial_loop_active = False
 
             if reproduction_mode:
@@ -922,10 +948,28 @@ def run():
                 if settings.trial_index is None:
                     print()
 
+                if settings.restore_trial_number is not None:
+                    selected_trial = next(
+                        (
+                            candidate
+                            for candidate in completed_trials
+                            if candidate.number == settings.restore_trial_number
+                        ),
+                        None,
+                    )
+                    if selected_trial is None:
+                        raise ValueError(
+                            "restore_trial_number "
+                            f"{settings.restore_trial_number} does not name a "
+                            "completed trial"
+                        )
+                elif settings.trial_index is not None:
+                    selected_trial = sorted_trials[settings.trial_index]
+                else:
+                    selected_trial = None
+
                 trial = ask_if_unset(
-                    None
-                    if settings.trial_index is None
-                    else sorted_trials[settings.trial_index],
+                    selected_trial,
                     questionary.select(
                         "Which trial do you want to use?",
                         choices=choices,

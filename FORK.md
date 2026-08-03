@@ -1,12 +1,39 @@
-# What this fork changes
+# Heretic Adaptive: what this fork changes
 
 Heretic works by removing a refusal direction from a model's output
-projections. This fork makes that work on fused-MoE architectures, and changes
-what the search optimises for.
+projections. **Heretic Adaptive** is the `dborzoff/heretic` fork: it makes that
+work on fused-MoE and hybrid-attention architectures, changes what the search
+optimises for, and keeps every selected model reproducible from its study
+journal.
 
-Changes live on `master`, so `git clone` is all a machine needs. Upstream is
-tracked as `upstream` and rebases cleanly: nothing in the original README or
-CLI surface is touched.
+Production changes live on `master`, while superseded experiments remain on
+the `test` branch. Upstream is tracked as `upstream`; the original CLI remains
+compatible and new controls are optional.
+
+## Adaptive search workflow
+
+The production search is deliberately broad before it becomes local:
+
+1. Random and scrambled-Sobol exploration cover different parts of the same
+   parameter space.
+2. The completed exploration history is merged into one study.
+3. Multivariate TPE continues from that shared history instead of restarting.
+4. Periodic fANOVA diagnostics report which parameters matter without changing
+   the sampler mid-study.
+5. Exact perplexity on a frozen local token stream validates the Pareto
+   finalists; semantic judging is kept outside the high-volume optimization
+   loop.
+
+For a single shared study, `startup_design = "hybrid"` alternates Random and
+Sobol startup trials before switching to multivariate TPE. Optional workers use
+Optuna constant-liar handling and exact per-worker budgets against the same
+journal. The Windows journal path uses `JournalFileOpenLock`, so it does not
+require symlink privileges. An exact completed trial can later be restored by
+`restore_trial_number`, independent of changes to Pareto-front ordering.
+
+The reference plan and frozen provenance are in
+[`research/ADAPTIVE_SEARCH_V2_PLAN.md`](research/ADAPTIVE_SEARCH_V2_PLAN.md) and
+[`research/T190_PROVENANCE.md`](research/T190_PROVENANCE.md).
 
 ## 1. Fused MoE experts
 
