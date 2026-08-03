@@ -479,7 +479,7 @@ class Model:
         return sorted(components)
 
     def _has_fused_experts(self) -> bool:
-        """Есть ли в модели эксперты, упакованные батчем вместо ModuleList."""
+        """Return whether any layer stores experts as a batched 3D parameter."""
         for layer in self.get_layers():
             mlp = getattr(layer, "mlp", None)
             experts = getattr(mlp, "experts", None)
@@ -730,7 +730,7 @@ class Model:
             fused.data.copy_((original_fp32 - delta).to(fused.dtype))
 
     def _apply_template_safe(self, chats, **kwargs):
-        """Шаблон модели может не знать роль system - тогда собираем без неё."""
+        """Retry without a system role when the template rejects it."""
         try:
             return self.tokenizer.apply_chat_template(chats, **kwargs)
         except Exception as error:
@@ -757,7 +757,7 @@ class Model:
                         {"role": "user", "content": prompt.user},
                     ])
                 else:
-                    # шаблон без роли system - подмешиваем её в сообщение пользователя
+                    # Templates without a system role receive it in the user message.
                     text = (f"{prompt.system}\n\n{prompt.user}"
                             if prompt.system else prompt.user)
                     out.append([{"role": "user", "content": text}])

@@ -99,10 +99,9 @@ max_weight_position   0.6..1.0 depth   ->  0.0..1.0 depth
 min_weight_distance   1.0..0.6 depth   ->  1.0..1.5 depth
 ```
 
-Nothing is taken away: the old optimum is still inside the new space. But the
-space is larger, so on a model where the old bounds happened to be right, a
-fixed trial budget will spend some of itself confirming that. Worth knowing
-before running this on something other than a hybrid MoE.
+The old optimum remains inside the new space. The larger space costs exploration:
+on a model where the old bounds were right, a fixed budget spends trials
+confirming them.
 
 ## 3. Perplexity as an objective
 
@@ -144,8 +143,8 @@ That cost us a whole search before we noticed. This checks the front after the
 run and says so:
 
 ```
-Лучшие точки жмутся к границам поиска:
-  * mlp.down_proj.max_weight: 7 из 9 точек фронта у верхнему пределу (1.500)
+Pareto-front trials are crowding the search bounds:
+  * mlp.down_proj.max_weight: 7 of 9 front trials are near the upper bound (1.500)
 ```
 
 Moving bounds mid-study is *not* the fix and is not attempted here: a
@@ -201,10 +200,9 @@ The full pipeline — direction, ablation, both scorers, rollback between trials
 front selection — has been run end to end on gemma-2-2b-it, a plain dense
 model, as a check that none of this disturbs the ordinary path.
 
-**The widened bounds are the one change that affects every model.** Nothing is
-taken away, but the space is larger, so a fixed trial budget explores it more
-thinly. Worth knowing before running this on something that was already well
-served by the original bounds.
+**The widened bounds are the one change that affects every model.** The old
+optimum remains available, but a fixed trial budget explores the larger space
+more thinly.
 
 ## Not done yet
 

@@ -462,24 +462,18 @@ class Settings(BaseSettings):
     seed_trials_from: str | None = Field(
         default=None,
         description=(
-            "Path to a journal file from a previous study whose best trials should be"
-            " enqueued into a new one. Use this when the objective changed - stored"
-            " objective values are then meaningless and the study has to start over,"
-            " but the parameter sets that reached the front are still the best guess"
-            " available. Parameters that no longer exist are ignored; ones that are"
-            " new to this search get sampled as usual."
+            "Journal file from an earlier study. Its Pareto-front parameters are"
+            " enqueued when a changed objective makes stored scores unusable."
+            " Removed parameters are dropped; new ones are sampled."
         ),
     )
 
     seed_trials_count: NonNegativeInt = Field(
         default=12,
         description=(
-            "How many of the previous study's front points to enqueue. Each costs one"
-            " trial to re-evaluate under the new objective."
-            " Keep this modest when the search space itself changed: a seeded point"
-            " then fixes only the parameters that still mean what they used to, and"
-            " the rest are sampled anyway, so a large seed spends the budget"
-            " re-checking half-random points instead of exploring."
+            "Number of old front points to enqueue. Each consumes one trial under"
+            " the new objective. Keep this modest after changing the search space:"
+            " a large seed re-evaluates half-sampled points instead of exploring."
         ),
     )
 
