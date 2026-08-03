@@ -1,235 +1,286 @@
-# Heretic Adaptive: what this fork changes
+# Heretic Adaptive
 
-Heretic works by removing a refusal direction from a model's output
-projections. **Heretic Adaptive** is the `dborzoff/heretic` fork: it makes that
-work on fused-MoE and hybrid-attention architectures, changes what the search
-optimises for, and keeps every selected model reproducible from its study
-journal.
+This document describes the maintained `dborzoff/heretic` fork, the problems it
+fixes, the workflow added on top of upstream Heretic, and the evidence available
+for the current production path.
 
-Production changes live on `master`, while superseded experiments remain on
-the `test` branch. Upstream is tracked as `upstream`; the original CLI remains
-compatible and new controls are optional.
+The fork keeps the upstream CLI and model-editing method. Its main changes are:
 
-## Adaptive search workflow
+- architecture-aware support for fused MoE and hybrid-attention models;
+- component-specific search schedules instead of sharing one curve across
+  structurally different blocks;
+- perplexity as an optimization and validation signal;
+- broader, reproducible search followed by shared multivariate TPE;
+- exact trial restoration and unattended export;
+- text-free evaluation and research tools that do not require prompt or answer
+  text in reports.
 
-The production search is deliberately broad before it becomes local:
+Production changes live on `master`. Superseded localized-search experiments
+remain on the `test` branch and are not part of the default workflow.
 
-1. Random and scrambled-Sobol exploration cover different parts of the same
-   parameter space.
-2. The completed exploration history is merged into one study.
-3. Multivariate TPE continues from that shared history instead of restarting.
-4. Periodic fANOVA diagnostics report which parameters matter without changing
-   the sampler mid-study.
-5. Exact perplexity on a frozen local token stream validates the Pareto
-   finalists; semantic judging is kept outside the high-volume optimization
-   loop.
+## Current result
 
-For a single shared study, `startup_design = "hybrid"` alternates Random and
-Sobol startup trials before switching to multivariate TPE. Optional workers use
-Optuna constant-liar handling and exact per-worker budgets against the same
-journal. The Windows journal path uses `JournalFileOpenLock`, so it does not
-require symlink privileges. An exact completed trial can later be restored by
-`restore_trial_number`, independent of changes to Pareto-front ordering.
+The current reference run used
+[`mistralai/Ministral-3-3B-Instruct-2512`](https://huggingface.co/mistralai/Ministral-3-3B-Instruct-2512).
+It completed 600 search trials and produced two published BF16 variants:
 
-The reference plan and frozen provenance are in
-[`research/ADAPTIVE_SEARCH_V2_PLAN.md`](research/ADAPTIVE_SEARCH_V2_PLAN.md) and
-[`research/T190_PROVENANCE.md`](research/T190_PROVENANCE.md).
+- [`max`](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1/tree/main/max)
+  favors lower residual refusal/evasion.
+- [`balanced`](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1/tree/main/balanced)
+  favors lower measured model change.
 
-## 1. Fused MoE experts
+![Exact exported-model validation](docs/assets/adaptive-finalists.svg)
 
-Qwen3.5/3.6 MoE stores its 256 routed experts as `nn.Parameter` tensors of
-shape `[num_experts, out_features, in_features]`, not as a `ModuleList` of
-`Linear` layers. Heretic walks a model looking for linear modules, so on these
-architectures the routed experts — **92% of the weights** — are passed over in
-silence and only attention is edited.
+The semantic evaluation was blind, used 136 multilingual prompts, and allowed
+up to 2,048 new tokens per answer. Perplexity was then measured independently on
+400 windows of 512 tokens after exporting and reloading the complete models.
 
-The experts are where the model lives. In our 528-trial search on
-Qwen3.6-35B-A3B, trials that left the MLP weight near zero (attention-only, the
-way abliteration works without this patch) never got below **59 refusals out of
-100**, across 57 such trials. Everything under 12 needed the experts.
+| System | Delivered | Policy refusal | Evasion | Refusal + evasion | Incoherent failure | Exact PPL change |
+|---|---:|---:|---:|---:|---:|---:|
+| Base | 43/136 | 47/136 | 45/136 | 92/136 | 1/136 | 0% |
+| `max` | 101/136 | 2/136 | 32/136 | 34/136 | 1/136 | +0.04696% |
+| `balanced` | 85/136 | 7/136 | 42/136 | 49/136 | 2/136 | +0.00380% |
 
-Applied per expert in chunks of 32 to bound peak memory; originals are cached
-so a trial can be undone.
+`Delivered` combines complete compliance, degraded compliance, and answers that
+were cut by the generation limit after providing relevant content. `Evasion`
+combines substitution, legal-only redirection, and safety-oriented inversion.
 
-## 2. One weight schedule per component that deserves one
+These numbers do not mean that the models are perfect or universally
+uncensored. They describe one frozen evaluation. The per-row text-free labels,
+aggregate counts, exact PPL report, and selected-trial metadata are published in
+the [model repository](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1).
 
-Heretic builds one set of four numbers — peak weight, its position, the minimum
-and the span — per *component key*. On this architecture each key covers two
-structurally different things:
+## The 600-trial workflow
 
-| key | what is actually under it |
+The production run did not perform 600 undirected random edits. It used five
+stages:
+
+1. 60 Random startup trials for broad coverage.
+2. 60 multivariate-TPE trials continuing the Random study.
+3. 60 scrambled-Sobol startup trials for more even coverage.
+4. 60 multivariate-TPE trials continuing the Sobol study.
+5. The 240 completed trials were merged into one study, followed by 360 shared
+   multivariate-TPE trials.
+
+![Adaptive search progression](docs/assets/adaptive-search-progress.gif)
+
+The animation is generated from the real Optuna journal. The displayed search
+objectives are a fast keyword refusal proxy and a 24 × 512-token perplexity
+surrogate. The graph is intentionally limited to a +2% surrogate-PPL view; the
+counter in the top-right reports completed high-cost trials outside the frame.
+
+The frozen, text-free plot data is available at
+[`docs/data/ministral-adaptive-v1-search.json`](docs/data/ministral-adaptive-v1-search.json).
+The figure and animation can be regenerated with
+[`research/scripts/render_adaptive_search_visuals.py`](research/scripts/render_adaptive_search_visuals.py).
+
+## What was fixed
+
+### 1. Fused MoE output projections were invisible to Heretic
+
+Some MoE architectures store all expert matrices for a layer in one batched 3D
+`nn.Parameter` instead of a `ModuleList` of ordinary linear layers. Upstream
+Heretic discovers linear modules, so those tensors were skipped.
+
+The fork detects supported fused layouts, caches the original tensors so every
+trial remains reversible, performs the projection in bounded chunks, and writes
+the edited tensor back in its original dtype.
+
+For Qwen3.6-35B-A3B, the routed-expert down projections targeted by this path are
+about 10.7B parameters, roughly 31% of the model. All three routed-expert
+matrices together are about 32.2B; earlier fork documentation incorrectly
+described the editable down-projection target itself as 92% of the model.
+
+### 2. Structurally different blocks shared one search curve
+
+Hybrid models can place full attention, linear attention, routed experts, and a
+shared expert under only two broad component names. Sharing one depth schedule
+forces the optimizer to strengthen and weaken unrelated blocks together.
+
+The fork keeps the original component names for compatibility and adds more
+specific keys when the architecture exposes them:
+
+| Component key | Target |
 |---|---|
-| `attn.o_proj` | `self_attn.o_proj` (10 layers, 0.27B) + `linear_attn.out_proj` (30 layers, 1.01B) |
-| `mlp.down_proj` | routed experts, 8 of 256 fire per token, 32.21B + shared expert, fires always, 0.13B |
+| `attn.o_proj` | ordinary/full-attention output projection |
+| `attn.linear.out_proj` | linear-attention output projection |
+| `mlp.down_proj` | dense MLP output projection |
+| `mlp.experts.down_proj` | routed fused-expert output projections |
+| `mlp.shared.down_proj` | always-active shared-expert output projection |
 
-The model is a hybrid: only every fourth layer (3, 7, 11 … 39) carries full
-attention; the other thirty use linear attention. Linear attention holds four
-times the weight and three times the layers, yet moves on the same knob. The
-shared expert is 250× lighter than the routed ones but runs on every token, so
-what its edit costs per unit of weight is not comparable.
+Models without hybrid or fused components continue to expose the original two
+keys. Stored studies therefore remain usable for ordinary dense models.
 
-With one knob the search cannot keep the useful part of an edit and drop the
-expensive part.
+### 3. The original depth bounds clipped useful solutions
 
-The split is done by **adding** two keys rather than renaming the existing ones:
+The previous search assumed that the edit peak belonged late in the network.
+Earlier experiments repeatedly pressed against those limits. The fork expands
+the peak position to the full model depth and increases the permitted edit
+strength and span while retaining the old range inside the new space.
 
-| key | what lands there | which models see it |
-|---|---|---|
-| `attn.o_proj` | full attention output | all, unchanged |
-| `attn.linear.out_proj` | linear attention output | only hybrids that have one |
-| `mlp.down_proj` | dense MLP / routed experts | all, unchanged |
-| `mlp.shared.down_proj` | shared expert | only models that have one |
+Wider bounds make the search more expensive because more of the space must be
+explored. The fork therefore also reports when Pareto-front trials crowd a bound
+instead of silently treating a clipped optimum as a real optimum.
 
-Any architecture without a linear-attention or shared-expert path therefore
-sees exactly the two keys it saw before, with the same names — which matters
-because parameter names are what a stored study keys on, so renaming them would
-break `--checkpoint-action continue` on existing studies. The lower-bound rule
-keys off component meaning (`mlp.` prefix or `linear` in the name) rather than
-an exact string, for the same reason.
+### 4. First-token KL was not enough to measure model damage
 
-Search bounds are widened at the same time, and this is **the one change that
-affects every model**, not just MoE ones. The old bounds clipped the best
-trials: winners pressed against three of four limits. After widening, the
-record moved from **0.15 to 0.01 refusals**, with the edit peaking at layer 15
-of 40 — far earlier than the old floor of 0.6-of-depth allowed.
+The upstream KL objective compares the first output-token distribution on a
+small prompt set. It is useful, but it can miss degradation that appears later
+in a response.
 
-```
-max_weight            1.5              ->  2.5
-max_weight_position   0.6..1.0 depth   ->  0.0..1.0 depth
-min_weight_distance   1.0..0.6 depth   ->  1.0..1.5 depth
-```
+The fork adds `heretic.scorers.perplexity.Perplexity`, evaluated on fixed token
+windows with the model already resident on the GPU. It supports a local frozen
+text file, which avoids dataset drift and network dependence during a study.
 
-The old optimum remains inside the new space. The larger space costs exploration:
-on a model where the old bounds were right, a fixed budget spends trials
-confirming them.
+The reference run uses two fidelity levels:
 
-## 3. Perplexity as an objective
+- search: 24 × 512-token windows, fast enough for every trial;
+- final validation: 400 × 512-token windows after export and reload.
 
-`KLDivergence` takes 100 harmless prompts and compares the distribution of the
-**first token** of the reply. One hundred numbers. It sees whether the opening
-of an answer changed, and is nearly blind to what follows.
+This distinction matters. Search-time PPL is a ranking surrogate, not the final
+reported number. For example, `max` measured +0.24064% in the search surrogate
+and +0.04696% in the larger exact check.
 
-Measured on the two builds we published from this search:
+### 5. One startup sequence could leave systematic holes
 
-| build | KL (first token) | perplexity vs base | refusals |
-|---|---|---|---|
-| balanced | 0.0021 | **+3.4%** | 5–8/100 |
-| max | 0.0126 | **+18.1%** | 2–4/100 |
+Random sampling explores without imposing a grid, while scrambled Sobol covers
+the same bounded space more evenly. Neither is universally better. The fork can
+run either design or alternate them in one `hybrid` startup.
 
-KL puts them a factor of six apart; the text says the aggressive build costs
-five times more in a unit that describes what the model actually lost. The
-search was ranking points on a curve whose real cost it could not see.
+After startup, the same multivariate TPE model learns dependencies between
+parameters. The production reference run also supports merging independent
+Random and Sobol studies before TPE continuation, which made it possible to use
+both GPUs for discovery without discarding either history.
 
-Perplexity was not usable as an objective before because it was too slow — a
-full pass took fourteen minutes on CPU, which does not fit in a five-hundred
-trial loop. On a GPU it takes seconds. `heretic.scorers.perplexity.Perplexity`
-measures it on fixed windows of wikitext and returns the relative increase over
-baseline.
+### 6. Parallel workers could duplicate effort or overshoot the budget
+
+Workers can now share one Optuna journal. Trial numbers are allocated atomically,
+TPE uses constant-liar handling when multiple workers are enabled, and each
+worker can be given an exact additional-trial budget.
+
+On Windows the journal uses `JournalFileOpenLock`; it does not require symlink
+privileges. The shared-journal regression test was repeated five times without
+duplicate trial numbers or budget overshoot.
+
+### 7. Resuming a study discarded important CLI overrides
+
+Study settings are archived for reproducibility, but restoring them wholesale
+also discarded runtime-only choices. An unattended continuation could finish an
+expensive search and then fail when it unexpectedly asked how or where to save.
+
+The fork preserves explicit runtime overrides for continuation, export strategy,
+save destination, optimization-only mode, parallel-worker count, and exact
+trial selection.
+
+### 8. Pareto indices were not stable export identifiers
+
+The order of a Pareto front changes as new trials arrive. Selecting "front item
+3" therefore does not reliably identify the same model later.
+
+`restore_trial_number` restores a completed Optuna trial by its immutable trial
+number. This supports unattended export and allows any recorded trial—not only
+the current winner—to be rebuilt from the journal.
+
+### 9. Diagnostics and evaluation were mixed into the expensive loop
+
+The fork separates three jobs:
+
+- **optimization:** fast refusal proxy plus small PPL surrogate;
+- **diagnostics:** periodic fANOVA importance reports that do not modify the
+  sampler;
+- **final validation:** long response generation, blind semantic labeling, and
+  exact PPL after export/reload.
+
+This keeps the high-volume loop fast while preserving stronger checks for the
+small finalist set. Semantic judging is not trusted as a perfect oracle and is
+not used on every trial.
+
+## New controls
+
+The main optional settings added by the fork are:
 
 ```toml
-[[scorers]]
-plugin = "heretic.scorers.perplexity.Perplexity"
-optimization = "minimize"
+# "random", "sobol", or "hybrid"
+startup_design = "hybrid"
+
+# Number of startup trials before multivariate TPE.
+n_startup_trials = 120
+
+# Print fANOVA diagnostics every N completed trials; 0 disables it.
+parameter_importance_interval = 20
+
+# Run discovery only, without interactive selection/export.
+optimization_only = true
+
+# Number of workers sharing the same journal.
+parallel_workers = 2
+
+# Rebuild one immutable completed trial.
+restore_trial_number = 260
+
+# Avoid an interactive export prompt.
+export_strategy = "merge"
 ```
 
-## 4. A warning when the front presses against the bounds
+The research tools additionally cover study merging, combined-front analysis,
+offline importance analysis, exact PPL comparison, response-archive generation,
+blind evaluation packet creation, and judge-comparison reports.
 
-Bounds encode an assumption about where the answer can lie. When the assumption
-is wrong, the search quietly hits a wall and returns the best of what it was
-*allowed* — which looks exactly like the best there is, if you only read the
-numbers. You have to look at where the winning points ended up.
+## Seeding and study changes
 
-That cost us a whole search before we noticed. This checks the front after the
-run and says so:
+When the parameter space or objective changes, old objective values are not
+silently reused as if they were comparable. Instead, front parameters can seed
+a new study with `--seed-trials-from`. Categorical values are converted from
+Optuna's internal representation, missing components are removed, and the
+known routed-expert key transition is handled explicitly.
 
-```
-Pareto-front trials are crowding the search bounds:
-  * mlp.down_proj.max_weight: 7 of 9 front trials are near the upper bound (1.500)
-```
+Changing parameter distributions inside an active Optuna study is deliberately
+avoided. If a front hits a bound, the safe workflow is to create a new study
+with revised bounds and seed it from the previous front.
 
-Moving bounds mid-study is *not* the fix and is not attempted here: a
-distribution is fixed when the study is created and TPE builds its model on it,
-so changing it invalidates everything the sampler learned about that parameter.
-The check only reports, and points at the cheap way to act on it — restart with
-wider bounds, seeded from the points already found.
+## Compatibility and tests
 
-## 5. Seeding a new study from a previous one
+Component detection was audited against seventeen local model layouts. Dense
+models continue to use `attn.o_proj` and `mlp.down_proj`; supported hybrid and
+MoE families gain only the component keys they actually expose.
 
-`--seed-trials-from <journal>` enqueues the front points of an earlier study
-into a new one. This is what makes a changed objective affordable: stored
-objective values become meaningless and the study has to start over, but the
-parameter sets that reached the front are still the best guess available.
+The public branch currently passes:
 
-Two things it has to get right, both of which fail silently otherwise — Optuna
-rejects the whole enqueued set and the run dies before its first trial. A
-journal stores the *internal* representation of a parameter, so a categorical
-is an index and has to be mapped back to its choice. And parameters whose
-component no longer exists must be dropped, with one rename applied
-deliberately: routed experts used to share a key with the shared expert and now
-have their own, and by mass that key meant the routed experts anyway.
+- 20 focused unit tests;
+- Ruff on the changed Python files;
+- five repeated shared-journal concurrency runs on Windows;
+- a complete 600-trial Ministral study;
+- exact rebuild, export, reload, semantic evaluation, and PPL validation of the
+  two published variants.
 
-Default is twelve points, and deliberately modest. A seed helps most when the
-search space is unchanged; ours is not, so a seeded point fixes only the
-parameters that still mean what they used to and the rest get sampled anyway. A
-large seed spends the budget re-checking half-random points instead of exploring
-what is actually new.
+## Known limits
 
-## 6. CLI settings survive `--checkpoint-action continue`
+The following are not claimed as solved:
 
-Settings were restored wholesale from the study's stored JSON, discarding what
-was passed on the command line. The failure was quiet and expensive:
-`save_directory` is excluded from stored settings, so a resumed run prompted
-for it interactively and died unattended after hours of search.
+- The keyword proxy can count phrases instead of meaning and does not reliably
+  detect every evasive answer. Final semantic evaluation remains necessary.
+- The small search-time PPL score is noisy. It ranks trials but cannot replace
+  the larger final PPL pass.
+- Dense FULL row normalization and fused-expert projection do not yet have
+  identical normalization mechanics. Cross-architecture edit amplitudes should
+  not be assumed to share one physical scale.
+- Router weights, expert gates, and MTP branches are not edited by the production
+  path.
+- Localized intra-layer "point" or branching searches are research experiments,
+  not evidence of a causal signal route. They remain outside `master` until a
+  causal and cross-model benefit is demonstrated.
+- Perplexity is a useful capability indicator, not a complete intelligence or
+  hallucination benchmark.
 
-## Compatibility
+## Reproducibility and published artifacts
 
-Component detection was run against seventeen local models, using this fork's
-own class selection and layer lookup. Fifteen see exactly the two keys upstream
-gives them — `attn.o_proj` and `mlp.down_proj` — so nothing about their
-behaviour changes:
+- [Heretic Adaptive source](https://github.com/dborzoff/heretic)
+- [Ministral-3-3B Heretic Adaptive v1](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1)
+- [`max` weights](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1/tree/main/max)
+- [`balanced` weights](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1/tree/main/balanced)
+- [Text-free evaluation artifacts](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1/tree/main/evaluation)
+- [Selected-trial metadata](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1/tree/main/study)
 
-> Ministral-3-3B (both), Qwen2.5-3B-Instruct, Qwen2.5-VL-7B-Instruct,
-> Qwen3-0.6B-Base, Qwen3-4B, Qwen3-8B, Qwen3-VL-4B, Qwen3-VL-8B,
-> ERNIE-Image-pe, gemma-2-2b, gemma-2-2b-it, gemma-3-12b-it, gemma-4-E4B-it
-
-Two are hybrids and pick up the split: Qwen3.5-9B gains
-`attn.linear.out_proj`, and Qwen3.6-35B-A3B gains that plus
-`mlp.shared.down_proj`, with its fused experts on `mlp.experts.down_proj`.
-
-The full pipeline — direction, ablation, both scorers, rollback between trials,
-front selection — has been run end to end on gemma-2-2b-it, a plain dense
-model, as a check that none of this disturbs the ordinary path.
-
-**The widened bounds are the one change that affects every model.** The old
-optimum remains available, but a fixed trial budget explores the larger space
-more thinly.
-
-## Not done yet
-
-Three levers this architecture has that abliteration never touches:
-
-**The router.** `mlp.gate` is 21M parameters, 0.06% of the model, and decides
-which 8 of 256 experts fire. Row norms vary by a factor of 1.8–1.9 at every
-depth, so layers do call some experts far more readily than others. If refusal
-is carried by particular experts, steering the router is an edit to 21M weights
-instead of 32B. Untested, and the largest remaining opportunity.
-
-**The gates.** `shared_expert_gate` is `[1, 2048]` — one scalar per token
-controlling an always-active component. Full attention takes its gate from half
-of `q_proj` (8192 wide against a 4096 output); linear attention from
-`in_proj_z`. All three multiply directly into the residual stream, none are
-touched.
-
-**The MTP layer.** It carries a full copy — its own 256 experts, router,
-attention and shared expert, 0.84B parameters — and is restored verbatim from
-the base model, so that branch remains uncensored-unmodified. Under speculative
-decoding the main model verifies proposals, so the output distribution should
-be the main model's, but this is worth measuring rather than assuming.
-
-## Provenance
-
-The search journal (528 trials) and both published builds:
-
-- [Qwen3.6-35B-A3B-heretic-study](https://huggingface.co/datasets/DmitryDB/Qwen3.6-35B-A3B-heretic-study)
-- [Qwen3.6-35B-A3B-heretic-moe-max](https://huggingface.co/DmitryDB/Qwen3.6-35B-A3B-heretic-moe-max)
-- [Qwen3.6-35B-A3B-heretic-moe-balanced](https://huggingface.co/DmitryDB/Qwen3.6-35B-A3B-heretic-moe-balanced)
+The public figures contain only trial numbers and numeric metrics. Prompt and
+response text is not embedded in the repository, figures, animation, or plot
+data.
