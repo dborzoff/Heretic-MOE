@@ -295,6 +295,15 @@ class Settings(BaseSettings):
         exclude=True,
     )
 
+    residual_batch_size: NonNegativeInt = Field(
+        default=0,
+        description=(
+            "Batch size for per-layer residual extraction (0 = use batch_size). "
+            "Set this below the generation batch size when hidden-state capture "
+            "needs additional VRAM headroom."
+        ),
+    )
+
     max_response_length: PositiveInt = Field(
         default=100,
         description="Maximum number of tokens to generate for each response.",

@@ -1045,8 +1045,9 @@ class Model:
 
     def get_residuals_batched(self, prompts: list[Prompt]) -> Tensor:
         residuals = []
+        batch_size = self.settings.residual_batch_size or self.settings.batch_size
 
-        for batch in batchify(prompts, self.settings.batch_size):
+        for batch in batchify(prompts, batch_size):
             residuals.append(self.get_residuals(batch))
 
         return torch.cat(residuals, dim=0)
@@ -1057,8 +1058,9 @@ class Model:
 
         running_sum = None
         total_count = 0
+        batch_size = self.settings.residual_batch_size or self.settings.batch_size
 
-        for batch in batchify(prompts, self.settings.batch_size):
+        for batch in batchify(prompts, batch_size):
             batch_residuals = self.get_residuals(batch)
 
             # Accumulate in high precision on CPU to reduce peak VRAM usage.
