@@ -505,7 +505,36 @@ def run():
             ]
             performance = sum(response_lengths) / (end_time - start_time)
 
-            print(f"[green]Ok[/] ([bold]{performance:.0f}[/] tokens/s)")
+            headroom_ok = True
+            headroom_description = ""
+            if torch.cuda.is_available():
+                free_bytes, total_bytes = torch.cuda.mem_get_info()
+                gib = 1024**3
+                required_bytes = max(
+                    settings.batch_size_vram_headroom_gib * gib,
+                    settings.batch_size_vram_headroom_fraction * total_bytes,
+                )
+                headroom_ok = free_bytes >= required_bytes
+                headroom_description = (
+                    f"; [bold]{free_bytes / gib:.1f}[/] GiB free, "
+                    f"[bold]{required_bytes / gib:.1f}[/] GiB required"
+                )
+
+            status = "[green]Ok[/]" if headroom_ok else "[yellow]Insufficient headroom[/]"
+            print(
+                f"{status} ([bold]{performance:.0f}[/] tokens/s"
+                f"{headroom_description})"
+            )
+
+            if not headroom_ok:
+                # Larger batches cannot restore memory headroom. Keep batch 1
+                # as a last-resort fallback if even the smallest batch misses
+                # the configured reserve, otherwise retain the previous safe
+                # and fastest candidate.
+                if best_batch_size == -1:
+                    best_batch_size = batch_size
+                    best_performance = performance
+                break
 
             if performance > best_performance:
                 best_batch_size = batch_size

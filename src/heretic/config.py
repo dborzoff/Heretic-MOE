@@ -295,6 +295,25 @@ class Settings(BaseSettings):
         exclude=True,
     )
 
+    batch_size_vram_headroom_fraction: float = Field(
+        default=0.08,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum fraction of total CUDA VRAM that must remain free for an "
+            "automatically selected generation batch size."
+        ),
+    )
+
+    batch_size_vram_headroom_gib: float = Field(
+        default=2.0,
+        ge=0.0,
+        description=(
+            "Minimum absolute CUDA VRAM reserve in GiB for an automatically "
+            "selected generation batch size."
+        ),
+    )
+
     residual_batch_size: NonNegativeInt = Field(
         default=0,
         description=(
