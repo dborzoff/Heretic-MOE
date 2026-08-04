@@ -69,6 +69,40 @@ The official Diffusers `minimax-h3` branch is installed at commit
 `abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc`. Transformer, video VAE, and
 audio VAE config/meta-device smoke tests pass.
 
+## CPU scan integration
+
+The independent CPU-only scan is documented at:
+
+`F:/AI/comfy_headless/MINIMAX_H3_QWEN_CPU_RESEARCH_REPORT.md`
+
+Its machine result is `qwen_h3_official_corpus_scan.json`, SHA-256:
+
+`281425c4ea93dad9fff216e09c9e9696bc48b017bc0a17f9cc98fdee951bb5b6`
+
+The scan covers 6 complete conditioning cases, 2 compact official-source
+skip cases, all 50 single-block skips, and 350 local W4 projection probes.
+It confirms the static tail trim (language blocks 50-63, final language norm,
+and `lm_head`) but does not justify deleting any language block 0-49. Even the
+least sensitive one-block skip changed final conditioning by 2.533296% mean
+relative L2.
+
+The first 24 GiB mixed-precision candidate is therefore Q21:
+
+- BF16 token embedding, full vision tower, norms, and small tensors;
+- INT8 Q/K/V/O and every `down_proj`;
+- W4 `gate_proj` in language blocks 7-42;
+- W4 `up_proj` in language blocks 8-42;
+- predicted tensor payload: 20.943849 GiB before packaging overhead.
+
+Q20 (19.967286 GiB) and GU-Compact (19.173829 GiB) are aggressive secondary
+experiments. They must not be presented as validated universal profiles until
+complete-checkpoint conditioning and end-to-end generation comparisons pass.
+
+Implementation warning: the machine profile currently uses a mixture of raw
+Transformers-style and converted Comfy-style tensor-name examples. A converter
+must declare which namespace it consumes and verify the number of tensors
+matched by every rule. Silent unmatched rules are a release blocker.
+
 ## Test decision
 
 MiniMax conditioning must be compared on both original and Heretic Qwen. The
@@ -80,5 +114,8 @@ Recommended order:
 
 1. Original BF16 conditioning reference in all five modes.
 2. BF16 conditioning for the semantic Heretic winner.
-3. Universal, Compact, and UltraCompact quantization sweeps on the better base.
-4. Full FL2VA and Ref2VA generation only for shortlisted profiles.
+3. Q21 complete-checkpoint conditioning on both bases.
+4. Q20 and existing Comfy NVFP4-AWQ as secondary size/quality baselines.
+5. Compact and UltraCompact research only after tensor-name matching is
+   verified and a complete-checkpoint profile exists.
+6. Full FL2VA and Ref2VA generation only for shortlisted profiles.

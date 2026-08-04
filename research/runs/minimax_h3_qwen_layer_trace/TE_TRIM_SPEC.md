@@ -93,35 +93,54 @@ part of the guaranteed static trim and must pass all five mode gates.
 
 ## Release profiles
 
-All three profiles retain every runtime path and support both FL2VA and
-Ref2VA. Sizes below are tensor-payload estimates before quantization scales,
-alignment, and file metadata.
+All three intended releases must retain every runtime path and support both
+FL2VA and Ref2VA. Only the 24 GiB recipe currently has activation-aware layer
+evidence. The 16 and 12 GiB entries are size targets, not validated recipes.
 
-### Universal (24 GiB GPUs)
+### Universal (24 GiB GPUs): Q21 first
 
-- Token embedding and full vision tower: BF16.
-- LM Q/K/V/O and `down_proj`: INT8.
-- LM `gate_proj` and `up_proj`: W4.
-- Estimated tensor payload: 19.16 GiB.
-- Target packaged size: at most 20 GiB.
+- Token embedding, full vision tower, norms, and small tensors: BF16.
+- Every Q/K/V/O and `down_proj`: INT8.
+- W4 gates: language layers 7-42.
+- W4 up projections: language layers 8-42.
+- Blocks 0-6 and 43-49 remain completely INT8.
+- Predicted tensor payload: 20.943849 GiB before serialization overhead.
 
-### Compact (16 GiB GPUs)
+Q20 (19.967286 GiB) and GU-Compact (19.173829 GiB) remain secondary
+experiments. Q20 lowers gates inside structurally protected blocks 0-6 and
+43-49, so it must not replace Q21 as the first quality candidate without a
+complete-checkpoint comparison.
 
-- Full vision tower: BF16.
-- Token embedding: INT8.
-- LM `o_proj`: INT8.
-- LM Q/K/V and all MLP projections: W4.
-- Estimated tensor payload: 14.16 GiB.
-- Target packaged size: at most 14.7 GiB, leaving runtime headroom.
+### Compact (16 GiB GPUs): validation target
 
-### UltraCompact (12 GiB GPUs)
+- Target packaged size: at most 14.7 GiB.
+- The existing Comfy NVFP4-AWQ checkpoint is the first baseline at roughly
+  14.61 GiB.
+- A custom Heretic Compact map is not yet frozen. Reaching this size requires
+  lowering tensor families whose complete-checkpoint effect has not been
+  measured safely by the per-linear CPU scan.
+- Do not treat the earlier all-W4 Q/K/V plus MLP proposal as validated.
 
-- Vision tower: INT8.
-- Token embedding and LM Q/K/V/O: W4.
-- Large LM `gate_proj`, `up_proj`, and `down_proj`: approximately 3-bit.
-- Estimated tensor payload: 9.98 GiB before group-scale overhead.
-- Target packaged size: at most 10.8 GiB.
+### UltraCompact (12 GiB GPUs): research target
 
-UltraCompact is an experimental profile. It must not be released from weight
-error alone; it needs conditioning tests in all five modes and end-to-end
-FL2VA/Ref2VA validation.
+- Target packaged size: at most 10.8 GiB for useful runtime headroom.
+- No evidence-supported fully resident recipe exists yet.
+- Reaching the target likely requires sub-4-bit large MLP tensors and/or
+  runtime layer offload. Both change the execution assumptions and require a
+  separate loader and quality gate.
+
+Compact and UltraCompact must pass conditioning tests in all five modes and
+fixed-seed end-to-end FL2VA/Ref2VA validation before release.
+
+## CPU evidence incorporated
+
+The CPU-only official-corpus scan completed 6 full conditioning cases, 2
+compact official-source skip cases, all 50 one-block skips, and 350 local W4
+projection probes. Source result SHA-256:
+
+`281425c4ea93dad9fff216e09c9e9696bc48b017bc0a17f9cc98fdee951bb5b6`
+
+No internal language block is classified as removable. The smallest measured
+one-block skip still changed final conditioning by 2.533296% mean relative L2.
+Blocks 0 and 6 exceeded 100%, and vision-token errors were often materially
+larger than text-token errors.
