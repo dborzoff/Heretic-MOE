@@ -7,6 +7,7 @@ from typing import Dict, Literal
 from pydantic import (
     BaseModel,
     Field,
+    NonNegativeFloat,
     NonNegativeInt,
     PositiveInt,
     field_validator,
@@ -61,6 +62,7 @@ class SelectionPolicy(str, Enum):
     PARETO = "pareto"
     FEASIBLE_LEXICOGRAPHIC = "feasible_lexicographic"
     FEASIBLE_DIVERSE = "feasible_diverse"
+    FEASIBLE_COST = "feasible_cost"
 
 
 class DatasetSpecification(BaseModel):
@@ -524,7 +526,9 @@ class Settings(BaseSettings):
             '"feasible_lexicographic" filters by scorer constraints and then '
             "orders the feasible Pareto front by the primary objective; "
             '"feasible_diverse" ranks a balanced ideal point, the primary-objective '
-            "extreme, and diagnostic-score extremes before filling by diversity."
+            "extreme, and diagnostic-score extremes before filling by diversity; "
+            '"feasible_cost" ranks feasible trials by weighted excess above '
+            "per-scorer target values."
         ),
     )
 
@@ -534,6 +538,22 @@ class Settings(BaseSettings):
             "Non-optimization scorer display names used as additional lower-is-better "
             "axes by feasible_diverse selection. They affect finalist ranking only, "
             "not Optuna sampling or the optimization objectives."
+        ),
+    )
+
+    selection_score_targets: dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Lower-is-better scorer targets used by feasible_cost selection. "
+            "Values at or below the target incur no finalist-ranking cost."
+        ),
+    )
+
+    selection_score_weights: dict[str, NonNegativeFloat] = Field(
+        default_factory=dict,
+        description=(
+            "Non-negative hinge-loss weights used by feasible_cost selection. "
+            "Only scorer names present in both target and weight mappings count."
         ),
     )
 

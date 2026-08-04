@@ -236,6 +236,43 @@ def _diverse_feasible_trials(
     )
 
 
+def _cost_ranked_trials(
+    feasible: Sequence[FrozenTrial],
+    directions: Sequence[StudyDirection],
+    *,
+    primary_objective_index: int,
+    score_targets: dict[str, float],
+    score_weights: dict[str, float],
+) -> list[FrozenTrial]:
+    """Rank feasible trials by weighted excess above lower-is-better targets."""
+
+    score_names = tuple(name for name in score_targets if name in score_weights)
+    if not score_names:
+        raise ValueError(
+            "feasible_cost requires at least one scorer in both "
+            "selection_score_targets and selection_score_weights"
+        )
+
+    def cost_key(trial: FrozenTrial) -> tuple[float, ...]:
+        cost = 0.0
+        for name in score_names:
+            value = diagnostic_value(trial, name)
+            if value is None:
+                cost = float("inf")
+                break
+            cost += score_weights[name] * max(0.0, value - score_targets[name])
+
+        values = minimized_values(trial, directions)
+        return (
+            cost,
+            values[primary_objective_index],
+            *values,
+            float(trial.number),
+        )
+
+    return sorted(feasible, key=cost_key)
+
+
 def candidate_trials(
     trials: Sequence[FrozenTrial],
     directions: Sequence[StudyDirection],
@@ -244,6 +281,8 @@ def candidate_trials(
     constraint_count: int,
     primary_objective_index: int = 0,
     diagnostic_names: Sequence[str] = (),
+    score_targets: dict[str, float] | None = None,
+    score_weights: dict[str, float] | None = None,
 ) -> list[FrozenTrial]:
     """Select and order the trials shown to users or automated exporters."""
 
@@ -266,6 +305,14 @@ def candidate_trials(
 
     feasible = [trial for trial in completed if is_feasible(trial, constraint_count)]
     if feasible:
+        if policy == SelectionPolicy.FEASIBLE_COST:
+            return _cost_ranked_trials(
+                feasible,
+                directions,
+                primary_objective_index=primary_objective_index,
+                score_targets=score_targets or {},
+                score_weights=score_weights or {},
+            )
         if policy == SelectionPolicy.FEASIBLE_DIVERSE:
             return _diverse_feasible_trials(
                 feasible,

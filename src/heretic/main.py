@@ -896,6 +896,8 @@ def run():
                 constraint_count=len(constraint_names),
                 primary_objective_index=primary_objective_index,
                 diagnostic_names=settings.selection_diagnostics,
+                score_targets=settings.selection_score_targets,
+                score_weights=settings.selection_score_weights,
             )
             if not ranked:
                 return
@@ -1024,6 +1026,8 @@ def run():
                 constraint_count=len(constraint_names),
                 primary_objective_index=primary_objective_index,
                 diagnostic_names=settings.selection_diagnostics,
+                score_targets=settings.selection_score_targets,
+                score_weights=settings.selection_score_weights,
             )
 
             def format_trial_title(trial: FrozenTrial) -> str:
