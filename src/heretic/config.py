@@ -60,6 +60,7 @@ class SeedSelection(str, Enum):
 class SelectionPolicy(str, Enum):
     PARETO = "pareto"
     FEASIBLE_LEXICOGRAPHIC = "feasible_lexicographic"
+    FEASIBLE_DIVERSE = "feasible_diverse"
 
 
 class DatasetSpecification(BaseModel):
@@ -521,7 +522,18 @@ class Settings(BaseSettings):
         description=(
             'Trial selection policy. "pareto" preserves the legacy menu; '
             '"feasible_lexicographic" filters by scorer constraints and then '
-            "orders the feasible Pareto front by the primary objective."
+            "orders the feasible Pareto front by the primary objective; "
+            '"feasible_diverse" ranks a balanced ideal point, the primary-objective '
+            "extreme, and diagnostic-score extremes before filling by diversity."
+        ),
+    )
+
+    selection_diagnostics: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Non-optimization scorer display names used as additional lower-is-better "
+            "axes by feasible_diverse selection. They affect finalist ranking only, "
+            "not Optuna sampling or the optimization objectives."
         ),
     )
 

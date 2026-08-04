@@ -63,6 +63,179 @@ def nondominated_trials(
     return sorted(front, key=lambda trial: trial.number)
 
 
+def diagnostic_value(trial: FrozenTrial, name: str) -> float | None:
+    """Read a numeric scorer value recorded for display-only diagnostics."""
+
+    records = trial.user_attrs.get("scores")
+    if not isinstance(records, list):
+        return None
+    for record in records:
+        if not isinstance(record, dict) or record.get("name") != name:
+            continue
+        score = record.get("score")
+        if not isinstance(score, dict):
+            return None
+        try:
+            return float(score["value"])
+        except (KeyError, TypeError, ValueError):
+            return None
+    return None
+
+
+def _nondominated_coordinates(
+    points: Sequence[tuple[FrozenTrial, tuple[float, ...]]],
+) -> list[tuple[FrozenTrial, tuple[float, ...]]]:
+    front: list[tuple[FrozenTrial, tuple[float, ...]]] = []
+    for trial, values in points:
+        dominated = any(
+            all(other_value <= value for other_value, value in zip(other, values))
+            and any(other_value < value for other_value, value in zip(other, values))
+            for other_trial, other in points
+            if other_trial.number != trial.number
+        )
+        if not dominated:
+            front.append((trial, values))
+    return sorted(front, key=lambda item: item[0].number)
+
+
+def _diverse_feasible_trials(
+    feasible: Sequence[FrozenTrial],
+    directions: Sequence[StudyDirection],
+    *,
+    primary_objective_index: int,
+    diagnostic_names: Sequence[str],
+) -> list[FrozenTrial]:
+    """Rank complementary finalists instead of neighboring Pareto points.
+
+    The leading roles are deliberately distinct: an ideal-point compromise,
+    the strongest primary-objective point, and one extreme for each configured
+    diagnostic. Remaining points maximize normalized separation from those roles.
+    """
+
+    valid_points: list[tuple[FrozenTrial, tuple[float, ...]]] = []
+    incomplete: list[FrozenTrial] = []
+    for trial in feasible:
+        diagnostics = tuple(diagnostic_value(trial, name) for name in diagnostic_names)
+        if any(value is None for value in diagnostics):
+            incomplete.append(trial)
+            continue
+        valid_points.append(
+            (
+                trial,
+                (
+                    *minimized_values(trial, directions),
+                    *(float(value) for value in diagnostics if value is not None),
+                ),
+            )
+        )
+
+    if not valid_points:
+        return []
+
+    front = _nondominated_coordinates(valid_points)
+    lows = [
+        min(values[index] for _, values in front) for index in range(len(front[0][1]))
+    ]
+    highs = [
+        max(values[index] for _, values in front) for index in range(len(front[0][1]))
+    ]
+
+    def normalized(values: tuple[float, ...]) -> tuple[float, ...]:
+        return tuple(
+            0.0
+            if highs[index] == lows[index]
+            else (value - lows[index]) / (highs[index] - lows[index])
+            for index, value in enumerate(values)
+        )
+
+    coordinates = {trial.number: normalized(values) for trial, values in front}
+
+    def ideal_key(item: tuple[FrozenTrial, tuple[float, ...]]) -> tuple[float, ...]:
+        trial, values = item
+        coordinate = coordinates[trial.number]
+        return (
+            sum(value * value for value in coordinate),
+            *values,
+            float(trial.number),
+        )
+
+    selected: list[FrozenTrial] = []
+
+    def add(item: tuple[FrozenTrial, tuple[float, ...]]) -> None:
+        trial = item[0]
+        if all(existing.number != trial.number for existing in selected):
+            selected.append(trial)
+
+    # The first item is the balanced compromise, not a low-quality secondary
+    # objective extreme. This is the default deployment candidate.
+    add(min(front, key=ideal_key))
+
+    # The second item is the strongest censorship-removal candidate.
+    add(
+        min(
+            front,
+            key=lambda item: (
+                item[1][primary_objective_index],
+                ideal_key(item),
+            ),
+        )
+    )
+
+    # Diagnostic extremes (for example zero keyword markers) are separate roles.
+    objective_count = len(directions)
+    for diagnostic_index in range(len(diagnostic_names)):
+        coordinate_index = objective_count + diagnostic_index
+        add(
+            min(
+                front,
+                key=lambda item: (
+                    item[1][coordinate_index],
+                    item[1][primary_objective_index],
+                    ideal_key(item),
+                ),
+            )
+        )
+
+    def squared_distance(left: tuple[float, ...], right: tuple[float, ...]) -> float:
+        return sum((a - b) ** 2 for a, b in zip(left, right))
+
+    remaining = [
+        item
+        for item in front
+        if all(item[0].number != trial.number for trial in selected)
+    ]
+    while remaining:
+        next_item = max(
+            remaining,
+            key=lambda item: (
+                min(
+                    squared_distance(
+                        coordinates[item[0].number], coordinates[trial.number]
+                    )
+                    for trial in selected
+                ),
+                tuple(-value for value in ideal_key(item)),
+            ),
+        )
+        add(next_item)
+        remaining.remove(next_item)
+
+    selected_numbers = {trial.number for trial in selected}
+    dominated = sorted(
+        (trial for trial in feasible if trial.number not in selected_numbers),
+        key=lambda trial: (
+            *minimized_values(trial, directions),
+            float(trial.number),
+        ),
+    )
+    incomplete_numbers = {trial.number for trial in incomplete}
+    return (
+        selected
+        + [trial for trial in dominated if trial.number not in incomplete_numbers]
+        + sorted(incomplete, key=lambda trial: trial.number)
+    )
+
+
 def candidate_trials(
     trials: Sequence[FrozenTrial],
     directions: Sequence[StudyDirection],
@@ -70,6 +243,7 @@ def candidate_trials(
     policy: SelectionPolicy,
     constraint_count: int,
     primary_objective_index: int = 0,
+    diagnostic_names: Sequence[str] = (),
 ) -> list[FrozenTrial]:
     """Select and order the trials shown to users or automated exporters."""
 
@@ -92,6 +266,14 @@ def candidate_trials(
 
     feasible = [trial for trial in completed if is_feasible(trial, constraint_count)]
     if feasible:
+        if policy == SelectionPolicy.FEASIBLE_DIVERSE:
+            return _diverse_feasible_trials(
+                feasible,
+                directions,
+                primary_objective_index=primary_objective_index,
+                diagnostic_names=diagnostic_names,
+            )
+
         pool = nondominated_trials(feasible, directions)
 
         def feasible_key(trial: FrozenTrial) -> tuple[float, ...]:
@@ -120,4 +302,3 @@ def candidate_trials(
         return (violation, *minimized_values(trial, directions), float(trial.number))
 
     return sorted(completed, key=violation_key)
-

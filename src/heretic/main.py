@@ -895,6 +895,7 @@ def run():
                 policy=settings.selection_policy,
                 constraint_count=len(constraint_names),
                 primary_objective_index=primary_objective_index,
+                diagnostic_names=settings.selection_diagnostics,
             )
             if not ranked:
                 return
@@ -1022,6 +1023,7 @@ def run():
                 policy=settings.selection_policy,
                 constraint_count=len(constraint_names),
                 primary_objective_index=primary_objective_index,
+                diagnostic_names=settings.selection_diagnostics,
             )
 
             def format_trial_title(trial: FrozenTrial) -> str:
