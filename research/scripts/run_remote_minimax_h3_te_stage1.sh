@@ -48,7 +48,6 @@ python "$BUILDER" \
   | tee "$ROOT/reports/marker_zero_trim_build.jsonl"
 echo 'stage=build_marker_zero status=PASS'
 
-sha256sum "$TEMPLATE" "$MARKER_OUTPUT" | tee "$ROOT/reports/trimmed_bf16_sha256.txt"
 df -h /workspace
 date -Is
 echo 'stage=minimax_h3_te_stage1 status=PASS'

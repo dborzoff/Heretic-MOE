@@ -7,7 +7,8 @@ MARKER_ZERO=/workspace/exports/qwen3vl32b_hybrid_600_v1/marker-zero
 
 grep -q '"status": "COMPARE_PASS"' "$ROOT/reports/original_trim_exact.jsonl"
 grep -q '"status": "PASS"' "$ROOT/reports/marker_zero_trim_build.jsonl"
-test -s "$ROOT/reports/trimmed_bf16_sha256.txt"
+grep -q '"template_sha256"' "$ROOT/reports/original_trim_exact.jsonl"
+grep -q '"output_sha256"' "$ROOT/reports/marker_zero_trim_build.jsonl"
 
 original_real=$(realpath "$ORIGINAL")
 marker_real=$(realpath "$MARKER_ZERO")
