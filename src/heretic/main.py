@@ -464,6 +464,9 @@ def run():
                 "parameter_importance_interval",
                 "selection_policy",
                 "primary_objective",
+                "scorers",
+                "selection_score_targets",
+                "selection_score_weights",
             )
             for _f in _always_runtime_fields + _explicit_resume_fields:
                 _v = getattr(_cli, _f, None)
@@ -472,6 +475,15 @@ def run():
                 if _v is not None:
                     setattr(settings, _f, _v)
                     print(f"From command line: {_f}={_v}")
+            # Scorer plugin tables live in Pydantic's extra namespace rather
+            # than in a declared Settings field. A managed continuation config
+            # may intentionally raise the measurement budget (for example PPL
+            # 8x512 -> 24x512), so carry that explicit table across resume too.
+            if _cli.model_extra and "scorer" in _cli.model_extra:
+                if settings.__pydantic_extra__ is None:
+                    settings.__pydantic_extra__ = {}
+                settings.__pydantic_extra__["scorer"] = _cli.model_extra["scorer"]
+                print("From command line: scorer=<plugin settings>")
         elif action == "restart":
             os.unlink(study_checkpoint_file)
             backend = JournalFileBackend(study_checkpoint_file, lock_obj=lock_obj)
