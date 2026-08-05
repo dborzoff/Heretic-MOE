@@ -97,6 +97,12 @@ from .utils import (
 )
 
 
+def _display_score_name(name: str) -> str:
+    """Use compact console labels without changing stable journal keys."""
+
+    return {"Sparse refusal geometry": "SRG"}.get(name, name)
+
+
 def obtain_export_strategy(
     settings: Settings,
     model: Model,
@@ -596,7 +602,10 @@ def run():
         print()
         print("[bold]Metrics:[/]")
         for score_name, score in evaluator.get_scores():
-            print(f"  * {score_name}: [bold]{score.rich_display}[/]")
+            print(
+                f"  * {_display_score_name(score_name)}: "
+                f"[bold]{score.rich_display}[/]"
+            )
         return
 
     if not reproduction_mode and not evaluator.get_objective_names():
@@ -804,7 +813,10 @@ def run():
 
         print("  * Metrics:")
         for name, score in scores:
-            print(f"    * {name}: [bold]{score.rich_display}[/]")
+            print(
+                f"    * {_display_score_name(name)}: "
+                f"[bold]{score.rich_display}[/]"
+            )
 
         elapsed_time = time.perf_counter() - start_time
         remaining_time = (elapsed_time / (trial_index - start_index)) * (
@@ -916,7 +928,8 @@ def run():
                     else "INFEASIBLE"
                 )
                 score_parts = [
-                    f"{record['name']}: {record['score']['rich_display']}"
+                    f"{_display_score_name(record['name'])}: "
+                    f"{record['score']['rich_display']}"
                     for record in candidate.user_attrs.get("scores", [])
                 ]
                 display_index = candidate.user_attrs.get(
@@ -1042,7 +1055,7 @@ def run():
                 # CLI-formatted versions, which are stored in the trial's user attributes.
                 score_parts: list[str] = []
                 for score in trial.user_attrs["scores"]:
-                    name = score["name"]
+                    name = _display_score_name(score["name"])
                     value = score["score"]["rich_display"]
                     score_parts.append(f"{name}: {value}")
 
