@@ -364,7 +364,6 @@ def run(args: argparse.Namespace) -> None:
             str(manifest["top_n"]),
             "--n-startup-trials",
             "0",
-            "--optimization-only",
             "--checkpoint-action",
             "continue",
             "--leaderboard-size",
@@ -375,6 +374,9 @@ def run(args: argparse.Namespace) -> None:
             str(worker),
             "--trial-response-number-stride",
             str(workers),
+            # Heretic treats a trailing non-option as a positional model path.
+            # Keep a boolean option last so the stride value is not rewritten.
+            "--optimization-only",
         ]
         print(json.dumps({"event": "recheck_worker_start", "device": device, "budget": budget, "command": command}))
         process = subprocess.Popen(
