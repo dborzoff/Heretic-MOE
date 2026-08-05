@@ -8,4 +8,4 @@ $Host.UI.RawUI.WindowTitle = "CODEX | Gemma3 Qwen-night abs PPL | 120 -> 600"
 Write-Host "CODEX | GEMMA3 12B | Qwen-night + abs(PPL) | trials 120 -> 600" -ForegroundColor Cyan
 Write-Host "Two objectives: refusal geometry + absolute PPL drift; calibrated finalist cost." -ForegroundColor Gray
 Write-Host "LTX is not loaded. Following one persistent stream without redraw." -ForegroundColor DarkGray
-ssh -i $key -p $port -o StrictHostKeyChecking=no "root@$hostName" "supervisorctl status heretic-gemma3-qwen-night-abs-600; nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,power.draw --format=csv,noheader; stdbuf -oL tail -n 120 -F '$log'"
+ssh -i $key -p $port -o StrictHostKeyChecking=no "root@$hostName" "supervisorctl status heretic-gemma3-qwen-night-abs-600; nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,power.draw --format=csv,noheader; stdbuf -oL tail -n 120 -F '$log' | sed -u -E 's/, LTX[[:space:]]*$//; /conditioning drift:/d'"
