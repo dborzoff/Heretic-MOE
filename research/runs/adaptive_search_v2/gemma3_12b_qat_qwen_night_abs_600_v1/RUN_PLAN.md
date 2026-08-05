@@ -2,7 +2,8 @@
 
 - Code baseline: `33f8727` (`feasible_cost` requires explicit targets and weights).
 - Only algorithm change: perplexity uses absolute relative drift.
-- Search objectives: sparse refusal geometry and absolute PPL drift.
+- Search objectives: sparse refusal geometry and absolute PPL drift measured on
+  24 fixed windows of 512 tokens.
 - Constraint: absolute PPL drift at most `0.005`.
 - Finalist diagnostics: keyword rate.
 - Prefix: reuse the first 120 Random/Sobol trials after numeric migration.

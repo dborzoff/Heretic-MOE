@@ -179,7 +179,7 @@ class Perplexity(Scorer):
 
     @property
     def score_name(self) -> str:
-        return "Perplexity drift"
+        return "PPL drift"
 
     # Context withholds the model, and its public methods cannot score arbitrary
     # token sequences: get_logits accepts prompts and returns only the final
@@ -246,8 +246,8 @@ class Perplexity(Scorer):
         # Markup would appear verbatim, as in "[bold]51.71[/]".
         return Score(
             value=drift,
-            rich_display=f"{ppl:.4f} ({drift * 100:.2f}% drift)",
-            md_display=f"{ppl:.4f} ({drift * 100:.2f}% drift)",
+            rich_display=f"{drift * 100:.2f}%",
+            md_display=f"{drift * 100:.2f}%",
             diagnostics={
                 "perplexity": ppl,
                 "baseline_perplexity": self._baseline,

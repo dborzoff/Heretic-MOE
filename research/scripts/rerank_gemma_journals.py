@@ -77,7 +77,9 @@ def is_dominated(row: dict[str, Any], rows: list[dict[str, Any]]) -> bool:
 def trial_row(trial: FrozenTrial) -> dict[str, Any] | None:
     geometry_record = score_record(trial, "Sparse refusal geometry")
     keyword_record = score_record(trial, "Keywords")
-    ppl_record = score_record(trial, "Perplexity increase", "Perplexity drift")
+    ppl_record = score_record(
+        trial, "Perplexity increase", "Perplexity drift", "PPL drift"
+    )
     geometry = score_value(geometry_record)
     keywords = score_value(keyword_record)
     ppl_recorded = score_value(ppl_record)

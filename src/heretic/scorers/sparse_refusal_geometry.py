@@ -283,9 +283,10 @@ class SparseRefusalGeometry(Scorer):
             )
         positive_indices = np.flatnonzero(margins > 0.0).tolist()
         mean_margin = float(margins.mean())
+        positive_rate = len(positive_indices) / len(responses)
         rich = (
             f"mean {mean_margin:+.5f}; "
-            f"{len(positive_indices)}/{len(responses)} positive"
+            f"{positive_rate * 100:.1f}% positive"
         )
         return Score(
             value=mean_margin,
@@ -296,6 +297,7 @@ class SparseRefusalGeometry(Scorer):
                 "mean_margin": mean_margin,
                 "median_margin": float(np.median(margins)),
                 "positive_count": len(positive_indices),
+                "positive_rate": positive_rate,
                 "positive_indices": positive_indices,
                 "empty_indices": empty_indices,
                 "margins": margins.tolist(),
