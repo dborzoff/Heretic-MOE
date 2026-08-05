@@ -39,6 +39,7 @@ import logging
 import math
 import os
 import random
+import re
 import time
 import warnings
 from dataclasses import asdict
@@ -117,6 +118,17 @@ def _display_score_record(record: dict[str, Any]) -> str:
         positive_rate = diagnostics.get("positive_rate")
         if positive_rate is not None:
             return f"{float(score['value']):+.5f}; R-side {float(positive_rate) * 100:.1f}%"
+        legacy = re.fullmatch(
+            r"mean\s+[+-]?[0-9.]+;\s+(\d+)/(\d+)\s+positive",
+            str(score.get("rich_display", "")),
+        )
+        if legacy:
+            positive_count, total = map(int, legacy.groups())
+            if total > 0:
+                return (
+                    f"{float(score['value']):+.5f}; "
+                    f"R-side {positive_count / total * 100:.1f}%"
+                )
     if name in {"Perplexity drift", "PPL drift"}:
         return f"{abs(float(score['value'])) * 100:.2f}%"
     return str(score["rich_display"])
@@ -700,10 +712,11 @@ def run():
 
     trial_index = 0
     start_index = 0
+    worker_trial_count = 0
     start_time = time.perf_counter()
 
     def objective(trial: Trial) -> tuple[float, ...]:
-        nonlocal trial_index
+        nonlocal trial_index, worker_trial_count
         trial_started = time.perf_counter()
         if torch.cuda.is_available():
             for device_index in range(torch.cuda.device_count()):
@@ -849,10 +862,18 @@ def run():
                 f"[bold]{score.rich_display}[/]"
             )
 
+        worker_trial_count += 1
         elapsed_time = time.perf_counter() - start_time
-        remaining_time = (elapsed_time / (trial_index - start_index)) * (
-            settings.n_trials - trial_index
-        )
+        average_trial_time = elapsed_time / worker_trial_count
+        if settings.worker_trial_budget is not None:
+            remaining_worker_trials = max(
+                settings.worker_trial_budget - worker_trial_count, 0
+            )
+        else:
+            remaining_worker_trials = max(settings.n_trials - trial_index, 0) / max(
+                settings.parallel_workers, 1
+            )
+        remaining_time = average_trial_time * remaining_worker_trials
         print()
         print(f"[grey50]Elapsed time: [bold]{format_duration(elapsed_time)}[/][/]")
         if trial_index < settings.n_trials:

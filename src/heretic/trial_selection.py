@@ -299,6 +299,20 @@ def candidate_trials(
         for trial in trials
         if trial.state == TrialState.COMPLETE and trial.values is not None
     ]
+    remeasured_indices = {
+        int(source_index)
+        for trial in completed
+        if (source_index := trial.user_attrs.get("remeasure_of_trial_index"))
+        is not None
+    }
+    if remeasured_indices:
+        completed = [
+            trial
+            for trial in completed
+            if trial.user_attrs.get("remeasure_of_trial_index") is not None
+            or trial.user_attrs.get("index", trial.number + 1)
+            not in remeasured_indices
+        ]
     if not completed:
         return []
     if not 0 <= primary_objective_index < len(directions):
