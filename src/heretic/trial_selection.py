@@ -246,6 +246,25 @@ def _cost_ranked_trials(
 ) -> list[FrozenTrial]:
     """Rank feasible trials by weighted excess above lower-is-better targets."""
 
+    def cost_key(trial: FrozenTrial) -> tuple[float, ...]:
+        values = minimized_values(trial, directions)
+        return (
+            trial_selection_cost(trial, score_targets, score_weights),
+            values[primary_objective_index],
+            *values,
+            float(trial.number),
+        )
+
+    return sorted(feasible, key=cost_key)
+
+
+def trial_selection_cost(
+    trial: FrozenTrial,
+    score_targets: dict[str, float],
+    score_weights: dict[str, float],
+) -> float:
+    """Return the weighted hinge cost used by ``feasible_cost`` selection."""
+
     score_names = tuple(name for name in score_targets if name in score_weights)
     if not score_names:
         raise ValueError(
@@ -253,24 +272,13 @@ def _cost_ranked_trials(
             "selection_score_targets and selection_score_weights"
         )
 
-    def cost_key(trial: FrozenTrial) -> tuple[float, ...]:
-        cost = 0.0
-        for name in score_names:
-            value = diagnostic_value(trial, name)
-            if value is None:
-                cost = float("inf")
-                break
-            cost += score_weights[name] * max(0.0, value - score_targets[name])
-
-        values = minimized_values(trial, directions)
-        return (
-            cost,
-            values[primary_objective_index],
-            *values,
-            float(trial.number),
-        )
-
-    return sorted(feasible, key=cost_key)
+    cost = 0.0
+    for name in score_names:
+        value = diagnostic_value(trial, name)
+        if value is None:
+            return float("inf")
+        cost += score_weights[name] * max(0.0, value - score_targets[name])
+    return cost
 
 
 def candidate_trials(

@@ -69,7 +69,7 @@ from rich.table import Table
 from rich.traceback import install
 
 from .analyzer import Analyzer
-from .config import ExportStrategy, QuantizationMethod
+from .config import ExportStrategy, QuantizationMethod, SelectionPolicy
 from .evaluator import Evaluator
 from .model import AbliterationParameters, Model, get_model_class
 from .promotion import load_seed_parameters
@@ -81,7 +81,7 @@ from .reproduce import (
 from .search import OptimizationRunner
 from .study_diagnostics import make_parameter_importance_callbacks
 from .system import empty_cache, get_accelerator_info
-from .trial_selection import candidate_trials
+from .trial_selection import candidate_trials, trial_selection_cost
 from .utils import (
     ask_if_unset,
     format_duration,
@@ -932,6 +932,13 @@ def run():
                     f"{record['score']['rich_display']}"
                     for record in candidate.user_attrs.get("scores", [])
                 ]
+                if settings.selection_policy == SelectionPolicy.FEASIBLE_COST:
+                    cost = trial_selection_cost(
+                        candidate,
+                        settings.selection_score_targets,
+                        settings.selection_score_weights,
+                    )
+                    score_parts.insert(0, f"Cost {cost:.3f}")
                 display_index = candidate.user_attrs.get(
                     "index", candidate.number + 1
                 )
@@ -1058,6 +1065,13 @@ def run():
                     name = _display_score_name(score["name"])
                     value = score["score"]["rich_display"]
                     score_parts.append(f"{name}: {value}")
+                if settings.selection_policy == SelectionPolicy.FEASIBLE_COST:
+                    cost = trial_selection_cost(
+                        trial,
+                        settings.selection_score_targets,
+                        settings.selection_score_weights,
+                    )
+                    score_parts.insert(0, f"Cost {cost:.3f}")
 
                 return f"{prefix} " + ", ".join(score_parts)
 
