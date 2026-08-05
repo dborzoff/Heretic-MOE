@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 r"""Perplexity scorer for Heretic: measure edit cost on text.
 
 Why use this instead of KL.
@@ -22,15 +21,18 @@ A full CPU pass takes fourteen minutes, too long for the search loop. The same
 data takes seconds on a GPU, so the proxy is no longer needed.
 
 This scorer averages negative log-likelihood over fixed text windows and
-returns the relative increase over the baseline model:
+returns the absolute relative drift from the baseline model:
 
-    value = perplexity / perplexity_baseline - 1
+    signed_change = perplexity / perplexity_baseline - 1
+    value = abs(signed_change)
 
 Zero means the model predicts the text as well as before. A value of 0.03 means
-three percent worse. A negative value is valid: it means lower perplexity on
-this fixed sample, not negative perplexity. Diagnostics include a paired
-window-level confidence interval so small changes can be distinguished from
-sampling variation. This keeps the result near the scale expected by Scorer.
+that perplexity moved three percent in either direction. This is a preservation
+cost: a large decrease is still a large behavioural change and must not receive
+an optimization advantage over an unchanged model. The signed change remains
+available in diagnostics. Diagnostics also include a paired window-level
+confidence interval so small changes can be distinguished from sampling
+variation. This keeps the result near the scale expected by Scorer.
 
 Enable it in the scorer configuration:
 
@@ -38,20 +40,20 @@ Enable it in the scorer configuration:
     plugin = "heretic.scorers.perplexity.Perplexity"
     optimization = "minimize"
 """
+
 import hashlib
 from importlib import resources
 from math import expm1, sqrt
+from pathlib import Path
 from statistics import fmean, stdev
 
 import torch
-from pathlib import Path
 from pydantic import BaseModel, Field
 
 from heretic.config import DatasetSpecification
 from heretic.plugin import Context
 from heretic.scorer import Score, Scorer
 from heretic.utils import print
-
 
 BUILTIN_PERPLEXITY_CORPORA = {
     "builtin://perplexity-reference-v1": (
@@ -103,9 +105,7 @@ def load_perplexity_text(spec: DatasetSpecification) -> str:
     builtin = BUILTIN_PERPLEXITY_CORPORA.get(spec.dataset)
     if builtin is not None:
         filename, expected_sha256 = builtin
-        payload = (
-            resources.files("heretic.data").joinpath(filename).read_bytes()
-        )
+        payload = resources.files("heretic.data").joinpath(filename).read_bytes()
         # Git stores the frozen corpus with LF line endings. Normalize a
         # Windows worktree's CRLF representation before validating and using
         # it so the same committed corpus is byte-identical on every host.
@@ -124,9 +124,7 @@ def load_perplexity_text(spec: DatasetSpecification) -> str:
     from datasets import load_dataset
 
     if spec.dataset.endswith("wikitext"):
-        dataset = load_dataset(
-            spec.dataset, "wikitext-2-raw-v1", split=spec.split
-        )
+        dataset = load_dataset(spec.dataset, "wikitext-2-raw-v1", split=spec.split)
     else:
         dataset = load_dataset(spec.dataset, split=spec.split)
     if spec.column is None:
@@ -165,9 +163,9 @@ class Settings(BaseModel):
 
 class Perplexity(Scorer):
     """
-    Perplexity on a fixed text corpus, relative to the baseline model.
-    Measures how much the edit degraded language modelling.
-    Lower is better (less damage).
+    Absolute perplexity drift on a fixed text corpus relative to baseline.
+    Measures how much the edit changed language modelling in either direction.
+    Lower is better (better preservation).
     """
 
     settings: Settings
@@ -178,7 +176,7 @@ class Perplexity(Scorer):
 
     @property
     def score_name(self) -> str:
-        return "Perplexity increase"
+        return "Perplexity drift"
 
     # Context withholds the model, and its public methods cannot score arbitrary
     # token sequences: get_logits accepts prompts and returns only the final
@@ -186,7 +184,7 @@ class Perplexity(Scorer):
     # point.
     @staticmethod
     def _model_and_tokenizer(ctx: Context):
-        m = ctx._model            # noqa: SLF001
+        m = ctx._model
         return m.model, m.tokenizer
 
     def _windows(self, ctx: Context):
@@ -198,7 +196,7 @@ class Perplexity(Scorer):
         ids = tok(text, return_tensors="pt").input_ids[0]
         w = self.settings.window
         n = min(self.settings.chunks, len(ids) // w)
-        return [ids[i * w:(i + 1) * w] for i in range(n)]
+        return [ids[i * w : (i + 1) * w] for i in range(n)]
 
     @torch.no_grad()
     def _perplexity(self, ctx: Context) -> tuple[float, list[float], int]:
@@ -226,8 +224,10 @@ class Perplexity(Scorer):
         print()
         print(f"Loading Perplexity text from [bold]{self.settings.text.dataset}[/]...")
         self._windows_cached = self._windows(ctx)
-        print(f"* [bold]{len(self._windows_cached)}[/] windows of "
-              f"[bold]{self.settings.window}[/] tokens")
+        print(
+            f"* [bold]{len(self._windows_cached)}[/] windows of "
+            f"[bold]{self.settings.window}[/] tokens"
+        )
         print("* Measuring baseline perplexity...")
         self._baseline, self._baseline_window_nll, self._baseline_token_count = (
             self._perplexity(ctx)
@@ -237,18 +237,21 @@ class Perplexity(Scorer):
     def get_score(self, ctx: Context) -> Score:
         ppl, window_nll, token_count = self._perplexity(ctx)
         rel = ppl / self._baseline - 1.0
+        drift = abs(rel)
         uncertainty = paired_relative_perplexity_interval(
             window_nll, self._baseline_window_nll
         )
         # The front-selection menu prints this field without Rich parsing.
         # Markup would appear verbatim, as in "[bold]51.71[/]".
         return Score(
-            value=rel,
-            rich_display=f"{ppl:.4f} ({rel * 100:+.2f}% vs baseline)",
-            md_display=f"{ppl:.4f} ({rel * 100:+.2f}%)",
+            value=drift,
+            rich_display=f"{ppl:.4f} ({drift * 100:.2f}% drift)",
+            md_display=f"{ppl:.4f} ({drift * 100:.2f}% drift)",
             diagnostics={
                 "perplexity": ppl,
                 "baseline_perplexity": self._baseline,
+                "relative_change": rel,
+                "absolute_relative_change": drift,
                 "token_count": token_count,
                 "window_nll": window_nll,
                 "baseline_window_nll": self._baseline_window_nll,

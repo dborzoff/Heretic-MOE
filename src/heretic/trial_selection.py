@@ -244,14 +244,39 @@ def _cost_ranked_trials(
     score_targets: dict[str, float],
     score_weights: dict[str, float],
 ) -> list[FrozenTrial]:
-    """Rank feasible trials by weighted excess above lower-is-better targets."""
+    """Rank feasible trials by calibrated or automatic preservation value."""
 
     score_names = tuple(name for name in score_targets if name in score_weights)
     if not score_names:
-        raise ValueError(
-            "feasible_cost requires at least one scorer in both "
-            "selection_score_targets and selection_score_weights"
-        )
+        points = [
+            (trial, minimized_values(trial, directions)) for trial in feasible
+        ]
+        front = _nondominated_coordinates(points)
+        lows = [
+            min(values[index] for _, values in front)
+            for index in range(len(directions))
+        ]
+        highs = [
+            max(values[index] for _, values in front)
+            for index in range(len(directions))
+        ]
+
+        def automatic_cost_key(trial: FrozenTrial) -> tuple[float, ...]:
+            values = minimized_values(trial, directions)
+            normalized = tuple(
+                0.0
+                if highs[index] == lows[index]
+                else (value - lows[index]) / (highs[index] - lows[index])
+                for index, value in enumerate(values)
+            )
+            return (
+                sum(value * value for value in normalized),
+                values[primary_objective_index],
+                *values,
+                float(trial.number),
+            )
+
+        return sorted(feasible, key=automatic_cost_key)
 
     def cost_key(trial: FrozenTrial) -> tuple[float, ...]:
         cost = 0.0

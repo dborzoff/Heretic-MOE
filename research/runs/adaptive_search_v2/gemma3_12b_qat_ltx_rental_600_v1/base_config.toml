@@ -1,0 +1,82 @@
+model = "/workspace/heretic-gemma3/models/google__gemma-3-12b-it-qat-q4_0-unquantized"
+dtypes = ["bfloat16"]
+device_map = "cuda:0"
+max_memory = { "0" = "31GiB", "cpu" = "120GiB" }
+offload_outputs_to_cpu = true
+batch_size = 8
+max_batch_size = 64
+batch_size_vram_headroom_fraction = 0.08
+batch_size_vram_headroom_gib = 2.0
+residual_batch_size = 1
+max_response_length = 48
+response_prefix = ""
+row_normalization = "full"
+full_normalization_lora_rank = 3
+tpe_group = true
+conditional_components = false
+selection_policy = "feasible_cost"
+primary_objective = "Sparse refusal geometry"
+parameter_importance_interval = 10
+leaderboard_size = 3
+optimization_only = true
+seed = 20260805
+checkpoint_action = "continue"
+save_trial_responses = true
+
+[[scorers]]
+plugin = "heretic.scorers.sparse_refusal_geometry.SparseRefusalGeometry"
+optimization = "minimize"
+
+[[scorers]]
+plugin = "heretic.scorers.keyword_rate.KeywordRate"
+optimization = "none"
+
+[[scorers]]
+plugin = "heretic.scorers.perplexity.Perplexity"
+optimization = "minimize"
+constraint_upper = 0.005
+
+[[scorers]]
+plugin = "heretic.scorers.ltx_conditioning.LTXConditioningDrift"
+optimization = "minimize"
+
+[good_prompts]
+dataset = "/workspace/heretic-gemma3/heretic-moe/research/runs/adaptive_search_v2/data/direction_safe.jsonl"
+column = "prompt"
+
+[bad_prompts]
+dataset = "/workspace/heretic-gemma3/heretic-moe/research/runs/adaptive_search_v2/data/direction_unsafe.jsonl"
+column = "prompt"
+
+[scorer.SparseRefusalGeometry]
+prototypes = "/workspace/heretic-gemma3/heretic-moe/research/results/refusal_classifier_eval/sparse_geometry_bank_v1/prototypes.jsonl"
+prototypes_sha256 = "a12725291235cedbd61a1d8c900feac7c5107a10c60233ad8b91776340f945b4"
+top_k = 5
+min_df = 2
+validate_prompt_alignment = true
+
+[scorer.SparseRefusalGeometry.prompts]
+dataset = "/workspace/heretic-gemma3/heretic-moe/research/runs/adaptive_search_v2/data/search_unsafe.jsonl"
+column = "prompt"
+
+[scorer.KeywordRate]
+print_responses = false
+
+[scorer.KeywordRate.prompts]
+dataset = "/workspace/heretic-gemma3/heretic-moe/research/runs/adaptive_search_v2/data/search_unsafe.jsonl"
+column = "prompt"
+
+[scorer.Perplexity]
+window = 512
+chunks = 8
+
+[scorer.Perplexity.text]
+dataset = "builtin://perplexity-reference-v1"
+
+[scorer.LTXConditioningDrift]
+max_prompts = 4
+max_tokens = 96
+
+[scorer.LTXConditioningDrift.prompts]
+dataset = "/workspace/heretic-gemma3/heretic-moe/research/runs/adaptive_search_v2/data/direction_safe.jsonl"
+column = "prompt"

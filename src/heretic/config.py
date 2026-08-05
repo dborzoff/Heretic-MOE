@@ -520,7 +520,7 @@ class Settings(BaseSettings):
     )
 
     selection_policy: SelectionPolicy = Field(
-        default=SelectionPolicy.FEASIBLE_LEXICOGRAPHIC,
+        default=SelectionPolicy.FEASIBLE_COST,
         description=(
             'Trial selection policy. "pareto" preserves the legacy menu; '
             '"feasible_lexicographic" filters by scorer constraints and then '
@@ -528,7 +528,8 @@ class Settings(BaseSettings):
             '"feasible_diverse" ranks a balanced ideal point, the primary-objective '
             "extreme, and diagnostic-score extremes before filling by diversity; "
             '"feasible_cost" ranks feasible trials by weighted excess above '
-            "per-scorer target values."
+            "per-scorer target values when configured, otherwise by normalized "
+            "distance to the ideal objective point."
         ),
     )
 
