@@ -990,7 +990,8 @@ def run():
                         settings.selection_score_targets,
                         settings.selection_score_weights,
                     )
-                    score_parts.insert(0, f"Cost {cost:.3f}")
+                    value = 1.0 / (1.0 + cost)
+                    score_parts.insert(0, f"Value {value:.3f}")
                 display_index = candidate.user_attrs.get(
                     "index", candidate.number + 1
                 )
@@ -1123,7 +1124,8 @@ def run():
                         settings.selection_score_targets,
                         settings.selection_score_weights,
                     )
-                    score_parts.insert(0, f"Cost {cost:.3f}")
+                    value = 1.0 / (1.0 + cost)
+                    score_parts.insert(0, f"Value {value:.3f}")
 
                 return f"{prefix} " + ", ".join(score_parts)
 
