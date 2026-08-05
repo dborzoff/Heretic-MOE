@@ -60,6 +60,7 @@ def main() -> None:
     parser.add_argument("--ppl-objective-index", type=int, default=1)
     parser.add_argument("--ppl-limit", type=float, default=0.005)
     parser.add_argument("--drop-objective-index", type=int, action="append", default=[])
+    parser.add_argument("--drop-scorer", action="append", default=[])
     parser.add_argument("--max-trials", type=int)
     args = parser.parse_args()
 
@@ -93,7 +94,19 @@ def main() -> None:
         storage=target_storage,
         directions=target_directions,
     )
+    dropped_scorers = set(args.drop_scorer)
     for key, value in source.user_attrs.items():
+        if key == "settings" and dropped_scorers:
+            settings = json.loads(value)
+            settings["scorers"] = [
+                scorer
+                for scorer in settings.get("scorers", [])
+                if scorer.get("plugin") not in dropped_scorers
+            ]
+            scorer_settings = settings.get("scorer", {})
+            for plugin in dropped_scorers:
+                scorer_settings.pop(plugin.rsplit(".", 1)[-1], None)
+            value = json.dumps(settings)
         target.set_user_attr(key, value)
 
     for trial in source_trials:
@@ -134,6 +147,14 @@ def main() -> None:
         if expected != list(new.values):
             raise RuntimeError(f"Objective mismatch at trial {old.number}")
 
+    migrated_settings = json.loads(target.user_attrs["settings"])
+    target_scorers = [
+        scorer.get("plugin") for scorer in migrated_settings.get("scorers", [])
+    ]
+    remaining_dropped = dropped_scorers.intersection(target_scorers)
+    if remaining_dropped:
+        raise RuntimeError(f"Dropped scorers remain in settings: {remaining_dropped}")
+
     manifest = {
         "schema_version": 1,
         "status": "PASS",
@@ -148,6 +169,8 @@ def main() -> None:
         "ppl_objective_index": args.ppl_objective_index,
         "ppl_limit": args.ppl_limit,
         "dropped_objective_indices": sorted(dropped),
+        "dropped_scorers": sorted(dropped_scorers),
+        "target_scorers": target_scorers,
         "target_objective_count": len(target_directions),
         "transformation": "abs(perplexity / baseline_perplexity - 1)",
         "corrected_feasible": sum(

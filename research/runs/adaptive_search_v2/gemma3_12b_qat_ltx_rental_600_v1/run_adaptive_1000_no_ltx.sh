@@ -8,7 +8,7 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
 repo=/workspace/heretic-gemma3/heretic-moe
-run_root=/workspace/heretic-gemma3/runs/gemma3_12b_qat_no_ltx_1000_v1
+run_root=/workspace/heretic-gemma3/runs/gemma3_12b_qat_no_ltx_1000_v2
 cd "${repo}"
 
 exec python research/scripts/run_adaptive_search.py \
