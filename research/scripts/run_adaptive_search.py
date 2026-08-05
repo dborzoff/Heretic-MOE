@@ -338,6 +338,13 @@ def wait_parallel(
 
 
 def journal_trial_count(journal: Path) -> int:
+    total, _ = journal_trial_counts(journal)
+    return total
+
+
+def journal_trial_counts(journal: Path) -> tuple[int, int]:
+    """Return total and queued-WAITING trial counts for a shared journal."""
+
     storage = JournalStorage(
         JournalFileBackend(
             str(journal),
@@ -348,7 +355,11 @@ def journal_trial_count(journal: Path) -> int:
     if len(summaries) != 1:
         raise ValueError(f"Expected one study in {journal}, found {len(summaries)}")
     study = optuna.load_study(study_name=summaries[0].study_name, storage=storage)
-    return len(study.trials)
+    trials = study.get_trials(deepcopy=False)
+    waiting = sum(
+        trial.state == optuna.trial.TrialState.WAITING for trial in trials
+    )
+    return len(trials), waiting
 
 
 def require_constraint_metadata(stage: Stage) -> None:
@@ -638,13 +649,18 @@ def main() -> None:
     if args.dry_run:
         completed_trials = args.exploration_trials
     else:
-        completed_trials = journal_trial_count(shared_stage.journal)
+        completed_trials, waiting_trials = journal_trial_counts(shared_stage.journal)
     if completed_trials > args.target_trials:
         raise ValueError(
             f"Shared study already has {completed_trials} trials, above target "
             f"{args.target_trials}"
         )
-    remaining_trials = args.target_trials - completed_trials
+    # WAITING trials already occupy trial numbers but still need one optimization
+    # call each. Add them back so queued remeasurements do not silently reduce the
+    # requested number of actual evaluations.
+    remaining_trials = args.target_trials - completed_trials + (
+        0 if args.dry_run else waiting_trials
+    )
     if not args.dry_run:
         require_constraint_metadata(shared_stage)
     worker_budgets = split_worker_budget(remaining_trials)
