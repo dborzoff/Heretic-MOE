@@ -128,15 +128,37 @@ def prepare(args: argparse.Namespace) -> None:
         score_targets=settings_data.get("selection_score_targets", {}),
         score_weights=settings_data.get("selection_score_weights", {}),
     )
-    if len(ranked) < args.top_n:
-        raise RuntimeError(f"Requested TOP {args.top_n}, but only {len(ranked)} candidates exist")
+    if args.trial_indices:
+        if len(args.trial_indices) != args.top_n:
+            raise RuntimeError("--trial-indices must contain exactly --top-n entries")
+        if len(set(args.trial_indices)) != len(args.trial_indices):
+            raise RuntimeError("--trial-indices contains duplicates")
+        completed = [
+            trial
+            for trial in source.trials
+            if trial.state == TrialState.COMPLETE and trial.values is not None
+        ]
+        by_index = {
+            int(trial.user_attrs.get("index", trial.number + 1)): trial
+            for trial in completed
+        }
+        missing = [index for index in args.trial_indices if index not in by_index]
+        if missing:
+            raise RuntimeError(f"Completed source trials not found: {missing}")
+        selected = [by_index[index] for index in args.trial_indices]
+        selection_mode = "explicit_verified_shortlist"
+    else:
+        if len(ranked) < args.top_n:
+            raise RuntimeError(
+                f"Requested TOP {args.top_n}, but only {len(ranked)} candidates exist"
+            )
+        selected = ranked[: args.top_n]
+        selection_mode = "source_ranking_top_n"
 
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     checkpoints = output / "checkpoints"
     checkpoints.mkdir(exist_ok=True)
-    selected = ranked[: args.top_n]
-
     settings_data.update(
         {
             "n_trials": args.top_n,
@@ -216,6 +238,7 @@ def prepare(args: argparse.Namespace) -> None:
         "config_sha256": sha256(config),
         "journal": str(recheck_journal),
         "top_n": args.top_n,
+        "selection_mode": selection_mode,
         "devices": args.devices,
         "ppl": {"chunks": args.ppl_chunks, "window": args.ppl_window},
         "gates": {
@@ -390,6 +413,7 @@ def parse_args() -> argparse.Namespace:
     prepare_parser.add_argument("--base-config", type=Path, required=True)
     prepare_parser.add_argument("--output-dir", type=Path, required=True)
     prepare_parser.add_argument("--top-n", type=int, default=5)
+    prepare_parser.add_argument("--trial-indices", type=int, nargs="+")
     prepare_parser.add_argument("--ppl-chunks", type=int, default=64)
     prepare_parser.add_argument("--ppl-window", type=int, default=1024)
     prepare_parser.add_argument("--devices", nargs="+", default=["0", "1"])
