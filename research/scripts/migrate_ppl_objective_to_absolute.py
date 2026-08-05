@@ -59,6 +59,8 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--ppl-objective-index", type=int, default=1)
     parser.add_argument("--ppl-limit", type=float, default=0.005)
+    parser.add_argument("--drop-objective-index", type=int, action="append", default=[])
+    parser.add_argument("--max-trials", type=int)
     args = parser.parse_args()
 
     if args.target.exists():
@@ -73,21 +75,34 @@ def main() -> None:
         study_name=summaries[0].study_name, storage=source_storage
     )
 
+    dropped = set(args.drop_objective_index)
+    if args.ppl_objective_index in dropped:
+        raise ValueError("The PPL objective cannot be dropped")
+    if any(index < 0 or index >= len(source.directions) for index in dropped):
+        raise ValueError(f"Invalid dropped objective indices: {sorted(dropped)}")
+    target_directions = [
+        direction
+        for index, direction in enumerate(source.directions)
+        if index not in dropped
+    ]
+    source_trials = source.trials[: args.max_trials]
+
     target_storage = JournalStorage(JournalFileBackend(str(args.target)))
     target = optuna.create_study(
         study_name=source.study_name,
         storage=target_storage,
-        directions=source.directions,
+        directions=target_directions,
     )
     for key, value in source.user_attrs.items():
         target.set_user_attr(key, value)
 
-    for trial in source.trials:
+    for trial in source_trials:
         if trial.values is None:
             raise ValueError(f"Trial {trial.number} has no objective values")
         values = list(trial.values)
         signed_change = float(values[args.ppl_objective_index])
         values[args.ppl_objective_index] = abs(signed_change)
+        values = [value for index, value in enumerate(values) if index not in dropped]
         user_attrs = transform_attrs(trial.user_attrs, signed_change, args.ppl_limit)
         system_attrs = copy.deepcopy(trial.system_attrs)
         system_attrs["constraints"] = [abs(signed_change) - args.ppl_limit]
@@ -104,15 +119,18 @@ def main() -> None:
         )
 
     migrated = target.trials
-    if len(migrated) != len(source.trials):
+    if len(migrated) != len(source_trials):
         raise RuntimeError("Migrated trial count mismatch")
-    for old, new in zip(source.trials, migrated, strict=True):
+    for old, new in zip(source_trials, migrated, strict=True):
         if old.params != new.params:
             raise RuntimeError(f"Parameter mismatch at trial {old.number}")
         if old.values is None or new.values is None:
             raise RuntimeError(f"Missing values at trial {old.number}")
         expected = list(old.values)
         expected[args.ppl_objective_index] = abs(expected[args.ppl_objective_index])
+        expected = [
+            value for index, value in enumerate(expected) if index not in dropped
+        ]
         if expected != list(new.values):
             raise RuntimeError(f"Objective mismatch at trial {old.number}")
 
@@ -125,8 +143,12 @@ def main() -> None:
         "target_sha256": sha256(args.target),
         "study_name": source.study_name,
         "trial_count": len(migrated),
+        "source_trial_count": len(source.trials),
+        "max_trials": args.max_trials,
         "ppl_objective_index": args.ppl_objective_index,
         "ppl_limit": args.ppl_limit,
+        "dropped_objective_indices": sorted(dropped),
+        "target_objective_count": len(target_directions),
         "transformation": "abs(perplexity / baseline_perplexity - 1)",
         "corrected_feasible": sum(
             bool(trial.user_attrs.get("feasible")) for trial in migrated
