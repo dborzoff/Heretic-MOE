@@ -179,7 +179,8 @@ class Perplexity(Scorer):
 
     @property
     def score_name(self) -> str:
-        return "PPL drift"
+        # Keep the stable journal key; the console abbreviates it to "PPL drift".
+        return "Perplexity drift"
 
     # Context withholds the model, and its public methods cannot score arbitrary
     # token sequences: get_logits accepts prompts and returns only the final

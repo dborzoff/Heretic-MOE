@@ -100,7 +100,26 @@ from .utils import (
 def _display_score_name(name: str) -> str:
     """Use compact console labels without changing stable journal keys."""
 
-    return {"Sparse refusal geometry": "SRG"}.get(name, name)
+    return {
+        "Sparse refusal geometry": "SRG",
+        "Perplexity drift": "PPL drift",
+        "PPL drift": "PPL drift",
+    }.get(name, name)
+
+
+def _display_score_record(record: dict[str, Any]) -> str:
+    """Format current and legacy journal records consistently."""
+
+    name = record["name"]
+    score = record["score"]
+    if name == "Sparse refusal geometry":
+        diagnostics = score.get("diagnostics") or {}
+        positive_rate = diagnostics.get("positive_rate")
+        if positive_rate is not None:
+            return f"{float(score['value']):+.5f}; R-side {float(positive_rate) * 100:.1f}%"
+    if name in {"Perplexity drift", "PPL drift"}:
+        return f"{abs(float(score['value'])) * 100:.2f}%"
+    return str(score["rich_display"])
 
 
 def obtain_export_strategy(
@@ -929,7 +948,7 @@ def run():
                 )
                 score_parts = [
                     f"{_display_score_name(record['name'])}: "
-                    f"{record['score']['rich_display']}"
+                    f"{_display_score_record(record)}"
                     for record in candidate.user_attrs.get("scores", [])
                 ]
                 if settings.selection_policy == SelectionPolicy.FEASIBLE_COST:
@@ -1063,7 +1082,7 @@ def run():
                 score_parts: list[str] = []
                 for score in trial.user_attrs["scores"]:
                     name = _display_score_name(score["name"])
-                    value = score["score"]["rich_display"]
+                    value = _display_score_record(score)
                     score_parts.append(f"{name}: {value}")
                 if settings.selection_policy == SelectionPolicy.FEASIBLE_COST:
                     cost = trial_selection_cost(
