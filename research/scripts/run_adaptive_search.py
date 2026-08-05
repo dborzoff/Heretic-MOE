@@ -76,6 +76,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip branch creation/merge and extend an existing shared journal.",
     )
+    parser.add_argument(
+        "--allow-scorer-config-update",
+        action="store_true",
+        help=(
+            "Explicitly allow replacing only the scorer section in existing "
+            "managed stage configs, for example when increasing PPL windows."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -533,6 +541,11 @@ def main() -> None:
     base = read_config(base_config)
     branch_trials = args.exploration_trials // 2
     response_archive = root / "trial-responses.sqlite3"
+    scorer_updates = (
+        frozenset({"scorer"})
+        if args.allow_scorer_config_update
+        else frozenset()
+    )
     random_stage = build_stage(
         root,
         "random_branch",
@@ -546,6 +559,7 @@ def main() -> None:
         response_number_stride=2,
         parallel_workers=1,
         dry_run=args.dry_run,
+        allowed_config_updates=scorer_updates,
     )
     sobol_stage = build_stage(
         root,
@@ -560,6 +574,7 @@ def main() -> None:
         response_number_stride=2,
         parallel_workers=1,
         dry_run=args.dry_run,
+        allowed_config_updates=scorer_updates,
     )
     shared_stage = build_stage(
         root,
@@ -574,7 +589,7 @@ def main() -> None:
         response_number_stride=1,
         parallel_workers=2,
         dry_run=args.dry_run,
-        allowed_config_updates=frozenset({"n_trials"}),
+        allowed_config_updates=frozenset({"n_trials"}) | scorer_updates,
     )
     manifest_path = root / "adaptive_run_manifest.json"
     if not args.dry_run:

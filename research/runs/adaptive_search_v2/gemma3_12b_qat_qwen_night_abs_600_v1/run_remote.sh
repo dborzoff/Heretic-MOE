@@ -19,4 +19,5 @@ exec python research/scripts/run_adaptive_search.py \
   --target-trials 661 \
   --random-device 0 \
   --sobol-device 1 \
+  --allow-scorer-config-update \
   --continue-shared-only
