@@ -134,6 +134,34 @@ def _display_score_record(record: dict[str, Any]) -> str:
     return str(score["rich_display"])
 
 
+def _leaderboard_score_parts(record: dict[str, Any]) -> list[str]:
+    """Return compact, single-line leaderboard fragments for one score."""
+
+    name = record["name"]
+    score = record["score"]
+    if name == "Sparse refusal geometry":
+        parts = [f"SRG {float(score['value']):+.5f}"]
+        diagnostics = score.get("diagnostics") or {}
+        positive_rate = diagnostics.get("positive_rate")
+        if positive_rate is not None:
+            parts.append(f"R {float(positive_rate) * 100:.1f}%")
+            return parts
+        legacy = re.fullmatch(
+            r"mean\s+[+-]?[0-9.]+;\s+(\d+)/(\d+)\s+positive",
+            str(score.get("rich_display", "")),
+        )
+        if legacy:
+            positive_count, total = map(int, legacy.groups())
+            if total > 0:
+                parts.append(f"R {positive_count / total * 100:.1f}%")
+        return parts
+    if name == "Keywords":
+        return [f"KW {score['rich_display']}"]
+    if name in {"Perplexity drift", "PPL drift"}:
+        return [f"PPL {abs(float(score['value'])) * 100:.2f}%"]
+    return [f"{_display_score_name(name)} {_display_score_record(record)}"]
+
+
 def obtain_export_strategy(
     settings: Settings,
     model: Model,
@@ -974,15 +1002,10 @@ def run():
             for rank, candidate in enumerate(
                 ranked[: settings.leaderboard_size], start=1
             ):
-                feasibility = (
-                    "feasible"
-                    if candidate.user_attrs.get("feasible", not constraint_names)
-                    else "INFEASIBLE"
-                )
                 score_parts = [
-                    f"{_display_score_name(record['name'])}: "
-                    f"{_display_score_record(record)}"
+                    part
                     for record in candidate.user_attrs.get("scores", [])
+                    for part in _leaderboard_score_parts(record)
                 ]
                 if settings.selection_policy == SelectionPolicy.FEASIBLE_COST:
                     cost = trial_selection_cost(
@@ -990,14 +1013,12 @@ def run():
                         settings.selection_score_targets,
                         settings.selection_score_weights,
                     )
-                    value = 1.0 / (1.0 + cost)
-                    score_parts.insert(0, f"Value {value:.3f}")
+                    score_parts.insert(0, f"Cost {cost:.3f}")
                 display_index = candidate.user_attrs.get(
                     "index", candidate.number + 1
                 )
                 print(
-                    f"  {rank}. Trial [bold]{display_index}[/] · {feasibility} · "
-                    + ", ".join(score_parts)
+                    f"  {rank}. T[bold]{display_index}[/] · " + " · ".join(score_parts)
                 )
 
         study_callbacks.append(print_live_leaderboard)
@@ -1104,30 +1125,26 @@ def run():
             )
 
             def format_trial_title(trial: FrozenTrial) -> str:
-                feasibility = (
-                    " feasible"
-                    if trial.user_attrs.get("feasible", not constraint_names)
-                    else " INFEASIBLE"
-                )
-                prefix = f"[Trial {trial.user_attrs['index']:>3} ·{feasibility}]"
+                feasible = trial.user_attrs.get("feasible", not constraint_names)
+                status = "" if feasible else " · INFEASIBLE"
+                prefix = f"[T{trial.user_attrs['index']}{status}]"
 
                 # We don't directly use the trial.values here since we need to show the
                 # CLI-formatted versions, which are stored in the trial's user attributes.
-                score_parts: list[str] = []
-                for score in trial.user_attrs["scores"]:
-                    name = _display_score_name(score["name"])
-                    value = _display_score_record(score)
-                    score_parts.append(f"{name}: {value}")
+                score_parts = [
+                    part
+                    for score in trial.user_attrs["scores"]
+                    for part in _leaderboard_score_parts(score)
+                ]
                 if settings.selection_policy == SelectionPolicy.FEASIBLE_COST:
                     cost = trial_selection_cost(
                         trial,
                         settings.selection_score_targets,
                         settings.selection_score_weights,
                     )
-                    value = 1.0 / (1.0 + cost)
-                    score_parts.insert(0, f"Value {value:.3f}")
+                    score_parts.insert(0, f"Cost {cost:.3f}")
 
-                return f"{prefix} " + ", ".join(score_parts)
+                return f"{prefix} " + " · ".join(score_parts)
 
             choices = [
                 Choice(title=format_trial_title(trial), value=trial)
