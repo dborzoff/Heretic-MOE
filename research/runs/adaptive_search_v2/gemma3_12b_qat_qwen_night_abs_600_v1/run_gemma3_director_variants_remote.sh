@@ -17,8 +17,7 @@ base=/workspace/heretic-gemma3/models/google__gemma-3-12b-it-qat-q4_0-unquantize
 
 [[ -x "${quantize}" && -x "${imatrix_bin}" ]] || { echo "llama.cpp toolchain missing"; exit 3; }
 [[ -s "${calibration}" ]] || { echo "calibration corpus missing"; exit 4; }
-mkdir -p "${release}/director/balanced" "${release}/director/max" \
-  "${release}/imatrix/balanced" "${release}/imatrix/max" \
+mkdir -p "${release}/GGUF/balanced" "${release}/GGUF/max" \
   "${release}/research/validation" "${release}/tmp"
 
 augment_export() {
@@ -35,13 +34,13 @@ run_variant() {
   local variant="$2"
   local label="$3"
   local source="$4"
-  local director_dir="${release}/director/${variant}"
-  local imatrix_dir="${release}/imatrix/${variant}"
+  local director_dir="${release}/GGUF/${variant}"
+  local imatrix_dir="${release}/GGUF/${variant}"
   local work="${release}/tmp/${variant}"
-  local f16="${work}/Gemma-3-12B-Heretic-MOE-${label}-F16.gguf"
-  local q8="${director_dir}/Gemma-3-12B-Heretic-MOE-${label}-Q8_0.gguf"
-  local iq4="${director_dir}/Gemma-3-12B-Heretic-MOE-${label}-IQ4_XS.gguf"
-  local matrix="${imatrix_dir}/Gemma-3-12B-Heretic-MOE-${label}.imatrix"
+  local f16="${work}/Gemma-3-12B-IT-QAT-HereticMOE-${label}-F16.gguf"
+  local q8="${director_dir}/Gemma-3-12B-IT-QAT-HereticMOE-${label}-Q8_0.gguf"
+  local iq4="${director_dir}/Gemma-3-12B-IT-QAT-HereticMOE-${label}-IQ4_XS.gguf"
+  local matrix="${imatrix_dir}/Gemma-3-12B-IT-QAT-HereticMOE-${label}.imatrix"
   local report_dir="${release}/research/validation/${variant}-director"
   mkdir -p "${work}" "${report_dir}"
 
@@ -98,10 +97,10 @@ run_variant() {
 }
 
 run_variant 0 balanced Balanced "${selected}/balanced_t555/model" \
-  >"${release}/director/balanced/pipeline.log" 2>&1 &
+  >"${release}/GGUF/balanced/pipeline.log" 2>&1 &
 balanced_pid=$!
 run_variant 1 max Max "${selected}/max_t752/model" \
-  >"${release}/director/max/pipeline.log" 2>&1 &
+  >"${release}/GGUF/max/pipeline.log" 2>&1 &
 max_pid=$!
 
 status=0

@@ -13,7 +13,7 @@ toolchain=/workspace/heretic-gemma3/toolchain
 quant_tool="${toolchain}/quant-venv/bin/convert-to-quant"
 base_tokenizer=/workspace/heretic-gemma3/models/google__gemma-3-12b-it-qat-q4_0-unquantized/tokenizer.model
 
-mkdir -p "${release}/ltx_text_encoders/balanced" "${release}/ltx_text_encoders/max" "${release}/research/validation"
+mkdir -p "${release}/Text_Encoder/balanced" "${release}/Text_Encoder/max" "${release}/research/validation"
 
 build_bf16() {
   local variant="$1"
@@ -34,14 +34,14 @@ build_bf16() {
   echo "stage=bf16-complete variant=${variant}"
 }
 
-balanced_bf16="${release}/ltx_text_encoders/balanced/Gemma-3-12B-Heretic-MOE-Balanced-LTX-TE-BF16.safetensors"
-max_bf16="${release}/ltx_text_encoders/max/Gemma-3-12B-Heretic-MOE-Max-LTX-TE-BF16.safetensors"
+balanced_bf16="${release}/Text_Encoder/balanced/Gemma-3-12B-IT-QAT-HereticMOE-Balanced-BF16.safetensors"
+max_bf16="${release}/Text_Encoder/max/Gemma-3-12B-IT-QAT-HereticMOE-Max-BF16.safetensors"
 
 build_bf16 balanced "${selected}/balanced_t555/model" "${balanced_bf16}" "${release}/research/validation/balanced-bf16.json" \
-  >"${release}/ltx_text_encoders/balanced/bf16.log" 2>&1 &
+  >"${release}/Text_Encoder/balanced/bf16.log" 2>&1 &
 balanced_build_pid=$!
 build_bf16 max "${selected}/max_t752/model" "${max_bf16}" "${release}/research/validation/max-bf16.json" \
-  >"${release}/ltx_text_encoders/max/bf16.log" 2>&1 &
+  >"${release}/Text_Encoder/max/bf16.log" 2>&1 &
 max_build_pid=$!
 
 status=0
@@ -65,8 +65,8 @@ quantize_variant() {
   local label="$3"
   local input="$4"
   local output_dir="$5"
-  local int8="${output_dir}/Gemma-3-12B-Heretic-MOE-${label}-LTX-TE-INT8-ConvRot.safetensors"
-  local nvfp4="${output_dir}/Gemma-3-12B-Heretic-MOE-${label}-LTX-TE-NVFP4.safetensors"
+  local int8="${output_dir}/Gemma-3-12B-IT-QAT-HereticMOE-${label}-INT8-ConvRot.safetensors"
+  local nvfp4="${output_dir}/Gemma-3-12B-IT-QAT-HereticMOE-${label}-NVFP4.safetensors"
 
   export CUDA_VISIBLE_DEVICES="${device}"
   if [[ ! -s "${int8}" ]]; then
@@ -87,11 +87,11 @@ quantize_variant() {
   fi
 }
 
-quantize_variant 0 balanced Balanced "${balanced_bf16}" "${release}/ltx_text_encoders/balanced" \
-  >"${release}/ltx_text_encoders/balanced/quantize.log" 2>&1 &
+quantize_variant 0 balanced Balanced "${balanced_bf16}" "${release}/Text_Encoder/balanced" \
+  >"${release}/Text_Encoder/balanced/quantize.log" 2>&1 &
 balanced_quant_pid=$!
-quantize_variant 1 max Max "${max_bf16}" "${release}/ltx_text_encoders/max" \
-  >"${release}/ltx_text_encoders/max/quantize.log" 2>&1 &
+quantize_variant 1 max Max "${max_bf16}" "${release}/Text_Encoder/max" \
+  >"${release}/Text_Encoder/max/quantize.log" 2>&1 &
 max_quant_pid=$!
 
 status=0
