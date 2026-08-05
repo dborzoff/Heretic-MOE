@@ -16,7 +16,7 @@ exec python research/scripts/run_adaptive_search.py \
   --run-root "${run_root}/adaptive_600" \
   --heretic "${repo}/research/runs/adaptive_search_v2/gemma3_12b_qat_qwen_night_abs_600_v1/heretic-night-abs" \
   --exploration-trials 120 \
-  --target-trials 657 \
+  --target-trials 661 \
   --random-device 0 \
   --sobol-device 1 \
   --continue-shared-only
