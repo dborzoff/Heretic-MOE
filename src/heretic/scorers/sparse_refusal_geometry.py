@@ -228,7 +228,9 @@ class SparseRefusalGeometry(Scorer):
 
     def _topk_scores(self, query: Any, reference: Any) -> dict[str, np.ndarray]:
         similarities = (query @ reference.T).toarray()
-        query_ids = np.arange(query.shape[0], dtype=np.int64)
+        query_ids: np.ndarray[Any, np.dtype[np.int64]] = np.arange(
+            query.shape[0], dtype=np.int64
+        )
         same_prompt = query_ids[:, None] == self._prototype_ids[None, :]
         similarities[same_prompt] = -np.inf
         result: dict[str, np.ndarray] = {}

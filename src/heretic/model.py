@@ -177,7 +177,7 @@ class Model:
             else None
         )
 
-        self.trusted_models = set()
+        self.trusted_models: set[str] = set()
 
         for dtype in settings.dtypes:
             print(f"* Trying dtype [bold]{dtype}[/]...")
@@ -458,7 +458,7 @@ class Model:
     def get_layer_modules(self, layer_index: int) -> dict[str, list[Module]]:
         layer = self.get_layers()[layer_index]
 
-        modules = {}
+        modules: dict[str, list[Module]] = {}
 
         def try_add(component: str, module: Any):
             # Only add if it's a proper nn.Module (PEFT can wrap these with LoRA)
