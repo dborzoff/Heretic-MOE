@@ -15,21 +15,21 @@ from pathlib import Path
 ROOT = Path(r"F:\AI")
 RESPONSES = (
     ROOT
-    / "heretic-moe/research/results/adaptive_search_v2/unified_600_finalists"
+    / "hf_originals/heretic_out/research/results/adaptive_search_v2/unified_600_finalists"
     / "semantic_136x2048"
 )
 LABELS = (
     ROOT
-    / "heretic-moe/research/results/adaptive_search_v2"
+    / "hf_originals/heretic_out/research/results/adaptive_search_v2"
     / "unified_600_finalists_ninelabel_rejudge/judge_work/cjudge_labels.jsonl"
 )
 SPLIT = (
     ROOT
-    / "heretic_test/results/refusal_lab/semantic_3head_v1/split_manifest.json"
+    / "hf_originals/heretic_out/test/heretic_test/results/refusal_lab/semantic_3head_v1/split_manifest.json"
 )
 OUTPUT_DIR = (
     ROOT
-    / "heretic-moe/research/results/refusal_classifier_eval/sparse_geometry_bank_v1"
+    / "hf_originals/heretic_out/research/results/refusal_classifier_eval/sparse_geometry_bank_v1"
 )
 OUTPUT = OUTPUT_DIR / "prototypes.jsonl"
 MANIFEST = OUTPUT_DIR / "manifest.json"

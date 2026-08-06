@@ -42,6 +42,6 @@
     }
   },
   "schema_version": 1,
-  "source_manifest": "F:\\AI\\heretic_test\\datasets\\heretic_multilingual_prompts_v1\\v3\\manifest_v3.json",
+  "source_manifest": "F:\\AI\\hf_originals\\heretic_out\\test\\heretic_test\\datasets\\heretic_multilingual_prompts_v1\\v3\\manifest_v3.json",
   "source_manifest_sha256": "2b1ce7a121bd38bd7361b42ded8129ab1c18e3a146767d0109bfaee127e68b21"
 }

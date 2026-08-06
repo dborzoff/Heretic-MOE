@@ -19,21 +19,21 @@ parameter_importance_interval = 20
 optimization_only = true
 seed = 20260802
 checkpoint_action = "continue"
-study_checkpoint_dir = "F:/AI/heretic-moe/research/runs/adaptive_search_v2/ministral_sobol/checkpoints"
+study_checkpoint_dir = "F:/AI/hf_originals/heretic_out/research/runs/adaptive_search_v2/ministral_sobol/checkpoints"
 
 [good_prompts]
-dataset = "F:/AI/heretic-moe/research/runs/adaptive_search_v2/data/direction_safe.jsonl"
+dataset = "F:/AI/hf_originals/heretic_out/research/runs/adaptive_search_v2/data/direction_safe.jsonl"
 column = "prompt"
 
 [bad_prompts]
-dataset = "F:/AI/heretic-moe/research/runs/adaptive_search_v2/data/direction_unsafe.jsonl"
+dataset = "F:/AI/hf_originals/heretic_out/research/runs/adaptive_search_v2/data/direction_unsafe.jsonl"
 column = "prompt"
 
 [scorer.KeywordRate]
 print_responses = false
 
 [scorer.KeywordRate.prompts]
-dataset = "F:/AI/heretic-moe/research/runs/adaptive_search_v2/data/search_unsafe.jsonl"
+dataset = "F:/AI/hf_originals/heretic_out/research/runs/adaptive_search_v2/data/search_unsafe.jsonl"
 column = "prompt"
 
 [scorer.Perplexity]

@@ -3,7 +3,7 @@ $Host.UI.RawUI.WindowTitle = "CODEX | Adaptive Search v2 | Ministral-3B | Sobol-
 $env:CUDA_VISIBLE_DEVICES = "1"
 $env:HF_HUB_OFFLINE = "1"
 $env:TRANSFORMERS_OFFLINE = "1"
-$runDirectory = "F:\AI\heretic-moe\research\runs\adaptive_search_v2\ministral_sobol"
+$runDirectory = $PSScriptRoot
 Set-Location -LiteralPath $runDirectory
 
 Write-Host "Task: Adaptive Search v2 A/B"
