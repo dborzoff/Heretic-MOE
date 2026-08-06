@@ -5,7 +5,7 @@ ROOT=/workspace/heretic-gemma3
 RUN="$ROOT/runs/gemma3_12b_qat_qwen_night_abs_600_v1"
 RELEASE="$RUN/release"
 REPO=DmitryDB/Gemma-3-12B-IT-QAT-Heretic-MOE-v1
-UPLOADER="$ROOT/heretic-moe/research/scripts/upload_hf_release_file.py"
+UPLOADER="$ROOT/heretic-moe-qwen-night-abs/research/scripts/upload_hf_release_file.py"
 PY=/venv/main/bin/python
 TOKEN_FILE="$ROOT/.hf_token"
 REPORTS="$RELEASE/research/upload_reports"
@@ -20,6 +20,7 @@ HF_TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
 export HF_XET_HIGH_PERFORMANCE=1
 trap 'unset HF_TOKEN; rm -f "$TOKEN_FILE"' EXIT
 mkdir -p "$REPORTS"
+shopt -s nullglob
 
 upload_one() {
   local source="$1"

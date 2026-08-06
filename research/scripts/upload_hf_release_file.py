@@ -6,10 +6,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import tempfile
 import time
 from pathlib import Path
 
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, hf_hub_download
 
 
 def sha256(path: Path) -> str:
@@ -29,7 +30,15 @@ def remote_metadata(
             continue
         lfs = sibling.lfs
         if lfs is None:
-            remote_sha = None
+            with tempfile.TemporaryDirectory() as temp_dir:
+                downloaded = hf_hub_download(
+                    repo_id=repo,
+                    filename=target,
+                    repo_type="model",
+                    local_dir=temp_dir,
+                    force_download=True,
+                )
+                remote_sha = sha256(Path(downloaded))
         elif isinstance(lfs, dict):
             remote_sha = lfs.get("sha256")
         else:
