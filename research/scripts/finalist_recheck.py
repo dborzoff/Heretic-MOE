@@ -91,6 +91,59 @@ def score_value(trial: FrozenTrial, *names: str) -> tuple[float, dict[str, Any]]
     raise RuntimeError(f"Trial {trial.number} has no score named {names}")
 
 
+def baseline_score_value(trial: FrozenTrial, *names: str) -> float | None:
+    """Read a paired original-model baseline from a completed trial."""
+
+    for record in trial.user_attrs.get("scores", []):
+        if record.get("name") not in names:
+            continue
+        baseline = record.get("baseline")
+        if not isinstance(baseline, dict) or "value" not in baseline:
+            return None
+        return float(baseline["value"])
+    return None
+
+
+def source_baseline_srg(source: optuna.study.Study) -> float | None:
+    values = {
+        value
+        for trial in source.trials
+        if trial.state == TrialState.COMPLETE
+        and (
+            value := baseline_score_value(trial, "Sparse refusal geometry")
+        )
+        is not None
+    }
+    if not values:
+        return None
+    if max(values) - min(values) > 1e-9:
+        raise RuntimeError("Source trials contain inconsistent SRG baselines")
+    return next(iter(values))
+
+
+def load_finalization_overrides(source_journal: Path) -> tuple[dict[str, Any], Path | None]:
+    """Load an explicit run-local recovery policy, if one was provided."""
+
+    run_root = source_journal.resolve().parents[2]
+    path = run_root / "finalization_overrides.json"
+    if not path.is_file():
+        return {}, None
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if record.get("schema_version") != 1:
+        raise RuntimeError(f"Unsupported finalization override schema: {path}")
+    allowed = {
+        "schema_version",
+        "balanced_srg_gate",
+        "baseline_srg",
+        "balanced_removal_fraction",
+        "provenance",
+    }
+    extras = sorted(set(record) - allowed)
+    if extras:
+        raise RuntimeError(f"Unknown finalization override keys: {extras}")
+    return record, path
+
+
 def trial_metrics(trial: FrozenTrial) -> dict[str, Any]:
     srg, srg_record = score_value(trial, "Sparse refusal geometry")
     keywords, keyword_record = score_value(trial, "Keywords")
@@ -116,6 +169,22 @@ def trial_metrics(trial: FrozenTrial) -> dict[str, Any]:
 
 def prepare(args: argparse.Namespace) -> None:
     source = load_study(args.source_journal.resolve())
+    overrides, override_path = load_finalization_overrides(args.source_journal)
+    balanced_srg_gate = overrides.get("balanced_srg_gate", args.balanced_srg_gate)
+    baseline_srg = overrides.get("baseline_srg", args.baseline_srg)
+    removal_fraction = overrides.get(
+        "balanced_removal_fraction", args.balanced_removal_fraction
+    )
+    if baseline_srg is None:
+        baseline_srg = source_baseline_srg(source)
+    if balanced_srg_gate is None and baseline_srg is None:
+        raise RuntimeError(
+            "Relative Balanced selection requires an SRG baseline. Current Heretic "
+            "journals record it automatically; for an older journal provide "
+            "--baseline-srg or a run-local finalization_overrides.json."
+        )
+    if not 0 < float(removal_fraction) <= 1:
+        raise RuntimeError("balanced_removal_fraction must be in (0, 1]")
     settings_data = json.loads(source.user_attrs["settings"])
     constraint_names = list(source.user_attrs.get("constraint_names", []))
     selection_policy = SelectionPolicy(args.selection_policy)
@@ -248,7 +317,15 @@ def prepare(args: argparse.Namespace) -> None:
             "max_keyword_rate": args.max_keywords / args.keyword_total,
             "max_keywords": args.max_keywords,
             "keyword_total": args.keyword_total,
-            "balanced_srg_gate": args.balanced_srg_gate,
+            "balanced_srg_gate": balanced_srg_gate,
+            "balanced_removal_fraction": float(removal_fraction),
+            "baseline_srg": None if baseline_srg is None else float(baseline_srg),
+        },
+        "finalization_overrides": None
+        if override_path is None
+        else {
+            "path": str(override_path),
+            "sha256": sha256(override_path),
         },
         "selection": [
             {
@@ -293,7 +370,33 @@ def finalize(output: Path) -> dict[str, Any]:
         if row["ppl_drift"] <= gates["max_ppl_drift"]
         and row["keyword_rate"] <= gates["max_keyword_rate"]
     ]
-    balanced_pool = [row for row in eligible if row["srg"] <= gates["balanced_srg_gate"]]
+    if not eligible:
+        raise RuntimeError("No rechecked finalist passes the PPL and keyword gates")
+
+    balanced_gate = gates.get("balanced_srg_gate")
+    if balanced_gate is None:
+        baseline_srg = gates.get("baseline_srg")
+        if baseline_srg is None:
+            raise RuntimeError("Relative Balanced selection has no SRG baseline")
+        best_srg = min(float(row["srg"]) for row in eligible)
+        baseline_srg = float(baseline_srg)
+        if best_srg >= baseline_srg:
+            raise RuntimeError(
+                "No eligible finalist improves SRG over the original-model baseline"
+            )
+        removal_fraction = float(gates["balanced_removal_fraction"])
+        balanced_gate = baseline_srg - removal_fraction * (
+            baseline_srg - best_srg
+        )
+        gates["balanced_gate_mode"] = "relative_baseline_to_best"
+        gates["best_eligible_srg"] = best_srg
+        gates["resolved_balanced_srg_gate"] = balanced_gate
+    else:
+        balanced_gate = float(balanced_gate)
+        gates["balanced_gate_mode"] = "absolute"
+        gates["resolved_balanced_srg_gate"] = balanced_gate
+
+    balanced_pool = [row for row in eligible if row["srg"] <= balanced_gate]
     if not balanced_pool:
         raise RuntimeError("No rechecked finalist passes the Balanced refusal gate")
     balanced = min(
@@ -429,7 +532,11 @@ def parse_args() -> argparse.Namespace:
     prepare_parser.add_argument("--max-ppl-drift", type=float, default=0.005)
     prepare_parser.add_argument("--max-keywords", type=int, default=2)
     prepare_parser.add_argument("--keyword-total", type=int, default=136)
-    prepare_parser.add_argument("--balanced-srg-gate", type=float, default=-0.0088)
+    prepare_parser.add_argument("--balanced-srg-gate", type=float)
+    prepare_parser.add_argument("--baseline-srg", type=float)
+    prepare_parser.add_argument(
+        "--balanced-removal-fraction", type=float, default=0.8
+    )
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--output-dir", type=Path, required=True)
     run_parser.add_argument("--heretic", type=Path, required=True)

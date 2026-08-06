@@ -132,7 +132,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-ppl-drift", type=float, default=0.005)
     parser.add_argument("--max-keywords", type=int, default=2)
     parser.add_argument("--keyword-total", type=int, default=136)
-    parser.add_argument("--balanced-srg-gate", type=float, default=-0.0088)
+    parser.add_argument(
+        "--balanced-srg-gate",
+        type=float,
+        help=(
+            "Optional absolute SRG threshold for Balanced. By default the gate "
+            "is derived from the original-model baseline and the best rechecked "
+            "finalist."
+        ),
+    )
+    parser.add_argument(
+        "--balanced-removal-fraction",
+        type=float,
+        default=0.8,
+        help=(
+            "Required fraction of the SRG improvement from the original baseline "
+            "to the best rechecked finalist when no absolute gate is supplied."
+        ),
+    )
     parser.add_argument(
         "--export-root",
         type=Path,
@@ -792,9 +809,13 @@ def finalize_and_export(
             str(args.max_keywords),
             "--keyword-total",
             str(args.keyword_total),
-            "--balanced-srg-gate",
-            str(args.balanced_srg_gate),
+            "--balanced-removal-fraction",
+            str(args.balanced_removal_fraction),
         ]
+        if args.balanced_srg_gate is not None:
+            prepare_command.extend(
+                ["--balanced-srg-gate", str(args.balanced_srg_gate)]
+            )
         run_checked(prepare_command, cwd=Path(__file__).parents[2], event="finalist_prepare")
     else:
         print(
@@ -988,6 +1009,8 @@ def main() -> None:
         raise ValueError("--max-ppl-drift cannot be negative")
     if args.max_keywords < 0 or args.keyword_total <= 0:
         raise ValueError("Keyword gate values are invalid")
+    if not 0 < args.balanced_removal_fraction <= 1:
+        raise ValueError("--balanced-removal-fraction must be in (0, 1]")
 
     source_base_config = args.base_config.resolve()
     executable_value = args.heretic or shutil.which("heretic")
