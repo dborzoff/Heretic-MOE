@@ -57,6 +57,11 @@ same even/odd global numbering before the journal merge.
     checkpoints/*.jsonl.merge.json
 ```
 
+The run manifest captures launch-time SHA-256 values for the controller and
+`heretic` executable plus the Git revision and dirty state when available.
+These values are frozen at process start and do not change if the checkout is
+updated while a long run is still active.
+
 Generated stage configs are immutable except that the shared `n_trials` target
 may be raised explicitly. Re-running the controller resumes existing journals;
 it never overwrites a different stage configuration.

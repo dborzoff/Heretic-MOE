@@ -155,6 +155,33 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def git_provenance(repository: Path) -> tuple[str | None, bool | None]:
+    """Capture the source revision once without requiring Git at runtime."""
+
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=no"],
+                cwd=repository,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).stdout.strip()
+        )
+        return revision or None, dirty
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None, None
+
+
 def sanitized_model_name(model: str) -> str:
     return "".join(c if (c.isalnum() or c in "_-") else "--" for c in model)
 
@@ -583,6 +610,14 @@ def write_run_manifest(
         "base_config_sha256": sha256(base_config),
         "source_base_config": str(args.base_config.resolve()),
         "source_base_config_sha256": sha256(args.base_config.resolve()),
+        "launch_provenance": {
+            "controller_path": str(args.controller_path),
+            "controller_sha256": args.controller_sha256,
+            "heretic_executable": str(args.heretic_path),
+            "heretic_executable_sha256": args.heretic_sha256,
+            "git_revision": args.git_revision,
+            "git_dirty": args.git_dirty,
+        },
         "model_override": args.model,
         "data_root": str(args.data_root.resolve()) if args.data_root else None,
         "exploration_trials": args.exploration_trials,
@@ -966,6 +1001,15 @@ def main() -> None:
         raise FileNotFoundError(source_base_config)
     if not executable.is_file():
         raise FileNotFoundError(executable)
+    controller_path = Path(__file__).resolve()
+    repository = controller_path.parents[2]
+    git_revision, git_dirty = git_provenance(repository)
+    args.controller_path = controller_path
+    args.controller_sha256 = sha256(controller_path)
+    args.heretic_path = executable
+    args.heretic_sha256 = sha256(executable)
+    args.git_revision = git_revision
+    args.git_dirty = git_dirty
     if not args.dry_run:
         root.mkdir(parents=True, exist_ok=True)
 
