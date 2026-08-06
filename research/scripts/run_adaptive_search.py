@@ -721,10 +721,14 @@ def mark_existing_run_failed(arguments: list[str], error: BaseException) -> None
     record["status"] = "failed"
     record["updated_unix"] = time.time()
     record["failure"] = {"type": type(error).__name__}
-    write_text_atomic(
-        manifest_path,
-        json.dumps(record, ensure_ascii=False, indent=2) + "\n",
-    )
+    try:
+        write_text_atomic(
+            manifest_path,
+            json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+        )
+    except OSError:
+        # Failure reporting must never mask the original controller exception.
+        return
 
 
 def run_checked(command: list[str], *, cwd: Path, event: str) -> None:
