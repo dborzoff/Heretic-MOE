@@ -679,7 +679,52 @@ def write_run_manifest(
     payload = json.dumps(record, ensure_ascii=False, indent=2) + "\n"
     if path.exists() and path.read_text(encoding="utf-8") == payload:
         return
-    path.write_text(payload, encoding="utf-8")
+    write_text_atomic(path, payload)
+
+
+def write_text_atomic(path: Path, payload: str) -> None:
+    """Replace a controller text artifact without exposing a partial file."""
+
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(payload, encoding="utf-8", newline="\n")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def command_line_value(arguments: list[str], name: str) -> str | None:
+    """Read one option from argv without invoking the complete CLI parser."""
+
+    prefix = f"{name}="
+    for index, argument in enumerate(arguments):
+        if argument.startswith(prefix):
+            return argument[len(prefix) :]
+        if argument == name and index + 1 < len(arguments):
+            return arguments[index + 1]
+    return None
+
+
+def mark_existing_run_failed(arguments: list[str], error: BaseException) -> None:
+    """Leave a machine-readable terminal state after an unhandled failure."""
+
+    run_root = command_line_value(arguments, "--run-root")
+    if run_root is None:
+        return
+    manifest_path = Path(run_root).resolve() / "adaptive_run_manifest.json"
+    if not manifest_path.is_file():
+        return
+    try:
+        record = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    record["status"] = "failed"
+    record["updated_unix"] = time.time()
+    record["failure"] = {"type": type(error).__name__}
+    write_text_atomic(
+        manifest_path,
+        json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+    )
 
 
 def run_checked(command: list[str], *, cwd: Path, event: str) -> None:
@@ -1273,4 +1318,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException as error:
+        mark_existing_run_failed(sys.argv[1:], error)
+        raise
