@@ -69,14 +69,17 @@ packaged under `src/heretic/data/` and verified by SHA-256 before use. No machin
 `F:/AI/llamacpp/ppl_test.txt` path or Hugging Face download is required.
 
 Model and prompt-dataset paths remain explicit inputs because they differ
-between local and rented servers. Copy the repository and data bundle, update
-those three paths in the base config, then keep the pipeline code unchanged.
+between local and rented servers. For a portable run, pass `--data-root` with
+the four-file adaptive-search bundle; the controller writes those resolved
+paths into the effective run-local TOML and records the root in the run
+manifest.
 
 ## Example
 
 ```powershell
 F:\AI\heretic_env\Scripts\python.exe research\scripts\run_adaptive_search.py `
   --base-config research\configs\adaptive_search\gemma2_sparse_geometry.toml `
+  --data-root F:\AI\HereticMoe\runtime_data\adaptive_search_v2 `
   --run-root research\runs\adaptive_search_v2\gemma2_sparse_geometry_dual_600_v1 `
   --heretic F:\AI\heretic_env\Scripts\heretic.exe `
   --exploration-trials 120 `

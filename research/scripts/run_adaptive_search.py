@@ -10,6 +10,7 @@ provenance. Prompt and response payloads remain inside the scorer processes.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -48,6 +49,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         help="Override the model in the base config without editing the TOML file.",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        help=(
+            "Portable adaptive-search data bundle containing direction_safe.jsonl, "
+            "direction_unsafe.jsonl, search_unsafe.jsonl, and prototypes.jsonl."
+        ),
     )
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument(
@@ -156,6 +165,34 @@ def read_config(path: Path) -> dict[str, Any]:
     model = config.get("model")
     if not isinstance(model, str) or not model:
         raise ValueError(f"Base config has no non-empty model: {path}")
+    return config
+
+
+def apply_data_root(base: dict[str, Any], data_root: Path) -> dict[str, Any]:
+    """Point the known adaptive scorers at one portable local data bundle."""
+
+    root = data_root.resolve()
+    paths = {
+        "direction_safe": root / "direction_safe.jsonl",
+        "direction_unsafe": root / "direction_unsafe.jsonl",
+        "search_unsafe": root / "search_unsafe.jsonl",
+        "prototypes": root / "prototypes.jsonl",
+    }
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError("Data bundle is incomplete: " + ", ".join(missing))
+
+    config = copy.deepcopy(base)
+    config["good_prompts"]["dataset"] = paths["direction_safe"].as_posix()
+    config["bad_prompts"]["dataset"] = paths["direction_unsafe"].as_posix()
+    scorer = config["scorer"]
+    sparse = scorer["SparseRefusalGeometry"]
+    sparse["prototypes"] = paths["prototypes"].as_posix()
+    sparse["prototypes_sha256"] = sha256(paths["prototypes"])
+    sparse["prompts"]["dataset"] = paths["search_unsafe"].as_posix()
+    scorer["KeywordRate"]["prompts"]["dataset"] = paths[
+        "search_unsafe"
+    ].as_posix()
     return config
 
 
@@ -547,6 +584,7 @@ def write_run_manifest(
         "source_base_config": str(args.base_config.resolve()),
         "source_base_config_sha256": sha256(args.base_config.resolve()),
         "model_override": args.model,
+        "data_root": str(args.data_root.resolve()) if args.data_root else None,
         "exploration_trials": args.exploration_trials,
         "trials_per_exploration_branch": args.exploration_trials // 2,
         "target_trials": args.target_trials,
@@ -933,8 +971,11 @@ def main() -> None:
 
     base = read_config(source_base_config)
     base_config = source_base_config
+    if args.data_root:
+        base = apply_data_root(base, args.data_root)
     if args.model:
         base["model"] = args.model
+    if args.model or args.data_root:
         if not args.dry_run:
             base_config = root / "effective_base_config.toml"
             write_managed_config(base_config, base, dry_run=False)
