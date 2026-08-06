@@ -1,7 +1,7 @@
 [project]
 name = "heretic-llm"
-version = "1.4.0"
-description = "Fully automatic censorship removal for language models"
+version = "1.5.0"
+description = "Heretic-MOE adaptive censorship-removal search for language models"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 authors = [
@@ -37,6 +37,7 @@ dependencies = [
     "pydantic-settings~=2.13",
     "questionary~=2.1",
     "rich~=14.3",
+    "scikit-learn~=1.7",
     "tomli-w~=1.2",
     "torch",  # version deliberately unspecified
     "torchvision",  # version deliberately unspecified
@@ -50,7 +51,6 @@ research = [
     "imageio~=2.37",
     "matplotlib~=3.10",
     "pacmap~=0.8",
-    "scikit-learn~=1.7",
 ]
 
 [dependency-groups]
@@ -60,11 +60,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://heretic-project.org"
-Documentation = "https://heretic-project.org/tutorial"
-Repository = "https://github.com/p-e-w/heretic.git"
-Issues = "https://github.com/p-e-w/heretic/issues"
-Changelog = "https://github.com/p-e-w/heretic/releases"
+Homepage = "https://github.com/dborzoff/Heretic-MOE"
+Documentation = "https://github.com/dborzoff/Heretic-MOE#readme"
+Repository = "https://github.com/dborzoff/Heretic-MOE.git"
+Issues = "https://github.com/dborzoff/Heretic-MOE/issues"
+Changelog = "https://github.com/dborzoff/Heretic-MOE/releases"
 
 [project.scripts]
 heretic = "heretic.main:main"
@@ -74,7 +74,9 @@ requires = ["uv_build>=0.8.11,<0.9.0"]
 build-backend = "uv_build"
 
 [tool.uv]
-exclude-newer = "7 days"
+# uv expects an absolute cutoff. This date freezes the dependency horizon used
+# for the August 2026 adaptive-search release and keeps builds reproducible.
+exclude-newer = "2026-07-27T00:00:00Z"
 
 [tool.uv.build-backend]
 module-name = "heretic"

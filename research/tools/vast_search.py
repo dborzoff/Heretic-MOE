@@ -31,6 +31,11 @@ DISK_GB = 500
 # У Max-Q около 300 Вт, у полной RTX PRO 6000 - 550-600. Между ними попадаются
 # 400-500: это хост придушил карту, и скорость падает вместе с питанием.
 MIN_WATT = 500
+# We previously paid about $50/TB on an otherwise cheap host.  Reject such
+# offers outright instead of merely letting transfer cost make the ranking
+# worse.  The limits below are applied to the full planned transfer volume.
+MAX_TRANSFER_COST_PER_GB = 0.01
+MAX_TRAFFIC_USD = 3.00
 
 
 def api(path, body=None, ver="v0"):
@@ -101,11 +106,26 @@ def main():
         return
 
     rows = []
+    rejected_traffic = 0
     for o in offers:
         b = breakdown(o.get("dph_total") or 0, o.get("inet_down_cost") or 0,
                       o.get("inet_up_cost") or 0, o.get("storage_cost"),
                       o.get("inet_down") or 0, o.get("inet_up") or 0)
+        down_cost = o.get("inet_down_cost") or 0
+        up_cost = o.get("inet_up_cost") or 0
+        if (
+            down_cost > MAX_TRANSFER_COST_PER_GB
+            or up_cost > MAX_TRANSFER_COST_PER_GB
+            or b["трафик"] > MAX_TRAFFIC_USD
+        ):
+            rejected_traffic += 1
+            continue
         rows.append((b, o))
+    print(
+        f"  отсечено по дорогому трафику: {rejected_traffic} "
+        f"(лимит ${MAX_TRANSFER_COST_PER_GB:.3f}/ГБ и "
+        f"${MAX_TRAFFIC_USD:.2f} за весь прогон)\n"
+    )
     rows.sort(key=lambda r: r[0]["итого"])
 
     perfs = sorted((o.get("dlperf") or 0) / max(o.get("num_gpus") or 1, 1)
@@ -130,7 +150,9 @@ def main():
               f"${b['диск']:4.2f}  {b['часы']:5.1f} {b['ч_вниз']:5.2f} "
               f"{b['ч_вверх']:5.2f}  ${o.get('dph_total'):5.3f} "
               f"{o.get('num_gpus'):>4} {watt:>5.0f} {perf:>5.0f}  "
-              f"{(o.get('geolocation') or '?')[:12]} / {name[:20]}{flag}")
+              f"{(o.get('geolocation') or '?')[:12]} / {name[:20]} "
+              f"[in ${o.get('inet_down_cost') or 0:.4f}, "
+              f"out ${o.get('inet_up_cost') or 0:.4f} / ГБ]{flag}")
 
     if t_stay is not None:
         b, o = rows[0]

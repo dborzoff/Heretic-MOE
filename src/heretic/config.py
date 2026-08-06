@@ -7,9 +7,11 @@ from typing import Dict, Literal
 from pydantic import (
     BaseModel,
     Field,
+    NonNegativeFloat,
     NonNegativeInt,
     PositiveInt,
     field_validator,
+    model_validator,
 )
 from pydantic_settings import (
     BaseSettings,
@@ -53,6 +55,14 @@ class StartupDesign(str, Enum):
 class SeedSelection(str, Enum):
     FIRST_OBJECTIVE = "first_objective"
     SPREAD = "spread"
+    ALL = "all"
+
+
+class SelectionPolicy(str, Enum):
+    PARETO = "pareto"
+    FEASIBLE_LEXICOGRAPHIC = "feasible_lexicographic"
+    FEASIBLE_DIVERSE = "feasible_diverse"
+    FEASIBLE_COST = "feasible_cost"
 
 
 class DatasetSpecification(BaseModel):
@@ -135,6 +145,22 @@ class ScorerConfig(BaseModel):
         ),
     )
 
+    constraint_lower: float | None = Field(
+        default=None,
+        description=(
+            "Optional lower feasibility bound for this score. The trial is "
+            "infeasible when score < constraint_lower."
+        ),
+    )
+
+    constraint_upper: float | None = Field(
+        default=None,
+        description=(
+            "Optional upper feasibility bound for this score. The trial is "
+            "infeasible when score > constraint_upper."
+        ),
+    )
+
     @field_validator("instance_name")
     @classmethod
     def validate_instance_name(cls, value: str | None) -> str | None:
@@ -151,6 +177,16 @@ class ScorerConfig(BaseModel):
             raise ValueError("whitespace is not allowed")
 
         return value
+
+    @model_validator(mode="after")
+    def validate_constraint_interval(self) -> "ScorerConfig":
+        if (
+            self.constraint_lower is not None
+            and self.constraint_upper is not None
+            and self.constraint_lower > self.constraint_upper
+        ):
+            raise ValueError("constraint_lower cannot exceed constraint_upper")
+        return self
 
 
 class BenchmarkSpecification(BaseModel):
@@ -260,6 +296,34 @@ class Settings(BaseSettings):
         # When storing a settings object, the batch size is already fixed,
         # either determined by the automatic mechanism or by explicit user choice.
         exclude=True,
+    )
+
+    batch_size_vram_headroom_fraction: float = Field(
+        default=0.08,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum fraction of total CUDA VRAM that must remain free for an "
+            "automatically selected generation batch size."
+        ),
+    )
+
+    batch_size_vram_headroom_gib: float = Field(
+        default=2.0,
+        ge=0.0,
+        description=(
+            "Minimum absolute CUDA VRAM reserve in GiB for an automatically "
+            "selected generation batch size."
+        ),
+    )
+
+    residual_batch_size: NonNegativeInt = Field(
+        default=0,
+        description=(
+            "Batch size for per-layer residual extraction (0 = use batch_size). "
+            "Set this below the generation batch size when hidden-state capture "
+            "needs additional VRAM headroom."
+        ),
     )
 
     max_response_length: PositiveInt = Field(
@@ -391,6 +455,22 @@ class Settings(BaseSettings):
         ),
     )
 
+    fused_expert_chunk_size: PositiveInt = Field(
+        default=8,
+        description=(
+            "Number of fused routed experts edited in FP32 at once. Smaller "
+            "chunks reduce peak VRAM during exact fused-expert normalization."
+        ),
+    )
+
+    record_edit_telemetry: bool = Field(
+        default=True,
+        description=(
+            "Record text-free per-component and per-layer realized edit norms "
+            "in every completed trial."
+        ),
+    )
+
     winsorization_quantile: float = Field(
         default=1.0,
         description=(
@@ -423,12 +503,82 @@ class Settings(BaseSettings):
         ),
     )
 
+    tpe_group: bool = Field(
+        default=False,
+        description=(
+            "Use Optuna's group-decomposed multivariate TPE. Required when "
+            "conditional_components enables a dynamic search space."
+        ),
+    )
+
+    conditional_components: bool = Field(
+        default=False,
+        description=(
+            "Sample an explicit enabled flag per editable component and omit "
+            "curve parameters for disabled components."
+        ),
+    )
+
+    selection_policy: SelectionPolicy = Field(
+        default=SelectionPolicy.FEASIBLE_LEXICOGRAPHIC,
+        description=(
+            'Trial selection policy. "pareto" preserves the legacy menu; '
+            '"feasible_lexicographic" filters by scorer constraints and then '
+            "orders the feasible Pareto front by the primary objective; "
+            '"feasible_diverse" ranks a balanced ideal point, the primary-objective '
+            "extreme, and diagnostic-score extremes before filling by diversity; "
+            '"feasible_cost" ranks feasible trials by weighted excess above '
+            "per-scorer target values."
+        ),
+    )
+
+    selection_diagnostics: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Non-optimization scorer display names used as additional lower-is-better "
+            "axes by feasible_diverse selection. They affect finalist ranking only, "
+            "not Optuna sampling or the optimization objectives."
+        ),
+    )
+
+    selection_score_targets: dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Lower-is-better scorer targets used by feasible_cost selection. "
+            "Values at or below the target incur no finalist-ranking cost."
+        ),
+    )
+
+    selection_score_weights: dict[str, NonNegativeFloat] = Field(
+        default_factory=dict,
+        description=(
+            "Non-negative hinge-loss weights used by feasible_cost selection. "
+            "Only scorer names present in both target and weight mappings count."
+        ),
+    )
+
+    primary_objective: str | None = Field(
+        default=None,
+        description=(
+            "Objective display name used first by feasible lexicographic "
+            "selection. Unset means the first configured optimization objective."
+        ),
+    )
+
     parameter_importance_interval: NonNegativeInt = Field(
         default=0,
         description=(
             "Write a text-free fANOVA parameter-importance report after every N "
             "completed trials (0 disables it). The report is diagnostic only and "
             "does not alter Optuna sampling."
+        ),
+    )
+
+    leaderboard_size: NonNegativeInt = Field(
+        default=3,
+        description=(
+            "Number of current constraint-aware candidate winners to print "
+            "after every completed trial (0 disables the live leaderboard)."
         ),
     )
 
@@ -480,9 +630,28 @@ class Settings(BaseSettings):
     seed_selection: SeedSelection = Field(
         default=SeedSelection.FIRST_OBJECTIVE,
         description=(
-            'How to choose Pareto seeds: "first_objective" preserves the legacy '
+            'How to choose seeds: "first_objective" preserves the legacy '
             'preference for the lowest first objective; "spread" keeps diverse '
-            "trade-offs across normalized objective space."
+            'trade-offs across normalized objective space; "all" replays completed '
+            "source trials in their original order."
+        ),
+    )
+
+    seed_trials_preserve_duplicates: bool = Field(
+        default=False,
+        description=(
+            "Whether exact duplicate parameter sets from a seed journal should be "
+            "measured again. Useful for a full objective-change replay and its "
+            "repeatability check; leave disabled for ordinary front seeding."
+        ),
+    )
+
+    seed_trials_additional_numbers: list[NonNegativeInt] = Field(
+        default=[],
+        description=(
+            "Specific source trial numbers to append after the selected seeds. "
+            "This keeps known reference candidates in a partial replay without "
+            "replaying the objective-biased tail of the source study."
         ),
     )
 
@@ -494,9 +663,55 @@ class Settings(BaseSettings):
         ),
     )
 
+    @model_validator(mode="after")
+    def validate_adaptive_search_settings(self) -> "Settings":
+        if self.conditional_components and not self.tpe_group:
+            raise ValueError(
+                "conditional_components requires tpe_group=true so Optuna can "
+                "model the dynamic component subspaces"
+            )
+        return self
+
     study_checkpoint_dir: str = Field(
         default="checkpoints",
         description="Directory to save and load study progress to/from.",
+        exclude=True,
+    )
+
+    save_trial_responses: bool = Field(
+        default=False,
+        description=(
+            "Save every evaluation response with its prompt and trial number. "
+            "This makes later scorer changes replayable without regenerating text."
+        ),
+        exclude=True,
+    )
+
+    trial_responses_file: str = Field(
+        default="trial-responses.sqlite3",
+        description=(
+            "SQLite file used when save_trial_responses=true. Prompts are stored "
+            "once and linked to all answers produced across trials."
+        ),
+        exclude=True,
+    )
+
+    trial_response_number_offset: NonNegativeInt = Field(
+        default=0,
+        description=(
+            "Offset applied to integer trial numbers in the response archive. "
+            "The adaptive two-branch controller uses offsets 0 and 1."
+        ),
+        exclude=True,
+    )
+
+    trial_response_number_stride: PositiveInt = Field(
+        default=1,
+        description=(
+            "Stride applied to integer trial numbers in the response archive. "
+            "The adaptive two-branch controller uses stride 2 so Random and "
+            "Sobol answers are numbered even and odd before journal merge."
+        ),
         exclude=True,
     )
 

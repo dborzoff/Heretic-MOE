@@ -3,6 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -24,6 +25,7 @@ class Score:
     value: float
     rich_display: str
     md_display: str
+    diagnostics: dict[str, Any] | None = None
 
 
 class Scorer(Plugin, ABC):

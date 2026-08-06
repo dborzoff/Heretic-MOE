@@ -6,10 +6,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any
 
 import optuna
+from optuna.distributions import distribution_to_json
 from optuna.storages import JournalStorage
 from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 from optuna.trial import TrialState, create_trial
@@ -29,6 +31,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--target-trials", type=int, required=True)
     parser.add_argument("--study-name", default="heretic")
+    parser.add_argument(
+        "--order",
+        choices=("sequential", "round-robin"),
+        default="sequential",
+        help=(
+            "How source trials are placed in the merged prefix. round-robin "
+            "alternates sources while preserving each source's local order."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -67,6 +78,71 @@ def canonical_params(params: dict[str, Any]) -> str:
     return json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
 
 
+STAGE_ONLY_SETTING_KEYS = {
+    "checkpoint_action",
+    "device_map",
+    "n_startup_trials",
+    "n_trials",
+    "optimization_only",
+    "parallel_workers",
+    "seed",
+    "startup_design",
+    "study_checkpoint_dir",
+    "trial_response_number_offset",
+    "trial_response_number_stride",
+    "worker_trial_budget",
+}
+
+
+def study_contract(settings: dict[str, Any]) -> dict[str, Any]:
+    """Drop stage controls while retaining the model/scorer/search contract."""
+
+    return {
+        key: value
+        for key, value in settings.items()
+        if key not in STAGE_ONLY_SETTING_KEYS
+    }
+
+
+def canonical_hash(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def distribution_map(study: optuna.study.Study) -> dict[str, str]:
+    distributions: dict[str, str] = {}
+    for trial in study.trials:
+        for name, distribution in trial.distributions.items():
+            serialized = distribution_to_json(distribution)
+            previous = distributions.setdefault(name, serialized)
+            if previous != serialized:
+                raise ValueError(
+                    f"Study changes the distribution for parameter {name!r}"
+                )
+    return distributions
+
+
+def order_source_trials(
+    groups: list[list[tuple[str, optuna.trial.FrozenTrial]]],
+    order: str,
+) -> list[tuple[str, optuna.trial.FrozenTrial]]:
+    if order == "sequential":
+        return [item for group in groups for item in group]
+    if order == "round-robin":
+        return [
+            item
+            for row in zip_longest(*groups)
+            for item in row
+            if item is not None
+        ]
+    raise ValueError(f"Unsupported merge order: {order}")
+
+
 def main() -> None:
     args = parse_args()
     sources = [parse_source(spec) for spec in args.source]
@@ -81,9 +157,12 @@ def main() -> None:
         )
 
     source_records: list[dict[str, Any]] = []
-    source_trials: list[tuple[str, optuna.trial.FrozenTrial]] = []
+    source_trial_groups: list[list[tuple[str, optuna.trial.FrozenTrial]]] = []
     source_settings: dict[str, Any] | None = None
+    source_contract: dict[str, Any] | None = None
+    shared_distributions: dict[str, str] = {}
     directions: list[str] | None = None
+    constraint_names: list[str] | None = None
 
     for source_name, source_path in sources:
         study = load_study(source_path)
@@ -102,11 +181,32 @@ def main() -> None:
             raise ValueError(
                 f"Source {source_name} contains non-complete trials: {noncomplete}"
             )
+        raw_settings = study.user_attrs.get("settings")
+        if not isinstance(raw_settings, str):
+            raise ValueError(f"Source {source_name} has no archived settings JSON")
+        current_settings = json.loads(raw_settings)
+        current_contract = study_contract(current_settings)
         if source_settings is None:
-            raw_settings = study.user_attrs.get("settings")
-            if not isinstance(raw_settings, str):
-                raise ValueError(f"Source {source_name} has no archived settings JSON")
-            source_settings = json.loads(raw_settings)
+            source_settings = current_settings
+            source_contract = current_contract
+        elif current_contract != source_contract:
+            raise ValueError(
+                f"Source {source_name} uses a different model/scorer/search contract"
+            )
+
+        current_constraints = list(study.user_attrs.get("constraint_names", []))
+        if constraint_names is None:
+            constraint_names = current_constraints
+        elif current_constraints != constraint_names:
+            raise ValueError("Source studies use different scorer constraints")
+
+        current_distributions = distribution_map(study)
+        for name in set(shared_distributions) & set(current_distributions):
+            if shared_distributions[name] != current_distributions[name]:
+                raise ValueError(
+                    f"Source studies disagree on distribution for parameter {name!r}"
+                )
+        shared_distributions.update(current_distributions)
 
         source_records.append(
             {
@@ -115,9 +215,14 @@ def main() -> None:
                 "sha256": sha256(source_path),
                 "trials": len(study.trials),
                 "finished": bool(study.user_attrs.get("finished", False)),
+                "contract_sha256": canonical_hash(current_contract),
             }
         )
-        source_trials.extend((source_name, trial) for trial in study.trials)
+        source_trial_groups.append(
+            [(source_name, trial) for trial in study.trials]
+        )
+
+    source_trials = order_source_trials(source_trial_groups, args.order)
 
     if args.target_trials <= len(source_trials):
         raise ValueError(
@@ -125,10 +230,12 @@ def main() -> None:
             f"of {len(source_trials)} trials"
         )
     assert source_settings is not None
+    assert source_contract is not None
     assert directions is not None
 
     signatures: dict[str, int] = {}
     duplicate_parameter_sets = 0
+    constraint_metadata_restored = 0
     clones = []
     for merged_index, (source_name, trial) in enumerate(source_trials, start=1):
         signature = canonical_params(trial.params)
@@ -146,6 +253,17 @@ def main() -> None:
                 "merged_source_display_index": trial.user_attrs.get("index"),
             }
         )
+        system_attrs = dict(trial.system_attrs)
+        if "constraints" not in system_attrs:
+            archived_constraints = user_attrs.get("constraints")
+            if isinstance(archived_constraints, list):
+                system_attrs["constraints"] = archived_constraints
+                constraint_metadata_restored += 1
+            elif constraint_names:
+                raise ValueError(
+                    f"Source {source_name} trial {trial.number} has no "
+                    "archived constraint values"
+                )
         clones.append(
             create_trial(
                 state=TrialState.COMPLETE,
@@ -153,7 +271,7 @@ def main() -> None:
                 params=trial.params,
                 distributions=trial.distributions,
                 user_attrs=user_attrs,
-                system_attrs=trial.system_attrs,
+                system_attrs=system_attrs,
                 intermediate_values=trial.intermediate_values,
             )
         )
@@ -165,6 +283,8 @@ def main() -> None:
             "startup_design": "random",
             "optimization_only": True,
             "study_checkpoint_dir": str(output.parent),
+            "trial_response_number_offset": 0,
+            "trial_response_number_stride": 1,
         }
     )
 
@@ -187,12 +307,14 @@ def main() -> None:
         json.dumps(source_settings, separators=(",", ":")),
     )
     merged.set_user_attr("finished", False)
+    merged.set_user_attr("constraint_names", constraint_names or [])
     merged.set_user_attr(
         "merge_provenance",
         {
             "sources": source_records,
             "merged_prefix_trials": len(clones),
             "target_trials": args.target_trials,
+            "order": args.order,
         },
     )
 
@@ -203,17 +325,40 @@ def main() -> None:
         )
     if any(trial.state != TrialState.COMPLETE for trial in reloaded.trials):
         raise RuntimeError("Merged journal reload contains non-complete prefix trials")
+    missing_constraints = [
+        trial.number
+        for trial in reloaded.trials
+        if constraint_names and "constraints" not in trial.system_attrs
+    ]
+    if missing_constraints:
+        raise RuntimeError(
+            "Merged journal is missing constraint metadata for trials: "
+            + ", ".join(str(number) for number in missing_constraints[:8])
+        )
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "output": str(output),
         "output_sha256": sha256(output),
         "sources": source_records,
         "objective_directions": directions,
+        "constraint_names": constraint_names or [],
+        "contract_sha256": canonical_hash(source_contract),
+        "search_space_distributions": shared_distributions,
         "merged_prefix_trials": len(clones),
         "target_trials": args.target_trials,
         "continuation_trials": args.target_trials - len(clones),
         "duplicate_parameter_sets": duplicate_parameter_sets,
+        "constraint_metadata_restored": constraint_metadata_restored,
+        "merge_order": args.order,
+        "merged_trial_map": [
+            {
+                "merged_trial_number": merged_number,
+                "source": source_name,
+                "source_trial_number": trial.number,
+            }
+            for merged_number, (source_name, trial) in enumerate(source_trials)
+        ],
         "startup_after_merge": "none; multivariate TPE continuation only",
     }
     manifest_path.write_text(

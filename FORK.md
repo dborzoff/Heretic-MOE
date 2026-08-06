@@ -1,6 +1,6 @@
-# Heretic Adaptive
+# Heretic-MOE
 
-This document describes the maintained `dborzoff/heretic` fork, the problems it
+This document describes the maintained `dborzoff/Heretic-MOE` fork, the problems it
 fixes, the workflow added on top of upstream Heretic, and the evidence available
 for the current production path.
 
@@ -274,7 +274,7 @@ The following are not claimed as solved:
 
 ## Reproducibility and published artifacts
 
-- [Heretic Adaptive source](https://github.com/dborzoff/heretic)
+- [Heretic-MOE source](https://github.com/dborzoff/Heretic-MOE)
 - [Ministral-3-3B Heretic Adaptive v1](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1)
 - [`max` weights](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1/tree/main/max)
 - [`balanced` weights](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1/tree/main/balanced)

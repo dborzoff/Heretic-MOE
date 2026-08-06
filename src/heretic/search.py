@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 from optuna import Trial
+from optuna.distributions import CategoricalDistribution
 from optuna.samplers import BaseSampler, QMCSampler, RandomSampler, TPESampler
 from optuna.study import Study
 from optuna.trial import FrozenTrial
@@ -14,6 +15,38 @@ from .config import StartupDesign
 
 Objective = Callable[[Trial], float | Sequence[float]]
 StudyCallback = Callable[[Study, FrozenTrial], None]
+
+
+class StratifiedQMCSampler(QMCSampler):
+    """Sobol sampler with deterministic coverage for known categorical axes.
+
+    Optuna's QMC sampler intentionally falls back to independent RandomSampler
+    draws for categorical distributions.  Heretic has one always-present
+    categorical axis, ``direction_scope``.  Alternating its choices by trial
+    number gives exact 50/50 coverage while leaving every continuous parameter
+    to scrambled Sobol.  Unknown future categorical parameters still delegate
+    to Optuna and retain its warning.
+    """
+
+    def sample_independent(
+        self,
+        study: Study,
+        trial: FrozenTrial,
+        param_name: str,
+        param_distribution,
+    ):
+        if (
+            param_name == "direction_scope"
+            and isinstance(param_distribution, CategoricalDistribution)
+        ):
+            choices = param_distribution.choices
+            return choices[trial.number % len(choices)]
+        return super().sample_independent(
+            study,
+            trial,
+            param_name,
+            param_distribution,
+        )
 
 
 def select_spread_points(
@@ -100,18 +133,36 @@ class OptimizationRunner:
         n_startup_trials: int,
         seed: int | None,
         parallel_workers: int = 1,
+        constraint_count: int = 0,
+        tpe_group: bool = False,
     ) -> None:
         if parallel_workers <= 0:
             raise ValueError("parallel_workers must be positive")
+        if constraint_count < 0:
+            raise ValueError("constraint_count cannot be negative")
         self.startup_design = startup_design
         self.n_startup_trials = n_startup_trials
+        self.constraint_count = constraint_count
+
+        def constraints_func(trial: FrozenTrial) -> Sequence[float]:
+            values = trial.user_attrs.get("constraints")
+            if values is None:
+                # A study resumed after adding constraints must not treat legacy
+                # trials with unknown feasibility as valid evidence.
+                return [float("inf")] * constraint_count
+            if not isinstance(values, (list, tuple)) or len(values) != constraint_count:
+                return [float("inf")] * constraint_count
+            return [float(value) for value in values]
+
         self.tpe_sampler = TPESampler(
             n_startup_trials=(
                 n_startup_trials if startup_design == StartupDesign.RANDOM else 0
             ),
             n_ei_candidates=128,
             multivariate=True,
+            group=tpe_group,
             constant_liar=parallel_workers > 1,
+            constraints_func=(constraints_func if constraint_count else None),
             seed=seed,
         )
         self.random_sampler = (
@@ -120,7 +171,7 @@ class OptimizationRunner:
             else None
         )
         self.sobol_sampler = (
-            QMCSampler(
+            StratifiedQMCSampler(
                 qmc_type="sobol",
                 scramble=True,
                 seed=seed,

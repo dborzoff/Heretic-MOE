@@ -39,6 +39,7 @@ import logging
 import math
 import os
 import random
+import re
 import time
 import warnings
 from dataclasses import asdict
@@ -61,6 +62,7 @@ from optuna import Trial, TrialPruned
 from optuna.exceptions import ExperimentalWarning
 from optuna.storages import JournalStorage
 from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
+from optuna.study import Study
 from optuna.trial import FrozenTrial, TrialState, create_trial
 from pydantic import ValidationError
 from questionary import Choice, Style
@@ -68,17 +70,19 @@ from rich.table import Table
 from rich.traceback import install
 
 from .analyzer import Analyzer
-from .config import ExportStrategy, QuantizationMethod, SeedSelection
+from .config import ExportStrategy, QuantizationMethod, SelectionPolicy
 from .evaluator import Evaluator
 from .model import AbliterationParameters, Model, get_model_class
+from .promotion import load_seed_parameters
 from .reproduce import (
     check_environment,
     collect_reproducibles,
     load_reproduction_information,
 )
-from .search import OptimizationRunner, select_spread_points
+from .search import OptimizationRunner
 from .study_diagnostics import make_parameter_importance_callbacks
 from .system import empty_cache, get_accelerator_info
+from .trial_selection import candidate_trials, trial_selection_cost
 from .utils import (
     ask_if_unset,
     format_duration,
@@ -92,6 +96,70 @@ from .utils import (
     print_memory_usage,
     upload_reproduce_folder,
 )
+
+
+def _display_score_name(name: str) -> str:
+    """Use compact console labels without changing stable journal keys."""
+
+    return {
+        "Sparse refusal geometry": "SRG",
+        "Perplexity drift": "PPL drift",
+        "PPL drift": "PPL drift",
+    }.get(name, name)
+
+
+def _display_score_record(record: dict[str, Any]) -> str:
+    """Format current and legacy journal records consistently."""
+
+    name = record["name"]
+    score = record["score"]
+    if name == "Sparse refusal geometry":
+        diagnostics = score.get("diagnostics") or {}
+        positive_rate = diagnostics.get("positive_rate")
+        if positive_rate is not None:
+            return f"{float(score['value']):+.5f}; R-side {float(positive_rate) * 100:.1f}%"
+        legacy = re.fullmatch(
+            r"mean\s+[+-]?[0-9.]+;\s+(\d+)/(\d+)\s+positive",
+            str(score.get("rich_display", "")),
+        )
+        if legacy:
+            positive_count, total = map(int, legacy.groups())
+            if total > 0:
+                return (
+                    f"{float(score['value']):+.5f}; "
+                    f"R-side {positive_count / total * 100:.1f}%"
+                )
+    if name in {"Perplexity drift", "PPL drift"}:
+        return f"{abs(float(score['value'])) * 100:.2f}%"
+    return str(score["rich_display"])
+
+
+def _leaderboard_score_parts(record: dict[str, Any]) -> list[str]:
+    """Return compact, single-line leaderboard fragments for one score."""
+
+    name = record["name"]
+    score = record["score"]
+    if name == "Sparse refusal geometry":
+        parts = [f"SRG {float(score['value']):+.5f}"]
+        diagnostics = score.get("diagnostics") or {}
+        positive_rate = diagnostics.get("positive_rate")
+        if positive_rate is not None:
+            parts.append(f"R {float(positive_rate) * 100:.1f}%")
+            return parts
+        legacy = re.fullmatch(
+            r"mean\s+[+-]?[0-9.]+;\s+(\d+)/(\d+)\s+positive",
+            str(score.get("rich_display", "")),
+        )
+        if legacy:
+            positive_count, total = map(int, legacy.groups())
+            if total > 0:
+                parts.append(f"R {positive_count / total * 100:.1f}%")
+        return parts
+    if name == "Keywords":
+        return [f"KW {score['rich_display']}"]
+    if name in {"Perplexity drift", "PPL drift"}:
+        return [f"PPL {abs(float(score['value'])) * 100:.2f}%"]
+    return [f"{_display_score_name(name)} {_display_score_record(record)}"]
 
 
 def obtain_export_strategy(
@@ -184,12 +252,16 @@ def run():
         os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
     # Modified "Pagga" font from https://budavariam.github.io/asciiart-text/
-    print(f"[cyan]█░█░█▀▀░█▀▄░█▀▀░▀█▀░█░█▀▀[/]  v{version('heretic-llm')}")
     print(
-        "[cyan]█▀█░█▀▀░█▀▄░█▀▀░░█░░█░█░░[/]  [blue underline]https://heretic-project.org[/]"
+        f"[cyan]█░█░█▀▀░█▀▄░█▀▀░▀█▀░█░█▀▀[/]  "
+        f"[bold cyan]Heretic-MOE[/] v{version('heretic-llm')}"
     )
     print(
-        "[cyan]▀░▀░▀▀▀░▀░▀░▀▀▀░░▀░░▀░▀▀▀[/]  [blue underline]https://github.com/p-e-w/heretic[/]"
+        "[cyan]█▀█░█▀▀░█▀▄░█▀▀░░█░░█░█░░[/]  Adaptive dual-GPU search"
+    )
+    print(
+        "[cyan]▀░▀░▀▀▀░▀░▀░▀▀▀░░▀░░▀░▀▀▀[/]  "
+        "[blue underline]https://github.com/dborzoff/Heretic-MOE[/]"
     )
     print()
 
@@ -387,14 +459,14 @@ def run():
         if settings.checkpoint_action is None:
             print()
 
-        action = ask_if_unset(
-            settings.checkpoint_action,
-            questionary.select(
+        if settings.checkpoint_action is None:
+            action = questionary.select(
                 "How would you like to proceed?",
                 choices=choices,
                 style=Style([("highlighted", "reverse")]),
-            ),
-        )
+            ).ask()
+        else:
+            action = settings.checkpoint_action
 
         if action is None or action == "":
             return
@@ -407,7 +479,7 @@ def run():
             # Restoring stored settings discards command-line values. Some fields,
             # including save_directory and upload_repo_id, are excluded from the
             # journal entirely; losing them turns an unattended run interactive.
-            for _f in (
+            _always_runtime_fields = (
                 "save_directory",
                 "model_action",
                 "upload_repo_id",
@@ -415,16 +487,47 @@ def run():
                 "restore_trial_number",
                 "batch_size",
                 "export_strategy",
-                "optimization_only",
                 "parallel_workers",
                 "worker_trial_budget",
-            ):
+                "seed",
+                "save_trial_responses",
+                "trial_responses_file",
+                "trial_response_number_offset",
+                "trial_response_number_stride",
+            )
+            # These fields are archived in the journal, but an explicitly supplied
+            # value is a legitimate continuation control. In particular,
+            # ``--n-trials 1000`` must extend a finished 600-trial study instead of
+            # silently restoring the old target. Defaults are deliberately not
+            # copied, so an ordinary ``checkpoint_action=continue`` remains exactly
+            # reproducible.
+            _explicit_resume_fields = (
+                "n_trials",
+                "n_additional_trials",
+                "optimization_only",
+                "parameter_importance_interval",
+                "selection_policy",
+                "primary_objective",
+                "scorers",
+                "selection_score_targets",
+                "selection_score_weights",
+            )
+            for _f in _always_runtime_fields + _explicit_resume_fields:
                 _v = getattr(_cli, _f, None)
-                if _v is not None and (
-                    _f != "optimization_only" or _f in _cli.model_fields_set
-                ):
+                if _f in _explicit_resume_fields and _f not in _cli.model_fields_set:
+                    continue
+                if _v is not None:
                     setattr(settings, _f, _v)
                     print(f"From command line: {_f}={_v}")
+            # Scorer plugin tables live in Pydantic's extra namespace rather
+            # than in a declared Settings field. A managed continuation config
+            # may intentionally raise the measurement budget (for example PPL
+            # 8x512 -> 24x512), so carry that explicit table across resume too.
+            if _cli.model_extra and "scorer" in _cli.model_extra:
+                if settings.__pydantic_extra__ is None:
+                    settings.__pydantic_extra__ = {}
+                settings.__pydantic_extra__["scorer"] = _cli.model_extra["scorer"]
+                print("From command line: scorer=<plugin settings>")
         elif action == "restart":
             os.unlink(study_checkpoint_file)
             backend = JournalFileBackend(study_checkpoint_file, lock_obj=lock_obj)
@@ -484,7 +587,36 @@ def run():
             ]
             performance = sum(response_lengths) / (end_time - start_time)
 
-            print(f"[green]Ok[/] ([bold]{performance:.0f}[/] tokens/s)")
+            headroom_ok = True
+            headroom_description = ""
+            if torch.cuda.is_available():
+                free_bytes, total_bytes = torch.cuda.mem_get_info()
+                gib = 1024**3
+                required_bytes = max(
+                    settings.batch_size_vram_headroom_gib * gib,
+                    settings.batch_size_vram_headroom_fraction * total_bytes,
+                )
+                headroom_ok = free_bytes >= required_bytes
+                headroom_description = (
+                    f"; [bold]{free_bytes / gib:.1f}[/] GiB free, "
+                    f"[bold]{required_bytes / gib:.1f}[/] GiB required"
+                )
+
+            status = "[green]Ok[/]" if headroom_ok else "[yellow]Insufficient headroom[/]"
+            print(
+                f"{status} ([bold]{performance:.0f}[/] tokens/s"
+                f"{headroom_description})"
+            )
+
+            if not headroom_ok:
+                # Larger batches cannot restore memory headroom. Keep batch 1
+                # as a last-resort fallback if even the smallest batch misses
+                # the configured reserve, otherwise retain the previous safe
+                # and fastest candidate.
+                if best_batch_size == -1:
+                    best_batch_size = batch_size
+                    best_performance = performance
+                break
 
             if performance > best_performance:
                 best_batch_size = batch_size
@@ -545,7 +677,10 @@ def run():
         print()
         print("[bold]Metrics:[/]")
         for score_name, score in evaluator.get_scores():
-            print(f"  * {score_name}: [bold]{score.rich_display}[/]")
+            print(
+                f"  * {_display_score_name(score_name)}: "
+                f"[bold]{score.rich_display}[/]"
+            )
         return
 
     if not reproduction_mode and not evaluator.get_objective_names():
@@ -609,10 +744,15 @@ def run():
 
     trial_index = 0
     start_index = 0
+    worker_trial_count = 0
     start_time = time.perf_counter()
 
     def objective(trial: Trial) -> tuple[float, ...]:
-        nonlocal trial_index
+        nonlocal trial_index, worker_trial_count
+        trial_started = time.perf_counter()
+        if torch.cuda.is_available():
+            for device_index in range(torch.cuda.device_count()):
+                torch.cuda.reset_peak_memory_stats(device_index)
         # Optuna allocates trial numbers atomically in shared storage. Deriving the
         # display index from that number keeps it unique across parallel workers.
         trial_index = trial.number + 1
@@ -645,8 +785,23 @@ def run():
             direction_index = None
 
         parameters = {}
+        component_enabled: dict[str, bool] = {}
 
         for component in model.get_abliterable_components():
+            enabled = (
+                trial.suggest_categorical(f"{component}.enabled", [True, False])
+                if settings.conditional_components
+                else True
+            )
+            component_enabled[component] = enabled
+            if not enabled:
+                parameters[component] = AbliterationParameters(
+                    max_weight=0.0,
+                    max_weight_position=0.0,
+                    min_weight=0.0,
+                    min_weight_distance=1.0,
+                )
+                continue
             # The parameter ranges are based on experiments with various models
             # and much wider ranges. They are not set in stone and might have to be
             # adjusted for future models.
@@ -706,10 +861,14 @@ def run():
 
         trial.set_user_attr("direction_index", direction_index)
         trial.set_user_attr("parameters", {k: asdict(v) for k, v in parameters.items()})
+        trial.set_user_attr("component_enabled", component_enabled)
 
+        worker_label = os.environ.get("HERETIC_WORKER_LABEL", "").strip()
+        worker_prefix = f"[bold cyan]{worker_label}[/] | " if worker_label else ""
         print()
         print(
-            f"Running trial [bold]{trial_index}[/] of [bold]{settings.n_trials}[/]..."
+            f"{worker_prefix}Running trial [bold]{trial_index}[/] "
+            f"of [bold]{settings.n_trials}[/]..."
         )
         print("* Parameters:")
         for name, value in get_trial_parameters(trial).items():
@@ -718,27 +877,72 @@ def run():
         model.reset_model()
         print("* Abliterating...")
         model.abliterate(residual_directions, direction_index, parameters)
+        edit_telemetry = model.get_last_edit_telemetry()
         print("* Evaluating...")
-        scores = evaluator.get_scores()
+        scores = evaluator.get_scores(response_archive_id=trial.number)
         objective_values = evaluator.get_objective_values(scores)
+        constraint_values = evaluator.get_constraint_values(scores)
+        trial.set_user_attr("constraints", list(constraint_values))
+        trial.set_user_attr(
+            "feasible", all(value <= 0 for value in constraint_values)
+        )
 
         print("  * Metrics:")
         for name, score in scores:
-            print(f"    * {name}: [bold]{score.rich_display}[/]")
+            print(
+                f"    * {_display_score_name(name)}: "
+                f"[bold]{score.rich_display}[/]"
+            )
 
+        worker_trial_count += 1
         elapsed_time = time.perf_counter() - start_time
-        remaining_time = (elapsed_time / (trial_index - start_index)) * (
-            settings.n_trials - trial_index
-        )
+        average_trial_time = elapsed_time / worker_trial_count
+        if settings.worker_trial_budget is not None:
+            remaining_worker_trials = max(
+                settings.worker_trial_budget - worker_trial_count, 0
+            )
+        else:
+            remaining_worker_trials = max(settings.n_trials - trial_index, 0) / max(
+                settings.parallel_workers, 1
+            )
+        remaining_time = average_trial_time * remaining_worker_trials
         print()
         print(f"[grey50]Elapsed time: [bold]{format_duration(elapsed_time)}[/][/]")
         if trial_index < settings.n_trials:
+            worker_count = max(settings.parallel_workers, 1)
+            worker_word = "GPU" if worker_count == 1 else "GPUs"
             print(
-                f"[grey50]Estimated remaining time: [bold]{format_duration(remaining_time)}[/][/]"
+                "[grey50]Estimated study remaining time "
+                f"([bold]{worker_count} {worker_word}[/]): "
+                f"[bold]{format_duration(remaining_time)}[/][/]"
             )
         trial.set_user_attr(
             "scores",
             evaluator.get_paired_score_records(scores),
+        )
+        if torch.cuda.is_available():
+            for device_index in range(torch.cuda.device_count()):
+                torch.cuda.synchronize(device_index)
+        cuda_peaks = []
+        if torch.cuda.is_available():
+            cuda_peaks = [
+                {
+                    "device": device_index,
+                    "max_allocated_bytes": torch.cuda.max_memory_allocated(
+                        device_index
+                    ),
+                    "max_reserved_bytes": torch.cuda.max_memory_reserved(device_index),
+                }
+                for device_index in range(torch.cuda.device_count())
+            ]
+        trial.set_user_attr(
+            "telemetry",
+            {
+                "schema_version": 1,
+                "runtime_seconds": time.perf_counter() - trial_started,
+                "cuda_peaks": cuda_peaks,
+                "edit": edit_telemetry,
+            },
         )
         print_memory_usage()
 
@@ -755,6 +959,19 @@ def run():
     # Derive objective info from the configured scorers.
     objective_names = evaluator.get_objective_names()
     directions = evaluator.get_objective_directions()
+    constraint_names = evaluator.get_constraint_names()
+    primary_objective_index = 0
+    if settings.primary_objective is not None:
+        try:
+            primary_objective_index = objective_names.index(
+                settings.primary_objective
+            )
+        except ValueError as error:
+            raise ValueError(
+                "primary_objective must match one configured objective name; "
+                f"got {settings.primary_objective!r}, available={objective_names!r}"
+            ) from error
+
     study_callbacks = make_parameter_importance_callbacks(
         interval=settings.parameter_importance_interval,
         checkpoint_path=study_checkpoint_file,
@@ -762,12 +979,62 @@ def run():
         seed=settings.seed,
     )
 
+    if settings.leaderboard_size > 0:
+
+        def print_live_leaderboard(
+            study: Study, completed_trial: FrozenTrial
+        ) -> None:
+            del completed_trial
+            ranked = candidate_trials(
+                study.trials,
+                directions,
+                policy=settings.selection_policy,
+                constraint_count=len(constraint_names),
+                primary_objective_index=primary_objective_index,
+                diagnostic_names=settings.selection_diagnostics,
+                score_targets=settings.selection_score_targets,
+                score_weights=settings.selection_score_weights,
+            )
+            if not ranked:
+                return
+
+            print()
+            print(
+                f"[bold cyan]Current top {min(settings.leaderboard_size, len(ranked))} "
+                "candidate(s):[/]"
+            )
+            for rank, candidate in enumerate(
+                ranked[: settings.leaderboard_size], start=1
+            ):
+                score_parts = [
+                    part
+                    for record in candidate.user_attrs.get("scores", [])
+                    for part in _leaderboard_score_parts(record)
+                ]
+                if settings.selection_policy == SelectionPolicy.FEASIBLE_COST:
+                    cost = trial_selection_cost(
+                        candidate,
+                        settings.selection_score_targets,
+                        settings.selection_score_weights,
+                    )
+                    score_parts.insert(0, f"Cost {cost:.3f}")
+                display_index = candidate.user_attrs.get(
+                    "index", candidate.number + 1
+                )
+                print(
+                    f"  {rank}. T[bold]{display_index}[/] · " + " · ".join(score_parts)
+                )
+
+        study_callbacks.append(print_live_leaderboard)
+
     if not reproduction_mode:
         optimization_runner = OptimizationRunner(
             startup_design=settings.startup_design,
             n_startup_trials=settings.n_startup_trials,
             seed=settings.seed,
             parallel_workers=settings.parallel_workers,
+            constraint_count=len(constraint_names),
+            tpe_group=settings.tpe_group,
         )
         study = optuna.create_study(
             sampler=optimization_runner.initial_sampler,
@@ -778,6 +1045,7 @@ def run():
         )
 
         study.set_user_attr("settings", settings.model_dump_json())
+        study.set_user_attr("constraint_names", constraint_names)
         study.set_user_attr("finished", False)
 
         start_index = trial_index = len(study.trials)
@@ -795,9 +1063,13 @@ def run():
                 settings.seed_trials_count,
                 model.get_abliterable_components(),
                 settings.seed_selection,
+                settings.seed_trials_additional_numbers,
             )
             for params in seeds:
-                study.enqueue_trial(params, skip_if_exists=True)
+                study.enqueue_trial(
+                    params,
+                    skip_if_exists=not settings.seed_trials_preserve_duplicates,
+                )
             print()
             print(f"Enqueued [bold]{len(seeds)}[/] seed trials from a previous study.")
 
@@ -845,34 +1117,38 @@ def run():
             if not completed_trials:
                 raise KeyboardInterrupt
 
-            # Best trials isn't sorted, so sort by all the scores in non-decreasing order.
-            sorted_trials = sorted(
-                study.best_trials,
-                key=lambda trial: tuple(
-                    next(
-                        (
-                            score["score"]["value"]
-                            for score in trial.user_attrs["scores"]
-                            if score["name"] == name
-                        ),
-                        None,
-                    )
-                    for name in objective_names
-                ),
+            sorted_trials = candidate_trials(
+                completed_trials,
+                directions,
+                policy=settings.selection_policy,
+                constraint_count=len(constraint_names),
+                primary_objective_index=primary_objective_index,
+                diagnostic_names=settings.selection_diagnostics,
+                score_targets=settings.selection_score_targets,
+                score_weights=settings.selection_score_weights,
             )
 
             def format_trial_title(trial: FrozenTrial) -> str:
-                prefix = f"[Trial {trial.user_attrs['index']:>3}]"
+                feasible = trial.user_attrs.get("feasible", not constraint_names)
+                status = "" if feasible else " · INFEASIBLE"
+                prefix = f"[T{trial.user_attrs['index']}{status}]"
 
                 # We don't directly use the trial.values here since we need to show the
                 # CLI-formatted versions, which are stored in the trial's user attributes.
-                score_parts: list[str] = []
-                for score in trial.user_attrs["scores"]:
-                    name = score["name"]
-                    value = score["score"]["rich_display"]
-                    score_parts.append(f"{name}: {value}")
+                score_parts = [
+                    part
+                    for score in trial.user_attrs["scores"]
+                    for part in _leaderboard_score_parts(score)
+                ]
+                if settings.selection_policy == SelectionPolicy.FEASIBLE_COST:
+                    cost = trial_selection_cost(
+                        trial,
+                        settings.selection_score_targets,
+                        settings.selection_score_weights,
+                    )
+                    score_parts.insert(0, f"Cost {cost:.3f}")
 
-                return f"{prefix} " + ", ".join(score_parts)
+                return f"{prefix} " + " · ".join(score_parts)
 
             choices = [
                 Choice(title=format_trial_title(trial), value=trial)
@@ -1603,96 +1879,6 @@ def report_bound_pressure(study, threshold: float = 0.05) -> None:
     print("  The optimum may lie outside the search space.")
     print("  Widen the bounds and restart from these points "
           "(--seed-trials-from).")
-
-
-def load_seed_parameters(
-    path: str,
-    count: int,
-    components: list[str],
-    selection: SeedSelection = SeedSelection.FIRST_OBJECTIVE,
-) -> list[dict]:
-    """Return parameter sets from a previous study's Pareto front.
-
-    Read the journal directly because its objective count may differ from the
-    new study. Start with the lowest first objective, which is refusal rate in
-    both studies.
-
-    Two failure modes matter.
-
-    Journals store a parameter's internal representation. A categorical value
-    is a choice index, while enqueue_trial expects the choice itself. Index 0
-    must become "global" or Optuna rejects the parameter set.
-
-    Component names may have changed. Only the routed-expert rename preserves
-    meaning: the old key covered routed and shared experts, but they contain
-    32.2B and 0.13B parameters respectively. Drop everything absent from the new
-    space and let the sampler fill it.
-    """
-    import json as _json
-    from collections import defaultdict
-
-    # Old name -> new name. Only this rename preserves meaning.
-    RENAME = {"mlp.down_proj.": "mlp.experts.down_proj."}
-
-    params: dict[int, dict] = defaultdict(dict)
-    dists: dict[str, dict] = {}
-    values: dict[int, list] = {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                r = _json.loads(line)
-                if r.get("op_code") == 5:
-                    params[r["trial_id"]][r["param_name"]] = r["param_value_internal"]
-                    d = r.get("distribution")
-                    dists[r["param_name"]] = (
-                        _json.loads(d) if isinstance(d, str) else d
-                    ) or {}
-                elif r.get("op_code") == 6 and r.get("values"):
-                    values[r["trial_id"]] = r["values"]
-    except OSError:
-        return []
-
-    # Names present in the new search space.
-    allowed = {"direction_scope", "direction_index"}
-    for c in components:
-        for suffix in ("max_weight", "max_weight_position",
-                       "min_weight", "min_weight_distance"):
-            allowed.add(f"{c}.{suffix}")
-
-    def to_external(name: str, value):
-        attrs = (dists.get(name) or {}).get("attributes", dists.get(name)) or {}
-        choices = attrs.get("choices")
-        return choices[int(value)] if choices else value
-
-    front = [
-        (v, t)
-        for t, v in values.items()
-        if not any(
-            all(a <= b for a, b in zip(u, v)) and u != v for u in values.values()
-        )
-    ]
-    front.sort(key=lambda x: x[0])
-    if selection == SeedSelection.SPREAD:
-        front = select_spread_points(front, count)
-    else:
-        front = front[:count]
-
-    out = []
-    for _, t in front:
-        kept = {}
-        for name, raw in params.get(t, {}).items():
-            new_name = name
-            for old, new in RENAME.items():
-                if name.startswith(old):
-                    new_name = new + name[len(old):]
-                    break
-            if new_name in allowed:
-                kept[new_name] = to_external(name, raw)
-        if kept:
-            out.append(kept)
-    return out
 
 
 def main():

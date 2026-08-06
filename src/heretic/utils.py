@@ -173,9 +173,34 @@ def load_prompts(
     split_str = specification.split
 
     if os.path.isfile(path):
-        # Plain text file with one prompt per line. Empty lines are ignored.
-        with open(path, encoding="utf-8") as file:
-            prompts = [line.strip() for line in file if line.strip()]
+        if Path(path).suffix.lower() == ".jsonl":
+            if specification.column is None:
+                raise ValueError(
+                    'The "column" field is required for local JSONL datasets: '
+                    f"{path}"
+                )
+            prompts = []
+            with open(path, encoding="utf-8") as file:
+                for line_number, line in enumerate(file, start=1):
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    if specification.column not in row:
+                        raise ValueError(
+                            f"Missing column {specification.column!r} in {path} "
+                            f"at line {line_number}"
+                        )
+                    prompt = row[specification.column]
+                    if not isinstance(prompt, str):
+                        raise TypeError(
+                            f"Column {specification.column!r} in {path} must "
+                            f"contain strings (line {line_number})"
+                        )
+                    prompts.append(prompt)
+        else:
+            # Plain text file with one prompt per line. Empty lines are ignored.
+            with open(path, encoding="utf-8") as file:
+                prompts = [line.strip() for line in file if line.strip()]
 
         # The split is optional for text files. When given, it selects a subset
         # of the lines using slice notation (e.g. "[:400]"). A synthetic split
@@ -316,7 +341,7 @@ def get_readme_intro(
 
     return f"""# This is a decensored version of {
         model_link
-    }, made using [Heretic](https://heretic-project.org) v{version("heretic-llm")}
+    }, made using [Heretic-MOE](https://github.com/dborzoff/Heretic-MOE) v{version("heretic-llm")}
 {reproducibility_instructions}
 ## Abliteration parameters
 

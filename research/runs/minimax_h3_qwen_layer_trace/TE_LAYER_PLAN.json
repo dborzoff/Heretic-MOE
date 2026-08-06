@@ -1,0 +1,79 @@
+{
+  "schema": "minimax_h3_qwen_te_layer_plan_v1",
+  "status": "experimental_until_complete_checkpoint_validation",
+  "trim_contract": {
+    "keep": {
+      "token_embedding": true,
+      "language_layers": "0..49",
+      "vision_layers": "0..26",
+      "vision_merger": true,
+      "deepstack_vision_blocks": [8, 16, 24]
+    },
+    "remove": {
+      "language_layers": "50..63",
+      "language_final_norm": true,
+      "lm_head": true
+    },
+    "bf16_payload_removed_gib": 14.164101600646973,
+    "internal_language_blocks_proven_removable": []
+  },
+  "profiles": {
+    "q21_primary": {
+      "predicted_payload_gib": 20.943849,
+      "bf16": [
+        "model.embed_tokens.weight",
+        "visual.*",
+        "*.input_layernorm.weight",
+        "*.post_attention_layernorm.weight",
+        "*.q_norm.weight",
+        "*.k_norm.weight",
+        "*.bias"
+      ],
+      "int8": [
+        "model.layers.*.self_attn.q_proj.weight",
+        "model.layers.*.self_attn.k_proj.weight",
+        "model.layers.*.self_attn.v_proj.weight",
+        "model.layers.*.self_attn.o_proj.weight",
+        "model.layers.*.mlp.down_proj.weight"
+      ],
+      "w4": {
+        "gate_proj_layers": "7..42",
+        "up_proj_layers": "8..42"
+      },
+      "fully_int8_language_blocks": [0, 1, 2, 3, 4, 5, 6, 43, 44, 45, 46, 47, 48, 49]
+    },
+    "q20_secondary": {
+      "predicted_payload_gib": 19.967286,
+      "inherits": "q21_primary",
+      "additional_w4": {
+        "gate_proj_layers": [0, 1, 2, 3, 4, 5, 6, 43, 44, 45, 46, 47, 48, 49],
+        "up_proj_layers": [0, 6]
+      },
+      "risk": "Touches structurally protected early and late blocks; validate after Q21."
+    },
+    "gu_compact_research": {
+      "predicted_payload_gib": 19.173829,
+      "w4": {
+        "gate_proj_layers": "0..49",
+        "up_proj_layers": "0..49"
+      },
+      "risk": "Projection-local evidence only; not a validated universal profile."
+    }
+  },
+  "bases": [
+    "original",
+    "marker-zero"
+  ],
+  "required_gates": [
+    "tensor_layout",
+    "exact_bf16_trim_match",
+    "text_conditioning",
+    "image_conditioning",
+    "video_conditioning",
+    "fl2va_fixed_seed",
+    "ref2va_fixed_seed",
+    "peak_ram_vram",
+    "throughput",
+    "reload"
+  ]
+}

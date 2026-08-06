@@ -55,6 +55,51 @@ class AbliterationParameters:
     min_weight_distance: float
 
 
+def project_fused_expert_chunk(
+    original: Tensor,
+    direction: Tensor,
+    weight: float,
+    normalization: RowNormalization,
+) -> Tensor:
+    """Apply the dense-path projection mechanics to a fused expert chunk.
+
+    ``original`` has shape ``[experts, output_rows, input_features]``. The
+    operation is exact because fused tensors are edited directly rather than
+    represented through a low-rank adapter.
+    """
+
+    if original.dim() != 3:
+        raise ValueError("Fused expert chunks must be three-dimensional")
+    if direction.dim() != 1 or direction.shape[0] != original.shape[1]:
+        raise ValueError("Direction size must match fused output rows")
+
+    W = original.to(torch.float32)
+    v = F.normalize(direction.to(device=W.device, dtype=torch.float32), dim=0)
+    if normalization == RowNormalization.NONE:
+        projection = torch.einsum("h,ehi->ei", v, W)
+        return W - weight * v.view(1, -1, 1) * projection.unsqueeze(1)
+
+    row_norms = LA.vector_norm(W, dim=2, keepdim=True)
+    normalized = F.normalize(W, p=2, dim=2)
+    projection = torch.einsum("h,ehi->ei", v, normalized)
+    normalized_delta = weight * v.view(1, -1, 1) * projection.unsqueeze(1)
+
+    if normalization == RowNormalization.PRE:
+        return W - row_norms * normalized_delta
+    if normalization == RowNormalization.FULL:
+        adjusted = F.normalize(normalized - normalized_delta, p=2, dim=2)
+        return adjusted * row_norms
+    raise ValueError(f"Unsupported row normalization: {normalization}")
+
+
+def low_rank_frobenius_squared(left: Tensor, right: Tensor) -> float:
+    """Return ||left @ right||_F^2 without materializing the full matrix."""
+
+    left_gram = left.T.to(torch.float32) @ left.to(torch.float32)
+    right_gram = right.to(torch.float32) @ right.T.to(torch.float32)
+    return float(torch.sum(left_gram * right_gram.T))
+
+
 class Model:
     model: PreTrainedModel | PeftModel
     tokenizer: PreTrainedTokenizerBase
@@ -69,6 +114,8 @@ class Model:
         self.settings = settings
         self.needs_reload = False
         self._fused_experts_cache = {}
+        self._last_edit_telemetry: dict[str, Any] = {"layers": [], "total": {}}
+        self._edit_telemetry_accumulator: dict[tuple[str, int, str], dict[str, Any]] = {}
 
         self.revision_kwargs = {}
         if settings.model_commit is not None:
@@ -495,6 +542,8 @@ class Model:
         direction_index: float | None,
         parameters: dict[str, AbliterationParameters],
     ):
+        self._edit_telemetry_accumulator = {}
+        self._last_edit_telemetry = {"layers": [], "total": {}}
         if direction_index is None:
             residual_direction = None
         else:
@@ -585,6 +634,7 @@ class Model:
 
                     # Flatten weight matrix to (out_features, in_features).
                     W = W.view(W.shape[0], -1)
+                    W_base = W
 
                     if self.settings.row_normalization == RowNormalization.FULL:
                         # Keep a reference to the original weight matrix so we can subtract it later.
@@ -649,10 +699,98 @@ class Model:
                     weight_A.data = lora_A.to(weight_A.dtype)
                     weight_B.data = lora_B.to(weight_B.dtype)
 
+                    if self.settings.record_edit_telemetry:
+                        self._accumulate_edit_telemetry(
+                            component=component,
+                            layer_index=layer_index,
+                            path="dense_lora",
+                            scheduled_weight=weight,
+                            delta_squared=low_rank_frobenius_squared(
+                                lora_B, lora_A
+                            ),
+                            base_squared=float(
+                                torch.sum(W_base.to(torch.float32) ** 2)
+                            ),
+                            parameter_count=W_base.numel(),
+                        )
+
         # Fused-expert MoE blocks (e.g. Qwen3.5-MoE) are not reached by the loop above.
         self._abliterate_fused_experts(
             residual_directions, residual_direction, parameters
         )
+        self._finalize_edit_telemetry()
+
+    def _accumulate_edit_telemetry(
+        self,
+        *,
+        component: str,
+        layer_index: int,
+        path: str,
+        scheduled_weight: float,
+        delta_squared: float,
+        base_squared: float,
+        parameter_count: int,
+    ) -> None:
+        key = (component, layer_index, path)
+        entry = self._edit_telemetry_accumulator.setdefault(
+            key,
+            {
+                "component": component,
+                "layer": layer_index,
+                "path": path,
+                "row_normalization": self.settings.row_normalization.value,
+                "scheduled_weight": float(scheduled_weight),
+                "delta_squared": 0.0,
+                "base_squared": 0.0,
+                "parameter_count": 0,
+                "module_count": 0,
+            },
+        )
+        entry["delta_squared"] += max(0.0, float(delta_squared))
+        entry["base_squared"] += max(0.0, float(base_squared))
+        entry["parameter_count"] += int(parameter_count)
+        entry["module_count"] += 1
+
+    def _finalize_edit_telemetry(self) -> None:
+        if not self.settings.record_edit_telemetry:
+            return
+        layers: list[dict[str, Any]] = []
+        total_delta_squared = 0.0
+        total_base_squared = 0.0
+        total_parameters = 0
+        for entry in sorted(
+            self._edit_telemetry_accumulator.values(),
+            key=lambda item: (item["component"], item["layer"], item["path"]),
+        ):
+            delta_squared = entry.pop("delta_squared")
+            base_squared = entry.pop("base_squared")
+            delta_fro = math.sqrt(delta_squared)
+            base_fro = math.sqrt(base_squared)
+            entry["delta_fro"] = delta_fro
+            entry["base_fro"] = base_fro
+            entry["relative_edit_fro"] = (
+                delta_fro / base_fro if base_fro > 0 else 0.0
+            )
+            layers.append(entry)
+            total_delta_squared += delta_squared
+            total_base_squared += base_squared
+            total_parameters += entry["parameter_count"]
+        total_delta = math.sqrt(total_delta_squared)
+        total_base = math.sqrt(total_base_squared)
+        self._last_edit_telemetry = {
+            "layers": layers,
+            "total": {
+                "delta_fro": total_delta,
+                "base_fro": total_base,
+                "relative_edit_fro": total_delta / total_base if total_base > 0 else 0.0,
+                "edited_parameter_count": total_parameters,
+            },
+        }
+
+    def get_last_edit_telemetry(self) -> dict[str, Any]:
+        """Return the dry numeric edit report produced by the latest trial."""
+
+        return self._last_edit_telemetry
 
     def _abliterate_fused_experts(
         self,
@@ -722,12 +860,31 @@ class Model:
             else:
                 v = refusal_direction
             v = F.normalize(v.to(torch.float32).to(fused.device), dim=0)
-            # The cached original was cloned from the parameter, so it is already on device.
-            original_fp32 = original.to(torch.float32)
-            # Projection has shape [num_experts, inter]: v^T W_e, contracting the hidden dim.
-            proj = torch.einsum("h,ehi->ei", v, original_fp32)
-            delta = weight * v.view(1, -1, 1) * proj.unsqueeze(1)
-            fused.data.copy_((original_fp32 - delta).to(fused.dtype))
+            chunk_size = self.settings.fused_expert_chunk_size
+            for start in range(0, original.shape[0], chunk_size):
+                stop = min(start + chunk_size, original.shape[0])
+                original_chunk = original[start:stop]
+                edited_chunk = project_fused_expert_chunk(
+                    original_chunk,
+                    v,
+                    weight,
+                    self.settings.row_normalization,
+                )
+                if self.settings.record_edit_telemetry:
+                    original_fp32 = original_chunk.to(torch.float32)
+                    delta = edited_chunk - original_fp32
+                    self._accumulate_edit_telemetry(
+                        component="mlp.experts.down_proj",
+                        layer_index=layer_index,
+                        path="fused_exact",
+                        scheduled_weight=weight,
+                        delta_squared=float(torch.sum(delta * delta)),
+                        base_squared=float(
+                            torch.sum(original_fp32 * original_fp32)
+                        ),
+                        parameter_count=original_chunk.numel(),
+                    )
+                fused.data[start:stop].copy_(edited_chunk.to(fused.dtype))
 
     def _apply_template_safe(self, chats, **kwargs):
         """Retry without a system role when the template rejects it."""
@@ -888,8 +1045,9 @@ class Model:
 
     def get_residuals_batched(self, prompts: list[Prompt]) -> Tensor:
         residuals = []
+        batch_size = self.settings.residual_batch_size or self.settings.batch_size
 
-        for batch in batchify(prompts, self.settings.batch_size):
+        for batch in batchify(prompts, batch_size):
             residuals.append(self.get_residuals(batch))
 
         return torch.cat(residuals, dim=0)
@@ -900,8 +1058,9 @@ class Model:
 
         running_sum = None
         total_count = 0
+        batch_size = self.settings.residual_batch_size or self.settings.batch_size
 
-        for batch in batchify(prompts, self.settings.batch_size):
+        for batch in batchify(prompts, batch_size):
             batch_residuals = self.get_residuals(batch)
 
             # Accumulate in high precision on CPU to reduce peak VRAM usage.

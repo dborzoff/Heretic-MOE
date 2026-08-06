@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=/workspace/heretic-gemma3/heretic-moe-qwen-night-abs
+export PYTHONPATH="${repo}/src${PYTHONPATH:+:${PYTHONPATH}}"
+exec /venv/main/bin/python -c 'from heretic.main import run; run()' "$@"
