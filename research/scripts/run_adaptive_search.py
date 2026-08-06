@@ -475,6 +475,12 @@ def split_worker_budget(remaining_trials: int, worker_count: int = 2) -> list[in
     return [quotient + (1 if index < remainder else 0) for index in range(worker_count)]
 
 
+def assigned_devices(args: argparse.Namespace) -> list[str]:
+    """Return distinct worker devices in stable user-specified order."""
+
+    return list(dict.fromkeys((str(args.random_device), str(args.sobol_device))))
+
+
 def merge_branches(
     random_stage: Stage,
     sobol_stage: Stage,
@@ -530,6 +536,7 @@ def write_run_manifest(
         except (ValueError, TypeError, json.JSONDecodeError):
             pass
     response_archive = path.parent / "trial-responses.sqlite3"
+    devices = assigned_devices(args)
     record = {
         "schema_version": 2,
         "status": status,
@@ -543,7 +550,9 @@ def write_run_manifest(
         "exploration_trials": args.exploration_trials,
         "trials_per_exploration_branch": args.exploration_trials // 2,
         "target_trials": args.target_trials,
-        "parallel_exploration": not args.sequential_exploration,
+        "parallel_exploration": not args.sequential_exploration and len(devices) > 1,
+        "worker_devices": devices,
+        "shared_worker_count": len(devices),
         "visible_worker_windows": args.visible_worker_windows,
         "continue_shared_only": args.continue_shared_only,
         "finalize": args.finalize,
@@ -659,6 +668,7 @@ def finalize_and_export(
     finalist_script = Path(__file__).with_name("finalist_recheck.py")
     finalist_dir = root / "finalist_recheck"
     export_root = (args.export_root or root / "exports").resolve()
+    devices = assigned_devices(args)
     if args.dry_run:
         print(
             json.dumps(
@@ -670,7 +680,7 @@ def finalize_and_export(
                     "recheck": {
                         "ppl_chunks": args.recheck_ppl_chunks,
                         "ppl_window": args.recheck_ppl_window,
-                        "devices": [args.random_device, args.sobol_device],
+                        "devices": devices,
                     },
                     "winners": ["Balanced", "Max"],
                     "export_root": str(export_root),
@@ -702,8 +712,7 @@ def finalize_and_export(
             "--ppl-window",
             str(args.recheck_ppl_window),
             "--devices",
-            str(args.random_device),
-            str(args.sobol_device),
+            *devices,
             "--max-ppl-drift",
             str(args.max_ppl_drift),
             "--max-keywords",
@@ -732,8 +741,7 @@ def finalize_and_export(
         "--heretic",
         str(executable),
         "--devices",
-        str(args.random_device),
-        str(args.sobol_device),
+        *devices,
     ]
     run_checked(recheck_command, cwd=Path(__file__).parents[2], event="finalist_recheck")
 
@@ -749,7 +757,8 @@ def finalize_and_export(
     export_jobs: list[
         tuple[str, str, Path, dict[str, Any], subprocess.Popen[bytes]]
     ] = []
-    for variant, device in (("Balanced", args.random_device), ("Max", args.sobol_device)):
+    export_assignments = (("Balanced", devices[0]), ("Max", devices[-1]))
+    for variant, device in export_assignments:
         output = export_root / variant.lower()
         if export_is_complete(output):
             print(
@@ -800,6 +809,34 @@ def finalize_and_export(
             env=process_environment(str(device)),
         )
         export_jobs.append((variant, str(device), output, winner, process))
+
+        # Two distinct GPUs export concurrently. With one GPU, finish each
+        # variant before loading the next full model to avoid deterministic OOM.
+        if len(devices) == 1:
+            return_code = process.wait()
+            if return_code != 0:
+                raise RuntimeError(f"Export failure: {variant} on GPU {device}: exit {return_code}")
+            export_manifest = write_export_manifest(
+                output,
+                variant=variant,
+                winner=winner,
+                device=str(device),
+                export_strategy=args.export_strategy,
+            )
+            print(
+                json.dumps(
+                    {
+                        "event": "export_complete",
+                        "variant": variant,
+                        "path": str(output),
+                        "manifest": str(export_manifest),
+                        "manifest_sha256": sha256(export_manifest),
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            export_jobs.pop()
 
     export_failures: list[str] = []
     for variant, device, output, winner, process in export_jobs:
@@ -902,6 +939,8 @@ def main() -> None:
             base_config = root / "effective_base_config.toml"
             write_managed_config(base_config, base, dry_run=False)
     branch_trials = args.exploration_trials // 2
+    devices = assigned_devices(args)
+    shared_worker_count = len(devices)
     response_archive = root / "trial-responses.sqlite3"
     scorer_updates = (
         frozenset({"scorer"})
@@ -949,7 +988,7 @@ def main() -> None:
         response_archive=response_archive,
         response_number_offset=0,
         response_number_stride=1,
-        parallel_workers=2,
+        parallel_workers=shared_worker_count,
         dry_run=args.dry_run,
         allowed_config_updates=frozenset({"n_trials"}) | scorer_updates,
     )
@@ -964,7 +1003,7 @@ def main() -> None:
         )
 
     if not args.continue_shared_only:
-        if not args.sequential_exploration:
+        if not args.sequential_exploration and len(devices) > 1:
             random_process = start_stage(
                 random_stage,
                 executable,
@@ -1040,7 +1079,7 @@ def main() -> None:
     )
     if not args.dry_run:
         require_constraint_metadata(shared_stage)
-    worker_budgets = split_worker_budget(remaining_trials)
+    worker_budgets = split_worker_budget(remaining_trials, shared_worker_count)
     if not args.dry_run:
         write_run_manifest(
             manifest_path,
@@ -1052,7 +1091,7 @@ def main() -> None:
     worker_seed_base = int(base.get("seed") or 0) + 10_000
     worker_processes: list[tuple[Stage, subprocess.Popen]] = []
     for worker_index, (device, budget) in enumerate(
-        zip((args.random_device, args.sobol_device), worker_budgets, strict=True)
+        zip(devices, worker_budgets, strict=True)
     ):
         if budget == 0:
             continue
@@ -1076,7 +1115,7 @@ def main() -> None:
                 "--n-startup-trials",
                 "0",
                 "--parallel-workers",
-                "2",
+                str(shared_worker_count),
                 "--worker-trial-budget",
                 str(budget),
                 f"--seed={worker_seed_base + worker_index}",
