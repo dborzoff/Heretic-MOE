@@ -4,6 +4,7 @@
 # ruff: noqa: E402
 
 import sys
+from importlib.metadata import version
 
 # Ensure standard output/error use UTF-8 instead of system default charmap (e.g. cp1252 on Windows).
 for stream in (sys.stdout, sys.stderr):
@@ -19,6 +20,16 @@ from .config import Settings
 def _is_help_invocation() -> bool:
     args = sys.argv[1:]
     return "-h" in args or "--help" in args
+
+
+def _is_version_invocation() -> bool:
+    return any(arg in {"-V", "--version"} for arg in sys.argv[1:])
+
+
+# Report the installed package version without importing the ML runtime.
+if _is_version_invocation():
+    print(f"Heretic-MOE {version('heretic-llm')}")
+    raise SystemExit(0)
 
 
 # Parse and handle CLI help before importing heavyweight ML/runtime dependencies.
@@ -43,7 +54,6 @@ import re
 import time
 import warnings
 from dataclasses import asdict
-from importlib.metadata import version
 from os.path import commonprefix
 from pathlib import Path
 from typing import Any
@@ -257,7 +267,7 @@ def run():
         f"[bold cyan]Heretic-MOE[/] v{version('heretic-llm')}"
     )
     print(
-        "[cyan]█▀█░█▀▀░█▀▄░█▀▀░░█░░█░█░░[/]  Adaptive dual-GPU search"
+        "[cyan]█▀█░█▀▀░█▀▄░█▀▀░░█░░█░█░░[/]  Adaptive multi-GPU search"
     )
     print(
         "[cyan]▀░▀░▀▀▀░▀░▀░▀▀▀░░▀░░▀░▀▀▀[/]  "
