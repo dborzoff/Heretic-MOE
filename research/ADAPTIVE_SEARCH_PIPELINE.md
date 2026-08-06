@@ -58,7 +58,7 @@ same even/odd global numbering before the journal merge.
 ```
 
 The run manifest captures launch-time SHA-256 values for the controller and
-`heretic` executable plus the Git revision and dirty state when available.
+`hereticMOE` executable plus the Git revision and dirty state when available.
 These values are frozen at process start and do not change if the checkout is
 updated while a long run is still active.
 
@@ -86,7 +86,7 @@ F:\AI\heretic_env\Scripts\python.exe research\scripts\run_adaptive_search.py `
   --base-config research\configs\adaptive_search\gemma2_sparse_geometry.toml `
   --data-root F:\AI\HereticMoe\runtime_data\adaptive_search_v2 `
   --run-root research\runs\adaptive_search_v2\gemma2_sparse_geometry_dual_600_v1 `
-  --heretic F:\AI\heretic_env\Scripts\heretic.exe `
+  --heretic F:\AI\heretic_env\Scripts\hereticMOE.exe `
   --exploration-trials 120 `
   --target-trials 600 `
   --random-device 0 `

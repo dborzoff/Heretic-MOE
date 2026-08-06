@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--heretic",
         type=Path,
-        help="Heretic executable (default: discover heretic in PATH).",
+        help="HereticMOE executable (default: discover hereticMOE in PATH).",
     )
     parser.add_argument(
         "--exploration-trials",
@@ -1063,10 +1063,10 @@ def main() -> None:
         raise ValueError("--balanced-removal-fraction must be in [0, 1]")
 
     source_base_config = args.base_config.resolve()
-    executable_value = args.heretic or shutil.which("heretic")
+    executable_value = args.heretic or shutil.which("hereticMOE")
     if not executable_value:
         raise FileNotFoundError(
-            "No Heretic executable found in PATH; provide --heretic explicitly"
+            "No HereticMOE executable found in PATH; provide --heretic explicitly"
         )
     executable = Path(executable_value).resolve()
     root = args.run_root.resolve()

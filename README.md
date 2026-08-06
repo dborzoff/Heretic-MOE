@@ -150,7 +150,7 @@ The Heretic version, generated without any human effort, achieves the same
 level of refusal suppression as other abliterations, but at a much lower
 KL divergence, indicating less damage to the original model's capabilities.
 *(You can reproduce those numbers using Heretic's built-in evaluation functionality,
-e.g. `heretic --model google/gemma-3-12b-it --evaluate-model p-e-w/gemma-3-12b-it-heretic`.
+e.g. `hereticMOE --model google/gemma-3-12b-it --evaluate-model p-e-w/gemma-3-12b-it-heretic`.
 Note that the exact values might be platform- and hardware-dependent.
 The table above was compiled using PyTorch 2.8 on an RTX 5090.)*
 
@@ -194,7 +194,7 @@ for your hardware. Then run:
 
 ```sh
 pip install -U heretic-llm
-heretic Qwen/Qwen3-4B-Instruct-2507
+hereticMOE Qwen/Qwen3-4B-Instruct-2507
 ```
 
 Replace `Qwen/Qwen3-4B-Instruct-2507` with whatever model you want to decensor.
@@ -211,12 +211,12 @@ Replace `Qwen/Qwen3-4B-Instruct-2507` with whatever model you want to decensor.
 > Heretic uses [uv](https://docs.astral.sh/uv/) for dependency management,
 > and the repository includes a `uv.lock` file pinning every package version.
 > If you already use uv (and you probably should!), you can just clone the repo
-> and run Heretic with `uv run heretic`, which ensures that your dependencies
+> and run HereticMOE with `uv run hereticMOE`, which ensures that your dependencies
 > match those used by the developers, improving reliability and security.
 
 The process is fully automatic and does not require configuration; however,
 Heretic has a variety of configuration parameters that can be changed for
-greater control. Run `heretic --help` to see available command-line options,
+greater control. Run `hereticMOE --help` to see available command-line options,
 or look at [`config.default.toml`](config.default.toml) if you prefer to use
 a configuration file.
 

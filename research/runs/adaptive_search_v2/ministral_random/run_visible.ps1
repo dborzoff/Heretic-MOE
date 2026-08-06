@@ -14,7 +14,7 @@ Write-Host "Budget: 120 trials (60 startup + 60 TPE)"
 
 Start-Transcript -LiteralPath "$runDirectory\console.log" -Append
 try {
-    & "F:\AI\heretic_env\Scripts\heretic.exe"
+    & "F:\AI\heretic_env\Scripts\hereticMOE.exe"
     $runExitCode = $LASTEXITCODE
 } finally {
     Stop-Transcript

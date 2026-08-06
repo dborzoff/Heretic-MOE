@@ -68,7 +68,7 @@ Issues = "https://github.com/dborzoff/Heretic-MOE/issues"
 Changelog = "https://github.com/dborzoff/Heretic-MOE/releases"
 
 [project.scripts]
-heretic = "heretic.main:main"
+hereticMOE = "heretic.main:main"
 
 [build-system]
 requires = ["uv_build>=0.8.11,<0.9.0"]
