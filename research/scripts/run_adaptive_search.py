@@ -1084,7 +1084,11 @@ def main() -> None:
             args=args,
             base_config=base_config,
             stages=[random_stage, sobol_stage, shared_stage],
-            status="planned",
+            status=(
+                "tpe_preparing"
+                if args.continue_shared_only
+                else "exploration_running"
+            ),
         )
 
     if not args.continue_shared_only:
