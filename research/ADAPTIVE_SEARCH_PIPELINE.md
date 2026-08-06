@@ -23,6 +23,11 @@ For a 600-trial run with `--exploration-trials 120` it performs:
    fidelity, so preservation and maximum-removal regions are both represented.
 7. The controller exports `Balanced` and `Max` without interactive prompts.
 
+The device list is deduplicated. Two distinct devices use parallel workers;
+one device automatically runs both exploration branches and both exports in
+sequence, with one shared-TPE worker, so a single-GPU run cannot accidentally
+load two copies of the model at once.
+
 Sobol covers continuous parameters. The always-present categorical
 `direction_scope` axis is stratified deterministically (alternating choices),
 so a 60-trial branch evaluates it exactly 30/30 without Optuna's independent

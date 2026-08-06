@@ -47,6 +47,10 @@ constraint-feasible candidates selected from different regions of the Pareto
 front with 64 x 1,024-token PPL windows, selects two distinct models, and
 exports them as `exports/balanced` and `exports/max`:
 
+When both device arguments name the same GPU, the controller automatically
+switches exploration, shared TPE, recheck, and export to a memory-safe
+single-worker sequence. No separate one-GPU script is required.
+
 | Export | Selection rule |
 |---|---|
 | `Balanced` | Lowest PPL drift among finalists that pass the refusal-removal gate |
