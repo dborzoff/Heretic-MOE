@@ -118,10 +118,11 @@ def prepare(args: argparse.Namespace) -> None:
     source = load_study(args.source_journal.resolve())
     settings_data = json.loads(source.user_attrs["settings"])
     constraint_names = list(source.user_attrs.get("constraint_names", []))
+    selection_policy = SelectionPolicy(args.selection_policy)
     ranked = candidate_trials(
         source.trials,
         source.directions,
-        policy=SelectionPolicy(settings_data.get("selection_policy", "pareto")),
+        policy=selection_policy,
         constraint_count=len(constraint_names),
         primary_objective_index=0,
         diagnostic_names=settings_data.get("selection_diagnostics", []),
@@ -239,6 +240,7 @@ def prepare(args: argparse.Namespace) -> None:
         "journal": str(recheck_journal),
         "top_n": args.top_n,
         "selection_mode": selection_mode,
+        "selection_policy": selection_policy.value,
         "devices": args.devices,
         "ppl": {"chunks": args.ppl_chunks, "window": args.ppl_window},
         "gates": {
@@ -415,6 +417,11 @@ def parse_args() -> argparse.Namespace:
     prepare_parser.add_argument("--base-config", type=Path, required=True)
     prepare_parser.add_argument("--output-dir", type=Path, required=True)
     prepare_parser.add_argument("--top-n", type=int, default=5)
+    prepare_parser.add_argument(
+        "--selection-policy",
+        choices=[policy.value for policy in SelectionPolicy],
+        default=SelectionPolicy.FEASIBLE_DIVERSE.value,
+    )
     prepare_parser.add_argument("--trial-indices", type=int, nargs="+")
     prepare_parser.add_argument("--ppl-chunks", type=int, default=64)
     prepare_parser.add_argument("--ppl-window", type=int, default=1024)

@@ -23,7 +23,7 @@ def _is_help_invocation() -> bool:
 
 # Parse and handle CLI help before importing heavyweight ML/runtime dependencies.
 if _is_help_invocation():
-    Settings()  # ty:ignore[missing-argument]
+    Settings.from_cli()
 
 # FIXME: Rich progress bars are currently disabled because of rendering issues
 #        when used from multiple threads in parallel (e.g. by huggingface_hub).
@@ -289,7 +289,7 @@ def run():
     try:
         # The required argument "model" must be provided by the user,
         # either on the command line or in the configuration file.
-        settings = Settings()  # ty:ignore[missing-argument]
+        settings = Settings.from_cli()
     except ValidationError as error:
         print(f"[red]Configuration contains [bold]{error.error_count()}[/] errors:[/]")
 

@@ -3,8 +3,8 @@
 `perplexity_reference_v1.txt` is the frozen corpus used by the Perplexity
 scorer when `dataset = "builtin://perplexity-reference-v1"`.
 
-- Size: 241,986 bytes
-- SHA-256: `49d7e8f6f3eeacc3fd95e8436bb28278746fdfd47994be4d1da46a36a6228fc3`
+- Size: 241,748 bytes (canonical LF form)
+- SHA-256: `1d6f25ca80bd49255212d67d7eff96763ab01abbd472c04b916ec62318857a9d`
 
 The scorer verifies this hash before tokenization. Keeping the corpus in the
 package makes local and rented-server measurements byte-identical and removes

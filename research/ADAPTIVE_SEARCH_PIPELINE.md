@@ -19,7 +19,8 @@ For a 600-trial run with `--exploration-trials 120` it performs:
 4. Two TPE workers share the merged journal and evaluate 240 trials each. Optuna
    assigns these numbers atomically because completion order is asynchronous.
 5. The final journal contains exactly 600 trials.
-6. Both GPUs remeasure the constraint-aware TOP-5 at higher fidelity.
+6. Both GPUs remeasure a constraint-aware, Pareto-diverse TOP-5 at higher
+   fidelity, so preservation and maximum-removal regions are both represented.
 7. The controller exports `Balanced` and `Max` without interactive prompts.
 
 Sobol covers continuous parameters. The always-present categorical
@@ -58,8 +59,8 @@ it never overwrites a different stage configuration.
 ## Portable perplexity corpus
 
 The Perplexity scorer defaults to
-`builtin://perplexity-reference-v1`. The 241,986-byte corpus is packaged under
-`src/heretic/data/` and verified by SHA-256 before use. No machine-specific
+`builtin://perplexity-reference-v1`. The 241,748-byte canonical LF corpus is
+packaged under `src/heretic/data/` and verified by SHA-256 before use. No machine-specific
 `F:/AI/llamacpp/ppl_test.txt` path or Hugging Face download is required.
 
 Model and prompt-dataset paths remain explicit inputs because they differ

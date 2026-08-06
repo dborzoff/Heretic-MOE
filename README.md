@@ -42,8 +42,9 @@ Heretic process.
 
 The controller runs 60 Random trials on GPU 0 and 60 scrambled-Sobol trials on
 GPU 1, merges them in deterministic round-robin order, and splits the remaining
-480 multivariate-TPE trials across both GPUs. It then remeasures the best five
-candidates with 64 x 1,024-token PPL windows, selects two distinct models, and
+480 multivariate-TPE trials across both GPUs. It then remeasures five
+constraint-feasible candidates selected from different regions of the Pareto
+front with 64 x 1,024-token PPL windows, selects two distinct models, and
 exports them as `exports/balanced` and `exports/max`:
 
 | Export | Selection rule |
@@ -83,9 +84,11 @@ results for one frozen evaluation, not a claim of universal behavior.
   <img width="960" alt="Animation of the Heretic Adaptive Pareto front across 600 trials" src="docs/assets/adaptive-search-progress.gif" />
 </p>
 
-The run used 60 Random startup trials, 60 follow-up TPE trials, 60 scrambled
-Sobol startup trials, 60 follow-up TPE trials, and 360 shared multivariate-TPE
-trials after merging both histories. The animation uses the fast search-time
+The published reference run predates the current one-command controller: it used
+60 Random startup trials, 60 follow-up TPE trials, 60 scrambled-Sobol startup
+trials, 60 follow-up TPE trials, and 360 shared multivariate-TPE trials after
+merging both histories. The current controller merges immediately after the two
+60-trial startup branches and runs 480 shared trials. The animation uses the fast search-time
 proxies; the table and static graph use the larger post-export validation.
 
 </details>

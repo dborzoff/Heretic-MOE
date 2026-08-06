@@ -22,6 +22,8 @@ from pydantic_settings import (
     TomlConfigSettingsSource,
 )
 
+_CLI_PARSE_ARGS = False
+
 # !!!IMPORTANT!!!
 #
 # Any settings added to the classes defined in this module
@@ -877,6 +879,25 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="allow")
 
     @classmethod
+    def from_cli(cls) -> "Settings":
+        """Build settings from Heretic's CLI without parsing a caller's argv.
+
+        ``Settings(...)`` is also part of the programmatic API and is used by
+        scorers, notebooks, and test runners. Parsing ``sys.argv`` for every
+        ordinary construction made those callers fail on unrelated flags such
+        as pytest's ``-q``. Only the executable entry point opts into CLI
+        parsing through this constructor.
+        """
+
+        global _CLI_PARSE_ARGS
+        previous = _CLI_PARSE_ARGS
+        _CLI_PARSE_ARGS = True
+        try:
+            return cls()
+        finally:
+            _CLI_PARSE_ARGS = previous
+
+    @classmethod
     def settings_customise_sources(
         cls,
         settings_cls: type[BaseSettings],
@@ -889,7 +910,7 @@ class Settings(BaseSettings):
             init_settings,  # Used during resume - should override *all* other sources.
             CliSettingsSource(
                 settings_cls,
-                cli_parse_args=True,
+                cli_parse_args=True if _CLI_PARSE_ARGS else None,
                 cli_implicit_flags=True,
                 cli_kebab_case=True,
             ),

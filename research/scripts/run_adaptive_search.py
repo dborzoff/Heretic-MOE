@@ -109,6 +109,15 @@ def parse_args() -> argparse.Namespace:
         help="Stop after the 600-trial journal without recheck or model export.",
     )
     parser.add_argument("--finalist-top-n", type=int, default=5)
+    parser.add_argument(
+        "--finalist-selection-policy",
+        choices=("pareto", "feasible_lexicographic", "feasible_diverse", "feasible_cost"),
+        default="feasible_diverse",
+        help=(
+            "Ranking used only to build the high-fidelity finalist shortlist. "
+            "The default deliberately covers distinct Pareto regions."
+        ),
+    )
     parser.add_argument("--recheck-ppl-chunks", type=int, default=64)
     parser.add_argument("--recheck-ppl-window", type=int, default=1024)
     parser.add_argument("--max-ppl-drift", type=float, default=0.005)
@@ -259,6 +268,10 @@ def process_environment(device: str | None) -> dict[str, str]:
     environment = dict(os.environ)
     environment.setdefault("HF_HUB_OFFLINE", "1")
     environment.setdefault("TRANSFORMERS_OFFLINE", "1")
+    # Child processes normally inherit a redirected controller stdout on CI and
+    # through orchestration tools. Force line-by-line progress instead of
+    # releasing several minutes of output only when a stage exits.
+    environment["PYTHONUNBUFFERED"] = "1"
     if device is not None:
         environment["CUDA_VISIBLE_DEVICES"] = device
         environment["HERETIC_WORKER_LABEL"] = f"GPU {device}"
@@ -535,6 +548,7 @@ def write_run_manifest(
         "continue_shared_only": args.continue_shared_only,
         "finalize": args.finalize,
         "finalist_top_n": args.finalist_top_n,
+        "finalist_selection_policy": args.finalist_selection_policy,
         "recheck_ppl": {
             "chunks": args.recheck_ppl_chunks,
             "window": args.recheck_ppl_window,
@@ -652,6 +666,7 @@ def finalize_and_export(
                     "event": "finalization_plan",
                     "source_journal": str(shared_stage.journal),
                     "top_n": args.finalist_top_n,
+                    "selection_policy": args.finalist_selection_policy,
                     "recheck": {
                         "ppl_chunks": args.recheck_ppl_chunks,
                         "ppl_window": args.recheck_ppl_window,
@@ -680,6 +695,8 @@ def finalize_and_export(
             str(finalist_dir),
             "--top-n",
             str(args.finalist_top_n),
+            "--selection-policy",
+            args.finalist_selection_policy,
             "--ppl-chunks",
             str(args.recheck_ppl_chunks),
             "--ppl-window",
@@ -729,6 +746,9 @@ def finalize_and_export(
         raise RuntimeError("Balanced and Max must be distinct rechecked trials")
 
     export_root.mkdir(parents=True, exist_ok=True)
+    export_jobs: list[
+        tuple[str, str, Path, dict[str, Any], subprocess.Popen[bytes]]
+    ] = []
     for variant, device in (("Balanced", args.random_device), ("Max", args.sobol_device)):
         output = export_root / variant.lower()
         if export_is_complete(output):
@@ -774,17 +794,24 @@ def finalize_and_export(
             ),
             flush=True,
         )
-        subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=finalist_dir,
             env=process_environment(str(device)),
-            check=True,
         )
+        export_jobs.append((variant, str(device), output, winner, process))
+
+    export_failures: list[str] = []
+    for variant, device, output, winner, process in export_jobs:
+        return_code = process.wait()
+        if return_code != 0:
+            export_failures.append(f"{variant} on GPU {device}: exit {return_code}")
+            continue
         export_manifest = write_export_manifest(
             output,
             variant=variant,
             winner=winner,
-            device=str(device),
+            device=device,
             export_strategy=args.export_strategy,
         )
         print(
@@ -800,6 +827,8 @@ def finalize_and_export(
             ),
             flush=True,
         )
+    if export_failures:
+        raise RuntimeError("Export failure(s): " + "; ".join(export_failures))
 
     workflow_report = {
         "schema_version": 1,

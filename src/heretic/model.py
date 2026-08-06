@@ -4,6 +4,7 @@
 import math
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Type, cast
 
 import bitsandbytes as bnb
@@ -39,12 +40,30 @@ from .utils import Prompt, batchify, format_exception, print
 def get_model_class(
     model: str,
 ) -> Type[AutoModelForImageTextToText] | Type[AutoModelForCausalLM]:
-    configs = PretrainedConfig.get_config_dict(model)
+    local_path = Path(model)
+    if local_path.is_file():
+        raise ValueError(
+            "Heretic-MOE expects a Hugging Face model directory or repository "
+            f"ID, not a standalone checkpoint file: {local_path}. Encoder-only "
+            "safetensors such as ByT5 conditioning checkpoints require a "
+            "separate conditioning-preservation workflow."
+        )
 
-    if any([("vision_config" in config) for config in configs]):
+    config, _ = PretrainedConfig.get_config_dict(model)
+
+    if config.get("is_encoder_decoder"):
+        architectures = config.get("architectures") or []
+        architecture = ", ".join(architectures) or "unknown"
+        raise ValueError(
+            "Heretic-MOE requires a decoder-only causal language model; "
+            f"{architecture} is an encoder-decoder architecture. Text encoders "
+            "such as UMT5 and ByT5 do not produce chat refusals and need a "
+            "separate conditioning-preservation workflow."
+        )
+
+    if "vision_config" in config:
         return AutoModelForImageTextToText
-    else:
-        return AutoModelForCausalLM
+    return AutoModelForCausalLM
 
 
 @dataclass
@@ -124,6 +143,11 @@ class Model:
         print()
         print(f"Loading model [bold]{settings.model}[/]...")
 
+        # Resolve and validate the architecture once, before loading tokenizer
+        # or weights. This gives encoder-only/encoder-decoder checkpoints a
+        # precise error instead of several misleading dtype load failures.
+        self.model_class = get_model_class(settings.model)
+
         self.tokenizer = AutoTokenizer.from_pretrained(
             settings.model,
             **self.revision_kwargs,
@@ -131,7 +155,7 @@ class Model:
 
         # Multimodal models have a processor we'll want to save.
         self.processor = None
-        if get_model_class(settings.model) == AutoModelForImageTextToText:
+        if self.model_class == AutoModelForImageTextToText:
             self.processor = AutoProcessor.from_pretrained(
                 settings.model,
                 **self.revision_kwargs,
@@ -167,7 +191,7 @@ class Model:
                 if quantization_config is not None:
                     extra_kwargs["quantization_config"] = quantization_config
 
-                self.model = get_model_class(settings.model).from_pretrained(
+                self.model = self.model_class.from_pretrained(
                     settings.model,
                     dtype=dtype,
                     device_map=settings.device_map,
@@ -330,7 +354,7 @@ class Model:
 
             # Load base model in full precision on CPU to avoid VRAM issues
             print("* Loading base model on CPU (this may take a while)...")
-            base_model = get_model_class(self.settings.model).from_pretrained(
+            base_model = self.model_class.from_pretrained(
                 self.settings.model,
                 torch_dtype=self.model.dtype,
                 device_map="cpu",
@@ -401,7 +425,7 @@ class Model:
         if quantization_config is not None:
             extra_kwargs["quantization_config"] = quantization_config
 
-        self.model = get_model_class(self.settings.model).from_pretrained(
+        self.model = self.model_class.from_pretrained(
             self.settings.model,
             dtype=self.dtype,
             device_map=self.settings.device_map,
