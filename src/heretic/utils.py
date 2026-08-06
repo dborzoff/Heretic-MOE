@@ -341,7 +341,7 @@ def get_readme_intro(
 
     return f"""# This is a decensored version of {
         model_link
-    }, made using [Heretic](https://heretic-project.org) v{version("heretic-llm")}
+    }, made using [Heretic-MOE](https://github.com/dborzoff/Heretic-MOE) v{version("heretic-llm")}
 {reproducibility_instructions}
 ## Abliteration parameters
 

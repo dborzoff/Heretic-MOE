@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -44,8 +45,16 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--base-config", type=Path, required=True)
+    parser.add_argument(
+        "--model",
+        help="Override the model in the base config without editing the TOML file.",
+    )
     parser.add_argument("--run-root", type=Path, required=True)
-    parser.add_argument("--heretic", type=Path, required=True)
+    parser.add_argument(
+        "--heretic",
+        type=Path,
+        help="Heretic executable (default: discover heretic in PATH).",
+    )
     parser.add_argument(
         "--exploration-trials",
         type=int,
@@ -83,6 +92,38 @@ def parse_args() -> argparse.Namespace:
             "Explicitly allow replacing only the scorer section in existing "
             "managed stage configs, for example when increasing PPL windows."
         ),
+    )
+    parser.add_argument(
+        "--finalize",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After the search, remeasure the TOP-N finalists at higher PPL "
+            "fidelity, select distinct Balanced and Max winners, and export both."
+        ),
+    )
+    parser.add_argument(
+        "--search-only",
+        dest="finalize",
+        action="store_false",
+        help="Stop after the 600-trial journal without recheck or model export.",
+    )
+    parser.add_argument("--finalist-top-n", type=int, default=5)
+    parser.add_argument("--recheck-ppl-chunks", type=int, default=64)
+    parser.add_argument("--recheck-ppl-window", type=int, default=1024)
+    parser.add_argument("--max-ppl-drift", type=float, default=0.005)
+    parser.add_argument("--max-keywords", type=int, default=2)
+    parser.add_argument("--keyword-total", type=int, default=136)
+    parser.add_argument("--balanced-srg-gate", type=float, default=-0.0088)
+    parser.add_argument(
+        "--export-root",
+        type=Path,
+        help="Output root for Balanced and Max (default: RUN_ROOT/exports).",
+    )
+    parser.add_argument(
+        "--export-strategy",
+        choices=("merge", "adapter"),
+        default="merge",
     )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -483,12 +524,23 @@ def write_run_manifest(
         "updated_unix": time.time(),
         "base_config": str(base_config),
         "base_config_sha256": sha256(base_config),
+        "source_base_config": str(args.base_config.resolve()),
+        "source_base_config_sha256": sha256(args.base_config.resolve()),
+        "model_override": args.model,
         "exploration_trials": args.exploration_trials,
         "trials_per_exploration_branch": args.exploration_trials // 2,
         "target_trials": args.target_trials,
         "parallel_exploration": not args.sequential_exploration,
         "visible_worker_windows": args.visible_worker_windows,
         "continue_shared_only": args.continue_shared_only,
+        "finalize": args.finalize,
+        "finalist_top_n": args.finalist_top_n,
+        "recheck_ppl": {
+            "chunks": args.recheck_ppl_chunks,
+            "window": args.recheck_ppl_window,
+        },
+        "export_root": str((args.export_root or path.parent / "exports").resolve()),
+        "export_strategy": args.export_strategy,
         "response_archive": str(response_archive),
         "response_archive_size": (
             response_archive.stat().st_size if response_archive.is_file() else 0
@@ -517,6 +569,268 @@ def write_run_manifest(
     path.write_text(payload, encoding="utf-8")
 
 
+def run_checked(command: list[str], *, cwd: Path, event: str) -> None:
+    print(
+        json.dumps(
+            {"event": event, "cwd": str(cwd), "command": command},
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    subprocess.run(command, cwd=cwd, check=True)
+
+
+def export_is_complete(directory: Path) -> bool:
+    manifest_path = directory / "heretic_moe_export.json"
+    if not manifest_path.is_file():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if manifest.get("status") != "PASS":
+        return False
+    for record in manifest.get("files", []):
+        path = directory / record["path"]
+        if not path.is_file() or path.stat().st_size != record["bytes"]:
+            return False
+        if sha256(path) != record["sha256"]:
+            return False
+    return True
+
+
+def write_export_manifest(
+    directory: Path,
+    *,
+    variant: str,
+    winner: dict[str, Any],
+    device: str,
+    export_strategy: str,
+) -> Path:
+    files = []
+    for path in sorted(candidate for candidate in directory.rglob("*") if candidate.is_file()):
+        if path.name == "heretic_moe_export.json":
+            continue
+        files.append(
+            {
+                "path": path.relative_to(directory).as_posix(),
+                "bytes": path.stat().st_size,
+                "sha256": sha256(path),
+            }
+        )
+    if not files or not any(record["path"].endswith(".safetensors") for record in files):
+        raise RuntimeError(f"Export {variant} contains no safetensors weights: {directory}")
+    manifest = {
+        "schema_version": 1,
+        "status": "PASS",
+        "variant": variant,
+        "device": device,
+        "export_strategy": export_strategy,
+        "winner": winner,
+        "files": files,
+    }
+    path = directory / "heretic_moe_export.json"
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def finalize_and_export(
+    args: argparse.Namespace,
+    *,
+    root: Path,
+    base_config: Path,
+    shared_stage: Stage,
+    executable: Path,
+) -> None:
+    finalist_script = Path(__file__).with_name("finalist_recheck.py")
+    finalist_dir = root / "finalist_recheck"
+    export_root = (args.export_root or root / "exports").resolve()
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "event": "finalization_plan",
+                    "source_journal": str(shared_stage.journal),
+                    "top_n": args.finalist_top_n,
+                    "recheck": {
+                        "ppl_chunks": args.recheck_ppl_chunks,
+                        "ppl_window": args.recheck_ppl_window,
+                        "devices": [args.random_device, args.sobol_device],
+                    },
+                    "winners": ["Balanced", "Max"],
+                    "export_root": str(export_root),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
+
+    finalist_manifest = finalist_dir / "manifest.json"
+    if not finalist_manifest.is_file():
+        prepare_command = [
+            sys.executable,
+            str(finalist_script),
+            "prepare",
+            "--source-journal",
+            str(shared_stage.journal),
+            "--base-config",
+            str(base_config),
+            "--output-dir",
+            str(finalist_dir),
+            "--top-n",
+            str(args.finalist_top_n),
+            "--ppl-chunks",
+            str(args.recheck_ppl_chunks),
+            "--ppl-window",
+            str(args.recheck_ppl_window),
+            "--devices",
+            str(args.random_device),
+            str(args.sobol_device),
+            "--max-ppl-drift",
+            str(args.max_ppl_drift),
+            "--max-keywords",
+            str(args.max_keywords),
+            "--keyword-total",
+            str(args.keyword_total),
+            "--balanced-srg-gate",
+            str(args.balanced_srg_gate),
+        ]
+        run_checked(prepare_command, cwd=Path(__file__).parents[2], event="finalist_prepare")
+    else:
+        print(
+            json.dumps(
+                {"event": "finalist_prepare_resume", "manifest": str(finalist_manifest)},
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
+    recheck_command = [
+        sys.executable,
+        str(finalist_script),
+        "run",
+        "--output-dir",
+        str(finalist_dir),
+        "--heretic",
+        str(executable),
+        "--devices",
+        str(args.random_device),
+        str(args.sobol_device),
+    ]
+    run_checked(recheck_command, cwd=Path(__file__).parents[2], event="finalist_recheck")
+
+    winners_path = finalist_dir / "winners.json"
+    winners_report = json.loads(winners_path.read_text(encoding="utf-8"))
+    winners = winners_report.get("winners", {})
+    if set(winners) != {"Balanced", "Max"}:
+        raise RuntimeError(f"Expected Balanced and Max winners, found {sorted(winners)}")
+    if winners["Balanced"]["trial_number"] == winners["Max"]["trial_number"]:
+        raise RuntimeError("Balanced and Max must be distinct rechecked trials")
+
+    export_root.mkdir(parents=True, exist_ok=True)
+    for variant, device in (("Balanced", args.random_device), ("Max", args.sobol_device)):
+        output = export_root / variant.lower()
+        if export_is_complete(output):
+            print(
+                json.dumps(
+                    {"event": "export_resume", "variant": variant, "path": str(output)},
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            continue
+        if output.exists() and any(output.iterdir()):
+            raise FileExistsError(
+                f"Refusing to overwrite incomplete {variant} export: {output}"
+            )
+        output.mkdir(parents=True, exist_ok=True)
+        winner = winners[variant]
+        command = [
+            str(executable),
+            "--checkpoint-action",
+            "continue",
+            "--restore-trial-number",
+            str(winner["trial_number"]),
+            "--model-action",
+            "save",
+            "--save-directory",
+            str(output),
+            "--export-strategy",
+            args.export_strategy,
+            "--no-optimization-only",
+        ]
+        print(
+            json.dumps(
+                {
+                    "event": "export_start",
+                    "variant": variant,
+                    "device": device,
+                    "source_trial_index": winner["source_trial_index"],
+                    "recheck_trial_number": winner["trial_number"],
+                    "path": str(output),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        subprocess.run(
+            command,
+            cwd=finalist_dir,
+            env=process_environment(str(device)),
+            check=True,
+        )
+        export_manifest = write_export_manifest(
+            output,
+            variant=variant,
+            winner=winner,
+            device=str(device),
+            export_strategy=args.export_strategy,
+        )
+        print(
+            json.dumps(
+                {
+                    "event": "export_complete",
+                    "variant": variant,
+                    "path": str(output),
+                    "manifest": str(export_manifest),
+                    "manifest_sha256": sha256(export_manifest),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
+    workflow_report = {
+        "schema_version": 1,
+        "status": "PASS",
+        "search_journal": str(shared_stage.journal),
+        "search_journal_sha256": sha256(shared_stage.journal),
+        "finalist_report": str(winners_path),
+        "finalist_report_sha256": sha256(winners_path),
+        "exports": {
+            variant: str(export_root / variant.lower())
+            for variant in ("Balanced", "Max")
+        },
+    }
+    workflow_path = root / "heretic_moe_workflow.json"
+    workflow_path.write_text(
+        json.dumps(workflow_report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(
+        json.dumps(
+            {
+                "event": "workflow_complete",
+                "report": str(workflow_path),
+                "report_sha256": sha256(workflow_path),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
 def main() -> None:
     args = parse_args()
     if args.exploration_trials <= 0 or args.target_trials <= 0:
@@ -527,18 +841,37 @@ def main() -> None:
         raise ValueError(
             "--target-trials must exceed the combined exploration prefix"
         )
+    if args.finalist_top_n < 2:
+        raise ValueError("--finalist-top-n must be at least 2")
+    if args.recheck_ppl_chunks <= 0 or args.recheck_ppl_window <= 0:
+        raise ValueError("Recheck PPL dimensions must be positive")
+    if args.max_ppl_drift < 0:
+        raise ValueError("--max-ppl-drift cannot be negative")
+    if args.max_keywords < 0 or args.keyword_total <= 0:
+        raise ValueError("Keyword gate values are invalid")
 
-    base_config = args.base_config.resolve()
-    executable = args.heretic.resolve()
+    source_base_config = args.base_config.resolve()
+    executable_value = args.heretic or shutil.which("heretic")
+    if not executable_value:
+        raise FileNotFoundError(
+            "No Heretic executable found in PATH; provide --heretic explicitly"
+        )
+    executable = Path(executable_value).resolve()
     root = args.run_root.resolve()
-    if not base_config.is_file():
-        raise FileNotFoundError(base_config)
+    if not source_base_config.is_file():
+        raise FileNotFoundError(source_base_config)
     if not executable.is_file():
         raise FileNotFoundError(executable)
     if not args.dry_run:
         root.mkdir(parents=True, exist_ok=True)
 
-    base = read_config(base_config)
+    base = read_config(source_base_config)
+    base_config = source_base_config
+    if args.model:
+        base["model"] = args.model
+        if not args.dry_run:
+            base_config = root / "effective_base_config.toml"
+            write_managed_config(base_config, base, dry_run=False)
     branch_trials = args.exploration_trials // 2
     response_archive = root / "trial-responses.sqlite3"
     scorer_updates = (
@@ -741,6 +1074,22 @@ def main() -> None:
             stages=[random_stage, sobol_stage, shared_stage],
             status="complete",
         )
+    if args.finalize:
+        finalize_and_export(
+            args,
+            root=root,
+            base_config=base_config,
+            shared_stage=shared_stage,
+            executable=executable,
+        )
+        if not args.dry_run:
+            write_run_manifest(
+                manifest_path,
+                args=args,
+                base_config=base_config,
+                stages=[random_stage, sobol_stage, shared_stage],
+                status="release_complete",
+            )
 
 
 if __name__ == "__main__":

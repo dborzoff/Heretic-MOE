@@ -1,17 +1,17 @@
 <img width="128" align="right" alt="Logo" src="https://github.com/user-attachments/assets/df5f2840-2f92-4991-aa57-252747d7182e" />
 
-# Heretic: Fully automatic censorship removal for language models<br><br>[![Discord](https://img.shields.io/discord/1447831134212984903?color=5865F2&label=discord&labelColor=black&logo=discord&logoColor=white&style=for-the-badge)](https://discord.gg/gdXc48gSyT) [![Matrix](https://img.shields.io/badge/Matrix-black?logo=matrix&style=for-the-badge)](https://matrix.to/#/#heretic:matrix.org) [![Follow us on Hugging Face](https://huggingface.co/datasets/huggingface/badges/resolve/main/follow-us-on-hf-md-dark.svg)](https://huggingface.co/heretic-org) [![Codeberg mirror](https://img.shields.io/badge/Codeberg%20mirror-black?logo=codeberg&style=for-the-badge)](https://codeberg.org/p-e-w/heretic)
+# Heretic-MOE 1.5: adaptive censorship-removal search for language models
 
 > [!NOTE]
 >
-> This repository is **Heretic Adaptive**, the `dborzoff/heretic` fork. It
+> This repository is **Heretic-MOE**, the maintained `dborzoff/Heretic-MOE` fork. It
 > keeps the original CLI while adding architecture-aware editing, perplexity
 > optimization, reproducible journal exports, mixed Random/Sobol exploration,
 > multivariate-TPE continuation, and optional shared-study workers. See
 > [FORK.md](FORK.md) for the complete implementation notes, measured evidence,
 > limitations, and reproducibility links.
 
-## Heretic Adaptive fork
+## Heretic-MOE fork
 
 The fork keeps upstream Heretic's directional-ablation method and changes the
 parts that made modern architectures hard to search or reproduce:
@@ -25,6 +25,36 @@ parts that made modern architectures hard to search or reproduce:
 | Parallel runs could duplicate work | Share one locked Optuna journal with constant-liar TPE and exact worker budgets |
 | Pareto ordering changed over time | Restore and export by immutable Optuna trial number |
 | Semantic judging made every trial slow | Keep fast proxies in the search loop and judge only exported finalists |
+
+### One-command two-GPU workflow
+
+Heretic-MOE 1.5 can run the complete adaptive workflow unattended from one
+command:
+
+```powershell
+python research/scripts/run_adaptive_search.py --base-config research/configs/adaptive_search/ministral3_sparse_geometry.toml --model F:/models/my-model --run-root F:/runs/my-model-heretic-moe --exploration-trials 120 --target-trials 600 --random-device 0 --sobol-device 1
+```
+
+`--model` replaces only the model path; the base config still defines the frozen
+prompt sets, scorers, constraints, and search geometry. The target architecture
+must be supported and each worker GPU must have enough memory for one full
+Heretic process.
+
+The controller runs 60 Random trials on GPU 0 and 60 scrambled-Sobol trials on
+GPU 1, merges them in deterministic round-robin order, and splits the remaining
+480 multivariate-TPE trials across both GPUs. It then remeasures the best five
+candidates with 64 x 1,024-token PPL windows, selects two distinct models, and
+exports them as `exports/balanced` and `exports/max`:
+
+| Export | Selection rule |
+|---|---|
+| `Balanced` | Lowest PPL drift among finalists that pass the refusal-removal gate |
+| `Max` | Lowest SRG/R-side/keyword refusal signal among finalists below the PPL ceiling |
+
+Every stage is journaled and resume-safe. Raw per-trial responses are kept in a
+separate SQLite archive, while manifests contain only paths, hashes, settings,
+trial numbers, and numeric measurements. Use `--search-only` to stop after the
+600-trial journal without the high-fidelity recheck or exports.
 
 The current reference study completed 600 trials on Ministral-3-3B. The two
 selected BF16 models are published together as

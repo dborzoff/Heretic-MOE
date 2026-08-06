@@ -1,7 +1,13 @@
 # Adaptive two-GPU search pipeline
 
 `research/scripts/run_adaptive_search.py` is the single controller for the
-Random/Sobol exploration and multivariate-TPE continuation.
+Random/Sobol exploration, multivariate-TPE continuation, finalist recheck, and
+two-model export.
+
+Heretic-MOE 1.5 completes the full workflow by default: TOP-5 candidates are
+remeasured with 64 x 1,024-token PPL windows, distinct `Balanced` and `Max`
+winners are selected, and both models are exported with SHA-256 manifests. Use
+`--search-only` when only the reusable journal and response archive are needed.
 
 For a 600-trial run with `--exploration-trials 120` it performs:
 
@@ -13,6 +19,8 @@ For a 600-trial run with `--exploration-trials 120` it performs:
 4. Two TPE workers share the merged journal and evaluate 240 trials each. Optuna
    assigns these numbers atomically because completion order is asynchronous.
 5. The final journal contains exactly 600 trials.
+6. Both GPUs remeasure the constraint-aware TOP-5 at higher fidelity.
+7. The controller exports `Balanced` and `Max` without interactive prompts.
 
 Sobol covers continuous parameters. The always-present categorical
 `direction_scope` axis is stratified deterministically (alternating choices),

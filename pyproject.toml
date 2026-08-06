@@ -1,7 +1,7 @@
 [project]
 name = "heretic-llm"
-version = "1.4.0"
-description = "Fully automatic censorship removal for language models"
+version = "1.5.0"
+description = "Heretic-MOE adaptive censorship-removal search for language models"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 authors = [
@@ -60,11 +60,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://heretic-project.org"
-Documentation = "https://heretic-project.org/tutorial"
-Repository = "https://github.com/p-e-w/heretic.git"
-Issues = "https://github.com/p-e-w/heretic/issues"
-Changelog = "https://github.com/p-e-w/heretic/releases"
+Homepage = "https://github.com/dborzoff/Heretic-MOE"
+Documentation = "https://github.com/dborzoff/Heretic-MOE#readme"
+Repository = "https://github.com/dborzoff/Heretic-MOE.git"
+Issues = "https://github.com/dborzoff/Heretic-MOE/issues"
+Changelog = "https://github.com/dborzoff/Heretic-MOE/releases"
 
 [project.scripts]
 heretic = "heretic.main:main"
