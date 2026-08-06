@@ -200,8 +200,8 @@ def check_environment(
 ) -> bool | None:
     mismatch_severity: MismatchSeverity | None = None
 
-    system_mismatches = []
-    package_mismatches = []
+    system_mismatches: list[tuple[str, Any, Any, MismatchSeverity]] = []
+    package_mismatches: list[tuple[str, Any, Any, MismatchSeverity]] = []
 
     def verify(
         mismatch_list: list[tuple[str, Any, Any, MismatchSeverity]],

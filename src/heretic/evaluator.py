@@ -57,7 +57,12 @@ class Evaluator:
 
         # Resolve plugin classes from names and validate.
         for config in scorer_configs:
-            scorer_cls = load_plugin(name=config.plugin, base_class=Scorer)
+            # The abstract base is intentionally passed as a runtime subclass contract;
+            # load_plugin returns the concrete configured implementation.
+            scorer_cls = load_plugin(
+                name=config.plugin,
+                base_class=Scorer,  # type: ignore[type-abstract]
+            )
             scorer_cls.validate_contract()
 
             print(

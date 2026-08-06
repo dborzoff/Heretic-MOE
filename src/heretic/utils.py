@@ -38,9 +38,6 @@ from .system import (
     is_xpu_available,
 )
 
-T = TypeVar("T")
-
-
 print = Console(highlight=False).print
 
 T = TypeVar("T")
@@ -109,7 +106,7 @@ def format_duration(seconds: float) -> str:
 
 def format_exception(error: Exception) -> str:
     # Walk causal chain to find a non-empty message.
-    current = error
+    current: BaseException | None = error
     while current is not None:
         message = str(current).strip()
         if message:
