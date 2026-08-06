@@ -4,16 +4,17 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 
 def main() -> None:
-    if len(sys.argv) > 1 and sys.argv[1].lower() == "adaptive":
-        from .supervisor import main as supervisor_main
+    if os.environ.get("HERETIC_MOE_INTERNAL") == "1":
+        from .main import main as worker_main
 
-        supervisor_main(sys.argv[2:])
+        worker_main()
         return
 
-    from .main import main as legacy_main
+    from .supervisor import main as supervisor_main
 
-    legacy_main()
+    supervisor_main(sys.argv[1:])

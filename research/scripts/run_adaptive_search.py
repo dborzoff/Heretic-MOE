@@ -369,6 +369,7 @@ def build_stage(
 
 def process_environment(device: str | None) -> dict[str, str]:
     environment = dict(os.environ)
+    environment["HERETIC_MOE_INTERNAL"] = "1"
     environment.setdefault("HF_HUB_OFFLINE", "1")
     environment.setdefault("TRANSFORMERS_OFFLINE", "1")
     # Child processes normally inherit a redirected controller stdout on CI and

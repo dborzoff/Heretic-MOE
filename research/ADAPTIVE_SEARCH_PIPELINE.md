@@ -1,6 +1,6 @@
-# Adaptive multi-GPU search pipeline
+# Dynamic multi-GPU search pipeline
 
-`hereticMOE adaptive` is the public one-command controller for Random/Sobol
+`hereticMOE` is the public one-command controller for Random/Sobol
 exploration, multivariate-TPE continuation, finalist recheck, and two-model
 export. It detects available NVIDIA devices and starts one persistent worker per
 selected GPU.
@@ -75,7 +75,7 @@ manifest.
 ## Example
 
 ```powershell
-F:\AI\heretic_env\Scripts\hereticMOE.exe adaptive `
+F:\AI\heretic_env\Scripts\hereticMOE.exe `
   --base-config research\configs\adaptive_search\gemma2_sparse_geometry.toml `
   --model F:\AI\hf_originals\my_model `
   --data-root F:\AI\HereticMoe\runtime_data\adaptive_search_v2 `

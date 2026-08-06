@@ -1,6 +1,6 @@
 <img width="128" align="right" alt="Logo" src="https://github.com/user-attachments/assets/df5f2840-2f92-4991-aa57-252747d7182e" />
 
-# Heretic-MOE 1.5: adaptive censorship-removal search for language models
+# Heretic-MOE 1.5: dynamic multi-GPU censorship-removal search
 
 > [!NOTE]
 >
@@ -29,11 +29,11 @@ parts that made modern architectures hard to search or reproduce:
 
 ### One-command two-GPU workflow
 
-Heretic-MOE 1.5 can run the complete adaptive workflow unattended from one
+Heretic-MOE 1.5 can run the complete multi-GPU workflow unattended from one
 command:
 
 ```powershell
-hereticMOE adaptive --base-config research/configs/adaptive_search/ministral3_sparse_geometry.toml --model F:/models/my-model --data-root F:/data/adaptive-search --run-root F:/runs/my-model-heretic-moe --exploration-trials 120 --n-trials 600
+hereticMOE --base-config research/configs/adaptive_search/ministral3_sparse_geometry.toml --model F:/models/my-model --data-root F:/data/adaptive-search --run-root F:/runs/my-model-heretic-moe --exploration-trials 120 --n-trials 600
 ```
 
 `--model` replaces only the model path; the base config still defines the frozen
@@ -82,7 +82,7 @@ selected BF16 models are published together as
 [Ministral-3-3B-Instruct-2512 Heretic Adaptive v1](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1).
 
 <p align="center">
-  <img width="960" alt="Exact exported-model validation for Heretic Adaptive max and balanced variants" src="docs/assets/adaptive-finalists.svg" />
+  <img width="960" alt="Exact exported-model validation for Heretic-MOE Max and Balanced variants" src="docs/assets/adaptive-finalists.svg" />
 </p>
 
 | System | Delivered | Policy refusal | Evasion | Refusal + evasion | Exact PPL change |
@@ -101,7 +101,7 @@ results for one frozen evaluation, not a claim of universal behavior.
 <br>
 
 <p align="center">
-  <img width="960" alt="Animation of the Heretic Adaptive Pareto front across 600 trials" src="docs/assets/adaptive-search-progress.gif" />
+  <img width="960" alt="Animation of the Heretic-MOE Pareto front across 600 trials" src="docs/assets/adaptive-search-progress.gif" />
 </p>
 
 The published reference run predates the current dynamic-queue controller: it used
@@ -156,9 +156,7 @@ by human experts:
 The Heretic version, generated without any human effort, achieves the same
 level of refusal suppression as other abliterations, but at a much lower
 KL divergence, indicating less damage to the original model's capabilities.
-*(You can reproduce those numbers using Heretic's built-in evaluation functionality,
-e.g. `hereticMOE --model google/gemma-3-12b-it --evaluate-model p-e-w/gemma-3-12b-it-heretic`.
-Note that the exact values might be platform- and hardware-dependent.
+*(The exact values might be platform- and hardware-dependent.
 The table above was compiled using PyTorch 2.8 on an RTX 5090.)*
 
 Of course, mathematical metrics and automated benchmarks never tell the whole
@@ -201,7 +199,7 @@ for your hardware. Then run:
 
 ```sh
 pip install -U heretic-llm
-hereticMOE Qwen/Qwen3-4B-Instruct-2507
+hereticMOE --model Qwen/Qwen3-4B-Instruct-2507 --run-root ./runs/qwen3-4b-heretic-moe
 ```
 
 Replace `Qwen/Qwen3-4B-Instruct-2507` with whatever model you want to decensor.

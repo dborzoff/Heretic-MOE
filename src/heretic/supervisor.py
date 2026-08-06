@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""One-command adaptive multi-GPU supervisor for HereticMOE."""
+"""One-command dynamic multi-GPU supervisor for HereticMOE."""
 
 from __future__ import annotations
 
@@ -193,8 +193,8 @@ def executable_path(override: Path | None) -> Path:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="hereticMOE adaptive",
-        description="Adaptive render-queue style search across available GPUs.",
+        prog="hereticMOE",
+        description="Dynamic render-queue search across available GPUs.",
     )
     parser.add_argument("--model", required=True)
     parser.add_argument("--run-root", type=Path, required=True)
@@ -243,7 +243,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     print(
-        f"HereticMOE v{version('heretic-llm')} adaptive supervisor",
+        f"HereticMOE v{version('heretic-llm')} multi-GPU supervisor",
         flush=True,
     )
     print(f"Selected {len(selected)} GPU worker(s):", flush=True)

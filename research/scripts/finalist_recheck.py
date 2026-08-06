@@ -466,6 +466,7 @@ def run(args: argparse.Namespace) -> None:
     for worker, (device, budget) in enumerate(zip(devices[:workers], budgets, strict=True)):
         log_handle = (output / f"gpu{device}.log").open("a", encoding="utf-8")
         env = os.environ.copy()
+        env["HERETIC_MOE_INTERNAL"] = "1"
         env["CUDA_VISIBLE_DEVICES"] = str(device)
         env["PYTHONUNBUFFERED"] = "1"
         command = [
