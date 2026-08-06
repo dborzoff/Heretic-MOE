@@ -61,6 +61,12 @@ payloads are not committed to this repository.
 | `Balanced` | Lowest PPL drift among finalists that pass the refusal-removal gate |
 | `Max` | Lowest SRG/R-side/keyword refusal signal among finalists below the PPL ceiling |
 
+By default, the Balanced gate is model-relative: a finalist must retain 80% of
+the SRG improvement between the original-model baseline and the best rechecked
+candidate. This avoids applying a threshold calibrated on one architecture to a
+different SRG scale. `--balanced-srg-gate` remains available as an explicit
+absolute override for frozen reproductions.
+
 Every stage is journaled and resume-safe. Raw per-trial responses are kept in a
 separate SQLite archive, while manifests contain only paths, hashes, settings,
 trial numbers, and numeric measurements. Use `--search-only` to stop after the
