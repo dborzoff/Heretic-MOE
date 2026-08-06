@@ -177,13 +177,17 @@ def executable_path(override: Path | None) -> Path:
     if override is not None:
         result = override.resolve()
     else:
-        discovered = shutil.which("hereticMOE")
+        # The public ``hereticMOE`` executable dispatches back into this
+        # supervisor. GPU children must use the worker entry point directly;
+        # selecting the public executable here recursively re-enters the
+        # dispatcher and can corrupt internal worker arguments.
+        discovered = shutil.which("heretic")
         if not discovered:
-            candidate = Path(sys.executable).resolve().parent / "hereticMOE.exe"
+            candidate = Path(sys.executable).resolve().parent / "heretic.exe"
             discovered = str(candidate) if candidate.is_file() else None
         if not discovered:
             raise FileNotFoundError(
-                "Cannot locate hereticMOE executable; provide --worker-executable"
+                "Cannot locate heretic worker executable; provide --worker-executable"
             )
         result = Path(discovered).resolve()
     if not result.is_file():

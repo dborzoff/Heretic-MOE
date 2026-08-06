@@ -1634,8 +1634,7 @@ def main() -> None:
                 (
                     "--worker-queue-path",
                     str(args.worker_queue_path),
-                    "--worker-id",
-                    worker_id,
+                    f"--worker-id={worker_id}",
                 )
             )
         else:
