@@ -32,7 +32,7 @@ Heretic-MOE 1.5 can run the complete adaptive workflow unattended from one
 command:
 
 ```powershell
-python research/scripts/run_adaptive_search.py --base-config research/configs/adaptive_search/ministral3_sparse_geometry.toml --model F:/models/my-model --run-root F:/runs/my-model-heretic-moe --exploration-trials 120 --target-trials 600 --random-device 0 --sobol-device 1
+python research/scripts/run_adaptive_search.py --base-config research/configs/adaptive_search/ministral3_sparse_geometry.toml --model F:/models/my-model --data-root F:/data/adaptive-search --run-root F:/runs/my-model-heretic-moe --exploration-trials 120 --target-trials 600 --random-device 0 --sobol-device 1
 ```
 
 `--model` replaces only the model path; the base config still defines the frozen
@@ -50,6 +50,11 @@ exports them as `exports/balanced` and `exports/max`:
 When both device arguments name the same GPU, the controller automatically
 switches exploration, shared TPE, recheck, and export to a memory-safe
 single-worker sequence. No separate one-GPU script is required.
+
+`--data-root` removes machine-specific prompt paths from the base TOML. The
+directory is local-only and must contain `direction_safe.jsonl`,
+`direction_unsafe.jsonl`, `search_unsafe.jsonl`, and `prototypes.jsonl`; their
+payloads are not committed to this repository.
 
 | Export | Selection rule |
 |---|---|
