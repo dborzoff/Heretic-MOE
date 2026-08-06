@@ -4,12 +4,45 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 
 from optuna.study import StudyDirection
 from optuna.trial import FrozenTrial, TrialState
 
 from .config import SelectionPolicy
+
+
+def _unique_parameter_trials(trials: Sequence[FrozenTrial]) -> list[FrozenTrial]:
+    """Keep one deterministic representative for each exact parameter set.
+
+    Parallel samplers can very occasionally suggest an already completed point.
+    The duplicate remains valid journal evidence, but it must not consume a
+    finalist slot or appear twice on the displayed Pareto front. Callers pass
+    policy-ranked trials so the strongest representative is retained.
+    """
+
+    unique: list[FrozenTrial] = []
+    seen: set[str] = set()
+    for trial in trials:
+        # An empty parameter mapping does not prove that two externally-created
+        # or diagnostic-only trials represent the same intervention. Preserve
+        # them all; exact deduplication is only valid when there is an actual
+        # sampled parameter set to compare.
+        if not trial.params:
+            unique.append(trial)
+            continue
+        fingerprint = json.dumps(
+            trial.params,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        unique.append(trial)
+    return unique
 
 
 def trial_constraints(trial: FrozenTrial, count: int) -> tuple[float, ...] | None:
@@ -320,27 +353,36 @@ def candidate_trials(
 
     if policy == SelectionPolicy.PARETO:
         front = nondominated_trials(completed, directions)
-        return sorted(
-            front,
-            key=lambda trial: (*minimized_values(trial, directions), trial.number),
+        return _unique_parameter_trials(
+            sorted(
+                front,
+                key=lambda trial: (
+                    *minimized_values(trial, directions),
+                    trial.number,
+                ),
+            )
         )
 
     feasible = [trial for trial in completed if is_feasible(trial, constraint_count)]
     if feasible:
         if policy == SelectionPolicy.FEASIBLE_COST:
-            return _cost_ranked_trials(
-                feasible,
-                directions,
-                primary_objective_index=primary_objective_index,
-                score_targets=score_targets or {},
-                score_weights=score_weights or {},
+            return _unique_parameter_trials(
+                _cost_ranked_trials(
+                    feasible,
+                    directions,
+                    primary_objective_index=primary_objective_index,
+                    score_targets=score_targets or {},
+                    score_weights=score_weights or {},
+                )
             )
         if policy == SelectionPolicy.FEASIBLE_DIVERSE:
-            return _diverse_feasible_trials(
-                feasible,
-                directions,
-                primary_objective_index=primary_objective_index,
-                diagnostic_names=diagnostic_names,
+            return _unique_parameter_trials(
+                _diverse_feasible_trials(
+                    feasible,
+                    directions,
+                    primary_objective_index=primary_objective_index,
+                    diagnostic_names=diagnostic_names,
+                )
             )
 
         pool = nondominated_trials(feasible, directions)
@@ -357,7 +399,7 @@ def candidate_trials(
             slack_key = max(constraints, default=0.0)
             return (*reordered, slack_key, float(trial.number))
 
-        return sorted(pool, key=feasible_key)
+        return _unique_parameter_trials(sorted(pool, key=feasible_key))
 
     # When nothing is feasible, keep the least-violating trials visible instead
     # of silently presenting them as valid winners.
@@ -370,4 +412,4 @@ def candidate_trials(
         )
         return (violation, *minimized_values(trial, directions), float(trial.number))
 
-    return sorted(completed, key=violation_key)
+    return _unique_parameter_trials(sorted(completed, key=violation_key))

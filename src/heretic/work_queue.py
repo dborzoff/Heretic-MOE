@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,10 +32,27 @@ class QueueStats:
 
 @dataclass(frozen=True)
 class QueueContract:
+    schema_version: int
     first_task_id: int
     task_count: int
     last_task_id_exclusive: int
     exploration_task_count: int
+    target_trial_count: int
+    tpe_concurrency: int
+    journal_base_trial_count: int
+    journal_base_size_bytes: int
+    journal_base_sha256: str
+
+
+@dataclass(frozen=True)
+class QueueTaskRecord:
+    task_id: int
+    task_kind: str
+    state: str
+    worker_id: str | None
+    attempt: int
+    trial_number: int | None
+    trial_state: str | None
 
 
 class TrialWorkQueue:
@@ -58,12 +76,28 @@ class TrialWorkQueue:
         connection.execute("PRAGMA busy_timeout=60000")
         return connection
 
+    def _connect_readonly(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            f"file:{self.path.as_posix()}?mode=ro",
+            uri=True,
+            timeout=60.0,
+            isolation_level=None,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=60000")
+        return connection
+
     def initialize(
         self,
         *,
         first_task_id: int,
         task_count: int,
         exploration_task_count: int = 0,
+        target_trial_count: int,
+        tpe_concurrency: int,
+        journal_base_trial_count: int,
+        journal_base_size_bytes: int,
+        journal_base_sha256: str,
     ) -> None:
         if first_task_id < 0:
             raise ValueError("first_task_id cannot be negative")
@@ -71,9 +105,30 @@ class TrialWorkQueue:
             raise ValueError("task_count cannot be negative")
         if not 0 <= exploration_task_count <= task_count:
             raise ValueError("exploration_task_count must be within the task range")
+        if target_trial_count != first_task_id + task_count:
+            raise ValueError(
+                "target_trial_count must equal first_task_id + task_count"
+            )
+        if tpe_concurrency <= 0:
+            raise ValueError("tpe_concurrency must be positive")
+        if journal_base_trial_count < 0:
+            raise ValueError("journal_base_trial_count cannot be negative")
+        if not first_task_id <= journal_base_trial_count <= target_trial_count:
+            raise ValueError(
+                "journal_base_trial_count must be between the completed-task "
+                "prefix and target_trial_count"
+            )
+        if journal_base_size_bytes < 0:
+            raise ValueError("journal_base_size_bytes cannot be negative")
+        normalized_base_sha256 = journal_base_sha256.strip().lower()
+        if len(normalized_base_sha256) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in normalized_base_sha256
+        ):
+            raise ValueError("journal_base_sha256 must be a SHA-256 hex digest")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         expected_last = first_task_id + task_count
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
@@ -108,10 +163,16 @@ class TrialWorkQueue:
                 for row in connection.execute("SELECT key, value FROM queue_meta")
             }
             expected = {
+                "schema_version": "3",
                 "first_task_id": str(first_task_id),
                 "task_count": str(task_count),
                 "last_task_id_exclusive": str(expected_last),
                 "exploration_task_count": str(exploration_task_count),
+                "target_trial_count": str(target_trial_count),
+                "tpe_concurrency": str(tpe_concurrency),
+                "journal_base_trial_count": str(journal_base_trial_count),
+                "journal_base_size_bytes": str(journal_base_size_bytes),
+                "journal_base_sha256": normalized_base_sha256,
             }
             if metadata and metadata != expected:
                 raise RuntimeError(
@@ -156,7 +217,7 @@ class TrialWorkQueue:
     def claim(self, worker_id: str) -> WorkItem | None:
         if not worker_id.strip():
             raise ValueError("worker_id cannot be empty")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
@@ -173,16 +234,39 @@ class TrialWorkQueue:
             task_id = int(row["task_id"])
             task_kind = str(row["task_kind"])
             if task_kind == "tpe":
-                blocked = connection.execute(
+                # TPE may run with a bounded constant-liar batch, but it must
+                # never start before the complete Random/Sobol prefix. Once
+                # exploration is complete, keep at most the immutable contract
+                # limit in flight. This preserves exact task permits while a
+                # faster GPU naturally consumes more of the queue.
+                exploration_blocked = connection.execute(
                     """
                     SELECT 1
                     FROM tasks
-                    WHERE task_id < ? AND state != 'complete'
+                    WHERE task_id < ? AND task_kind != 'tpe'
+                        AND state != 'complete'
                     LIMIT 1
                     """,
                     (task_id,),
                 ).fetchone()
-                if blocked is not None:
+                tpe_concurrency_row = connection.execute(
+                    "SELECT value FROM queue_meta WHERE key = 'tpe_concurrency'"
+                ).fetchone()
+                if tpe_concurrency_row is None:
+                    raise RuntimeError(
+                        f"Queue {self.path} has no tpe_concurrency contract"
+                    )
+                claimed_tpe = int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*) FROM tasks
+                        WHERE task_kind = 'tpe' AND state = 'claimed'
+                        """
+                    ).fetchone()[0]
+                )
+                if exploration_blocked is not None or claimed_tpe >= int(
+                    tpe_concurrency_row["value"]
+                ):
                     connection.commit()
                     return None
             attempt = int(row["attempt"]) + 1
@@ -210,7 +294,7 @@ class TrialWorkQueue:
         trial_number: int,
         trial_state: str,
     ) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             updated = connection.execute(
                 """
                 UPDATE tasks
@@ -231,7 +315,7 @@ class TrialWorkQueue:
 
     def fail(self, item: WorkItem, *, error_type: str, retry: bool) -> None:
         state = "pending" if retry else "failed"
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             updated = connection.execute(
                 """
                 UPDATE tasks
@@ -246,7 +330,7 @@ class TrialWorkQueue:
     def release_worker(self, worker_id: str) -> int:
         """Return claims owned by a dead worker to the pending queue."""
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             return connection.execute(
                 """
                 UPDATE tasks
@@ -260,7 +344,7 @@ class TrialWorkQueue:
     def claimed_workers(self) -> list[str]:
         """Return stable worker identifiers that still own queue claims."""
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             return [
                 str(row["worker_id"])
                 for row in connection.execute(
@@ -276,24 +360,73 @@ class TrialWorkQueue:
     def contract(self) -> QueueContract:
         """Read the immutable range and exploration prefix of this queue."""
 
-        with self._connect() as connection:
+        with closing(self._connect_readonly()) as connection:
             metadata = {
-                str(row["key"]): int(row["value"])
+                str(row["key"]): str(row["value"])
                 for row in connection.execute("SELECT key, value FROM queue_meta")
             }
         required = {
+            "schema_version",
             "first_task_id",
             "task_count",
             "last_task_id_exclusive",
             "exploration_task_count",
+            "target_trial_count",
+            "tpe_concurrency",
+            "journal_base_trial_count",
+            "journal_base_size_bytes",
+            "journal_base_sha256",
         }
         if set(metadata) != required:
             raise RuntimeError(f"Invalid queue metadata in {self.path}: {metadata}")
-        return QueueContract(**metadata)
+        numeric = required - {"journal_base_sha256"}
+        try:
+            values = {key: int(metadata[key]) for key in numeric}
+        except ValueError as error:
+            raise RuntimeError(
+                f"Invalid numeric queue metadata in {self.path}: {metadata}"
+            ) from error
+        return QueueContract(
+            **values,
+            journal_base_sha256=metadata["journal_base_sha256"],
+        )
+
+    def task_records(self) -> list[QueueTaskRecord]:
+        """Return text-free task state for journal reconciliation."""
+
+        with closing(self._connect_readonly()) as connection:
+            rows = connection.execute(
+                """
+                SELECT task_id, task_kind, state, worker_id, attempt,
+                    trial_number, trial_state
+                FROM tasks
+                ORDER BY task_id
+                """
+            ).fetchall()
+        return [
+            QueueTaskRecord(
+                task_id=int(row["task_id"]),
+                task_kind=str(row["task_kind"]),
+                state=str(row["state"]),
+                worker_id=(
+                    None if row["worker_id"] is None else str(row["worker_id"])
+                ),
+                attempt=int(row["attempt"]),
+                trial_number=(
+                    None
+                    if row["trial_number"] is None
+                    else int(row["trial_number"])
+                ),
+                trial_state=(
+                    None if row["trial_state"] is None else str(row["trial_state"])
+                ),
+            )
+            for row in rows
+        ]
 
     def stats(self) -> QueueStats:
         counts = {"pending": 0, "claimed": 0, "complete": 0, "failed": 0}
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             for row in connection.execute(
                 "SELECT state, COUNT(*) AS count FROM tasks GROUP BY state"
             ):

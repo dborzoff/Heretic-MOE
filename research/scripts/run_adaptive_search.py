@@ -74,11 +74,19 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=120,
         help=(
-            "Total exploration prefix across both GPUs. It is split evenly: "
-            "half Random and half scrambled Sobol."
+            "Total exploration prefix across the shared worker queue (default: "
+            "120). Tasks alternate evenly between Random and scrambled Sobol."
         ),
     )
-    parser.add_argument("--target-trials", type=int, default=600)
+    parser.add_argument(
+        "--target-trials",
+        type=int,
+        default=600,
+        help=(
+            "Exact work-permit target (default: 600). Pass a larger value to "
+            "extend a compatible shared journal."
+        ),
+    )
     parser.add_argument("--random-device", default="0")
     parser.add_argument("--sobol-device", default="1")
     parser.add_argument(
@@ -129,7 +137,8 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help=(
             "After the search, remeasure the TOP-N finalists at higher PPL "
-            "fidelity, select distinct Balanced and Max winners, and export both."
+            "fidelity, select Pareto-valid Balanced and Max roles, and export both. "
+            "Both roles may resolve to one winner when every alternative is dominated."
         ),
     )
     parser.add_argument(
@@ -191,6 +200,21 @@ def sha256(path: Path) -> str:
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_prefix(path: Path, size_bytes: int) -> str | None:
+    """Hash exactly one immutable file prefix, or return None if truncated."""
+
+    digest = hashlib.sha256()
+    remaining = size_bytes
+    with path.open("rb") as stream:
+        while remaining:
+            chunk = stream.read(min(1024 * 1024, remaining))
+            if not chunk:
+                return None
+            digest.update(chunk)
+            remaining -= len(chunk)
     return digest.hexdigest()
 
 
@@ -759,6 +783,268 @@ def journal_trial_counts(journal: Path) -> tuple[int, int]:
     return len(trials), waiting
 
 
+def load_journal_trials(journal: Path) -> list[optuna.trial.FrozenTrial]:
+    """Load one journal's text-free Optuna trial metadata."""
+
+    storage = JournalStorage(
+        JournalFileBackend(
+            str(journal),
+            lock_obj=JournalFileOpenLock(str(journal)),
+        )
+    )
+    summaries = storage.get_all_studies()
+    if len(summaries) != 1:
+        raise ValueError(f"Expected one study in {journal}, found {len(summaries)}")
+    study = optuna.load_study(study_name=summaries[0].study_name, storage=storage)
+    return list(study.get_trials(deepcopy=False))
+
+
+def verify_queue_against_journal(
+    queue: TrialWorkQueue,
+    journal: Path,
+    *,
+    target_trial_count: int,
+    tpe_concurrency: int,
+) -> tuple[bool, str]:
+    """Verify that every durable permit agrees with explicit journal metadata.
+
+    Trial counts alone are insufficient: a previous buggy/non-queue worker can
+    advance the same journal while leaving every queue row pending. Queue task
+    and attempt attributes form the reconciliation key. Stale queues are never
+    rewritten in place; the caller preserves them and allocates a new version.
+    """
+
+    try:
+        contract = queue.contract()
+        records = queue.task_records()
+    except (OSError, RuntimeError, ValueError) as error:
+        return False, f"unreadable_contract:{type(error).__name__}:{error}"
+    if contract.schema_version != 3:
+        return False, f"schema_version:{contract.schema_version}"
+    if contract.target_trial_count != target_trial_count:
+        return False, (
+            f"target:{contract.target_trial_count}!={target_trial_count}"
+        )
+    if contract.last_task_id_exclusive != target_trial_count:
+        return False, (
+            "last_task_id_exclusive:"
+            f"{contract.last_task_id_exclusive}!={target_trial_count}"
+        )
+    if contract.tpe_concurrency != tpe_concurrency:
+        return False, (
+            f"tpe_concurrency:{contract.tpe_concurrency}!={tpe_concurrency}"
+        )
+    if contract.first_task_id < 0 or contract.task_count < 0:
+        return False, "negative_task_range"
+    if not (
+        contract.first_task_id
+        <= contract.journal_base_trial_count
+        <= contract.target_trial_count
+    ):
+        return False, (
+            "journal_base_trial_count:"
+            f"{contract.journal_base_trial_count}"
+        )
+    if contract.journal_base_size_bytes < 0:
+        return False, f"journal_base_size_bytes:{contract.journal_base_size_bytes}"
+    if not 0 <= contract.exploration_task_count <= contract.task_count:
+        return False, (
+            "exploration_task_count:"
+            f"{contract.exploration_task_count}/{contract.task_count}"
+        )
+    if contract.tpe_concurrency <= 0:
+        return False, f"invalid_tpe_concurrency:{contract.tpe_concurrency}"
+    if (
+        contract.first_task_id + contract.task_count
+        != contract.last_task_id_exclusive
+    ):
+        return False, "task_count_range_mismatch"
+    if len(records) != contract.task_count:
+        return False, f"task_count:{len(records)}!={contract.task_count}"
+    expected_ids = list(
+        range(contract.first_task_id, contract.last_task_id_exclusive)
+    )
+    if [record.task_id for record in records] != expected_ids:
+        return False, "task_id_range_mismatch"
+    for offset, record in enumerate(records):
+        expected_kind = (
+            "random"
+            if offset < contract.exploration_task_count and offset % 2 == 0
+            else (
+                "sobol"
+                if offset < contract.exploration_task_count
+                else "tpe"
+            )
+        )
+        if record.task_kind != expected_kind:
+            return False, (
+                f"task_kind:{record.task_id}:{record.task_kind}!={expected_kind}"
+            )
+
+    if not journal.is_file():
+        empty_sha256 = hashlib.sha256().hexdigest()
+        pristine = (
+            contract.first_task_id == 0
+            and contract.journal_base_trial_count == 0
+            and contract.journal_base_size_bytes == 0
+            and contract.journal_base_sha256 == empty_sha256
+            and all(
+                record.state == "pending"
+                and record.attempt == 0
+                and record.worker_id is None
+                and record.trial_number is None
+                and record.trial_state is None
+                for record in records
+            )
+        )
+        return (
+            (True, "verified_pristine_without_journal")
+            if pristine
+            else (False, "queue_without_verifiable_journal")
+        )
+
+    if journal.stat().st_size < contract.journal_base_size_bytes:
+        return False, (
+            f"journal_bytes_truncated:{journal.stat().st_size}<"
+            f"{contract.journal_base_size_bytes}"
+        )
+    base_sha256 = sha256_prefix(journal, contract.journal_base_size_bytes)
+    if base_sha256 != contract.journal_base_sha256:
+        return False, (
+            f"journal_base_sha256:{base_sha256}!="
+            f"{contract.journal_base_sha256}"
+        )
+    trials = load_journal_trials(journal)
+    if len(trials) < contract.journal_base_trial_count:
+        return False, (
+            f"journal_truncated:{len(trials)}<"
+            f"{contract.journal_base_trial_count}"
+        )
+    if [trial.number for trial in trials[: contract.journal_base_trial_count]] != list(
+        range(contract.journal_base_trial_count)
+    ):
+        return False, "journal_base_trial_numbers_mismatch"
+    by_attempt: dict[tuple[int, int], optuna.trial.FrozenTrial] = {}
+    unmanaged: list[int] = []
+    attempts_by_task: dict[int, list[optuna.trial.FrozenTrial]] = {}
+    terminal = {
+        optuna.trial.TrialState.COMPLETE,
+        optuna.trial.TrialState.FAIL,
+        optuna.trial.TrialState.PRUNED,
+    }
+    for trial in trials:
+        raw_task_id = trial.user_attrs.get("queue_task_id")
+        raw_attempt = trial.user_attrs.get("queue_attempt")
+        if raw_task_id is None:
+            if trial.number >= contract.journal_base_trial_count:
+                unmanaged.append(trial.number)
+            continue
+        try:
+            task_id = int(raw_task_id)
+        except (TypeError, ValueError):
+            return False, f"invalid_trial_queue_key:T{trial.number}"
+        if not contract.first_task_id <= task_id < contract.last_task_id_exclusive:
+            if trial.number < contract.journal_base_trial_count:
+                continue
+            return False, f"journal_task_out_of_range:T{trial.number}:{task_id}"
+        try:
+            attempt = int(raw_attempt)
+        except (TypeError, ValueError):
+            return False, f"invalid_trial_queue_key:T{trial.number}"
+        if attempt <= 0:
+            return False, f"invalid_attempt:T{trial.number}:{attempt}"
+        key = (task_id, attempt)
+        if key in by_attempt:
+            return False, f"duplicate_attempt:{task_id}:{attempt}"
+        by_attempt[key] = trial
+        attempts_by_task.setdefault(task_id, []).append(trial)
+    if unmanaged:
+        preview = ",".join(str(number) for number in unmanaged[:8])
+        return False, f"unmanaged_journal_trials:{preview}"
+
+    for record in records:
+        attempts = attempts_by_task.get(record.task_id, [])
+        for trial in attempts:
+            attempt = int(trial.user_attrs["queue_attempt"])
+            if attempt > record.attempt:
+                return False, f"future_attempt:{record.task_id}"
+            if trial.user_attrs.get("queue_task_kind") != record.task_kind:
+                return False, f"trial_task_kind_mismatch:{record.task_id}:{attempt}"
+            if attempt < record.attempt and trial.state not in terminal:
+                return False, (
+                    f"nonterminal_prior_attempt:{record.task_id}:{attempt}"
+                )
+        current = by_attempt.get((record.task_id, record.attempt))
+        if (
+            current is not None
+            and record.state in {"claimed", "complete", "failed"}
+            and current.user_attrs.get("queue_worker_id") != record.worker_id
+        ):
+            return False, f"trial_worker_mismatch:{record.task_id}"
+        if record.state == "complete":
+            if current is None or current.state not in terminal:
+                return False, f"complete_without_terminal:{record.task_id}"
+            if current.number != record.trial_number:
+                return False, f"trial_number_mismatch:{record.task_id}"
+            if current.state.name != record.trial_state:
+                return False, f"trial_state_mismatch:{record.task_id}"
+        elif record.state == "claimed":
+            if current is None or current.state != optuna.trial.TrialState.RUNNING:
+                return False, f"claim_without_running:{record.task_id}"
+        elif record.state == "pending":
+            if current is not None and current.state in {
+                optuna.trial.TrialState.RUNNING,
+                optuna.trial.TrialState.WAITING,
+                optuna.trial.TrialState.COMPLETE,
+            }:
+                return False, f"pending_has_live_or_complete:{record.task_id}"
+        elif record.state == "failed":
+            if current is None or current.state not in terminal:
+                return False, f"failed_without_terminal:{record.task_id}"
+        else:
+            return False, f"unknown_task_state:{record.task_id}:{record.state}"
+    return True, "verified"
+
+
+def queue_path_for_version(root: Path, target: int, version: int) -> Path:
+    suffix = "" if version == 1 else f".v{version}"
+    return root / f"trial-work-queue-{target}{suffix}.sqlite3"
+
+
+def select_verified_queue(
+    root: Path,
+    journal: Path,
+    *,
+    target_trial_count: int,
+    tpe_concurrency: int,
+) -> tuple[TrialWorkQueue | None, Path | None, list[dict[str, Any]]]:
+    """Select a matching immutable queue; report but never mutate stale ones."""
+
+    rejected: list[dict[str, Any]] = []
+    version = 1
+    while True:
+        path = queue_path_for_version(root, target_trial_count, version)
+        if not path.is_file():
+            return None, path, rejected
+        queue = TrialWorkQueue(path)
+        valid, reason = verify_queue_against_journal(
+            queue,
+            journal,
+            target_trial_count=target_trial_count,
+            tpe_concurrency=tpe_concurrency,
+        )
+        if valid:
+            return queue, path, rejected
+        record = {
+            "event": "stale_queue_preserved",
+            "path": str(path),
+            "reason": reason,
+        }
+        rejected.append(record)
+        print(json.dumps(record, sort_keys=True), flush=True)
+        version += 1
+
+
 def require_constraint_metadata(stage: Stage) -> None:
     storage = JournalStorage(
         JournalFileBackend(
@@ -910,17 +1196,29 @@ def write_run_manifest(
         "shared_worker_count": len(devices),
         "dynamic_worker_queue": args.dynamic_worker_queue,
         "worker_queue": getattr(args, "worker_queue_path", None),
+        "worker_queue_rejections": getattr(args, "worker_queue_rejections", []),
+        "worker_queue_tpe_concurrency": len(devices),
         "worker_recoveries": getattr(args, "worker_recoveries", []),
         "visible_worker_windows": args.visible_worker_windows,
         "continue_shared_only": args.continue_shared_only,
         "finalize": args.finalize,
         "finalist_top_n": args.finalist_top_n,
         "finalist_selection_policy": args.finalist_selection_policy,
+        "finalization_version": getattr(args, "finalization_version", None),
+        "finalist_dir": getattr(args, "resolved_finalist_dir", None),
+        "finalization_contract": getattr(args, "finalization_contract", None),
+        "finalization_contract_sha256": getattr(
+            args, "finalization_contract_sha256", None
+        ),
         "recheck_ppl": {
             "chunks": args.recheck_ppl_chunks,
             "window": args.recheck_ppl_window,
         },
-        "export_root": str((args.export_root or path.parent / "exports").resolve()),
+        "export_root": getattr(
+            args,
+            "resolved_export_root",
+            str((args.export_root or path.parent / "exports").resolve()),
+        ),
         "export_strategy": args.export_strategy,
         "response_archive": str(response_archive),
         "response_archive_size": (
@@ -1010,7 +1308,13 @@ def run_checked(command: list[str], *, cwd: Path, event: str) -> None:
     subprocess.run(command, cwd=cwd, check=True)
 
 
-def export_is_complete(directory: Path) -> bool:
+def export_is_complete(
+    directory: Path,
+    *,
+    variant: str,
+    winner: dict[str, Any],
+    export_strategy: str,
+) -> bool:
     manifest_path = directory / "heretic_moe_export.json"
     if not manifest_path.is_file():
         return False
@@ -1018,15 +1322,101 @@ def export_is_complete(directory: Path) -> bool:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    if manifest.get("status") != "PASS":
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("status") != "PASS"
+        or manifest.get("export_kind", "physical") != "physical"
+        or manifest.get("variant") != variant
+        or manifest.get("winner") != winner
+        or manifest.get("export_strategy") != export_strategy
+    ):
         return False
-    for record in manifest.get("files", []):
-        path = directory / record["path"]
-        if not path.is_file() or path.stat().st_size != record["bytes"]:
-            return False
-        if sha256(path) != record["sha256"]:
-            return False
+    files = manifest.get("files")
+    if not isinstance(files, list) or not files:
+        return False
+    if not any(
+        isinstance(record, dict)
+        and str(record.get("path", "")).endswith(".safetensors")
+        for record in files
+    ):
+        return False
+    root = directory.resolve()
+    try:
+        for record in files:
+            if not isinstance(record, dict):
+                return False
+            path = (directory / str(record["path"])).resolve()
+            if not path.is_relative_to(root):
+                return False
+            if not path.is_file() or path.stat().st_size != int(record["bytes"]):
+                return False
+            if sha256(path) != record["sha256"]:
+                return False
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
     return True
+
+
+def winners_share_physical_export(winners: dict[str, Any]) -> bool:
+    """Return true only when both release roles identify one exact intervention."""
+
+    try:
+        balanced = winners["Balanced"]
+        maximum = winners["Max"]
+        return (
+            int(balanced["source_trial_index"])
+            == int(maximum["source_trial_index"])
+            and str(balanced["params_sha256"])
+            == str(maximum["params_sha256"])
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def export_alias_is_complete(
+    directory: Path,
+    *,
+    variant: str,
+    winner: dict[str, Any],
+    export_strategy: str,
+    physical_directory: Path,
+    physical_variant: str,
+    physical_winner: dict[str, Any],
+) -> bool:
+    """Validate a weight-free release role bound to one physical export."""
+
+    manifest_path = directory / "heretic_moe_export.json"
+    physical_manifest = physical_directory / "heretic_moe_export.json"
+    if not manifest_path.is_file() or not physical_manifest.is_file():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        recorded_physical = (directory / str(manifest["physical_export"])).resolve()
+        recorded_manifest = (
+            directory / str(manifest["physical_manifest"])
+        ).resolve()
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("status") != "PASS"
+        or manifest.get("export_kind") != "role_alias"
+        or manifest.get("variant") != variant
+        or manifest.get("winner") != winner
+        or manifest.get("export_strategy") != export_strategy
+        or manifest.get("physical_variant") != physical_variant
+        or manifest.get("physical_winner") != physical_winner
+        or recorded_physical != physical_directory.resolve()
+        or recorded_manifest != physical_manifest.resolve()
+        or manifest.get("physical_manifest_sha256") != sha256(physical_manifest)
+    ):
+        return False
+    return export_is_complete(
+        physical_directory,
+        variant=physical_variant,
+        winner=physical_winner,
+        export_strategy=export_strategy,
+    )
 
 
 def write_export_manifest(
@@ -1053,6 +1443,7 @@ def write_export_manifest(
     manifest = {
         "schema_version": 1,
         "status": "PASS",
+        "export_kind": "physical",
         "variant": variant,
         "device": device,
         "export_strategy": export_strategy,
@@ -1064,6 +1455,634 @@ def write_export_manifest(
     return path
 
 
+def write_export_alias_manifest(
+    directory: Path,
+    *,
+    variant: str,
+    winner: dict[str, Any],
+    export_strategy: str,
+    physical_directory: Path,
+    physical_variant: str,
+    physical_winner: dict[str, Any],
+) -> Path:
+    """Write a small immutable role alias without duplicating model weights."""
+
+    physical_manifest = physical_directory / "heretic_moe_export.json"
+    if not export_is_complete(
+        physical_directory,
+        variant=physical_variant,
+        winner=physical_winner,
+        export_strategy=export_strategy,
+    ):
+        raise RuntimeError(
+            f"Cannot alias incomplete physical export {physical_variant}: "
+            f"{physical_directory}"
+        )
+    directory.mkdir(parents=True, exist_ok=True)
+    relative_physical = Path(
+        os.path.relpath(physical_directory.resolve(), directory.resolve())
+    ).as_posix()
+    relative_manifest = Path(
+        os.path.relpath(physical_manifest.resolve(), directory.resolve())
+    ).as_posix()
+    manifest = {
+        "schema_version": 1,
+        "status": "PASS",
+        "export_kind": "role_alias",
+        "variant": variant,
+        "export_strategy": export_strategy,
+        "winner": winner,
+        "physical_variant": physical_variant,
+        "physical_winner": physical_winner,
+        "physical_export": relative_physical,
+        "physical_manifest": relative_manifest,
+        "physical_manifest_sha256": sha256(physical_manifest),
+    }
+    path = directory / "heretic_moe_export.json"
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def expected_export_roles(
+    export_root: Path,
+    winners: dict[str, Any],
+) -> dict[str, dict[str, str]]:
+    """Describe physical model payloads and weight-free role aliases."""
+
+    balanced_path = export_root / "balanced"
+    max_path = export_root / "max"
+    if winners_share_physical_export(winners):
+        return {
+            "Balanced": {
+                "kind": "physical_export",
+                "path": str(balanced_path),
+            },
+            "Max": {
+                "kind": "role_alias",
+                "path": str(max_path),
+                "physical_variant": "Balanced",
+                "physical_path": str(balanced_path),
+            },
+        }
+    return {
+        "Balanced": {"kind": "physical_export", "path": str(balanced_path)},
+        "Max": {"kind": "physical_export", "path": str(max_path)},
+    }
+
+
+def expected_collapsed_export_policy(
+    export_root: Path,
+    winners: dict[str, Any],
+    recheck_contract: Path,
+) -> dict[str, Any] | None:
+    """Bind a storage-only role collapse to immutable recheck evidence."""
+
+    if not winners_share_physical_export(winners):
+        return None
+    balanced_manifest = export_root / "balanced" / "heretic_moe_export.json"
+    max_manifest = export_root / "max" / "heretic_moe_export.json"
+    if not (
+        balanced_manifest.is_file()
+        and max_manifest.is_file()
+        and recheck_contract.is_file()
+    ):
+        return None
+    return {
+        "schema_version": 1,
+        "status": "PASS",
+        "policy": "collapsed_roles_single_physical_export",
+        "immutable_recheck_contract": {
+            "path": str(recheck_contract),
+            "sha256": sha256(recheck_contract),
+        },
+        "winners": winners,
+        "physical_export": {
+            "variant": "Balanced",
+            "path": str(export_root / "balanced"),
+            "manifest": str(balanced_manifest),
+            "manifest_sha256": sha256(balanced_manifest),
+        },
+        "role_alias": {
+            "variant": "Max",
+            "path": str(export_root / "max"),
+            "manifest": str(max_manifest),
+            "manifest_sha256": sha256(max_manifest),
+            "physical_variant": "Balanced",
+        },
+    }
+
+
+def write_collapsed_export_policy(
+    export_root: Path,
+    winners: dict[str, Any],
+    recheck_contract: Path,
+) -> Path:
+    """Write or verify the separate storage correction for collapsed roles."""
+
+    expected = expected_collapsed_export_policy(
+        export_root,
+        winners,
+        recheck_contract,
+    )
+    if expected is None:
+        raise RuntimeError("Collapsed export policy has incomplete bound artifacts")
+    path = export_root / "export_policy.json"
+    current = load_json_object(path)
+    if current is not None:
+        if current != expected:
+            raise RuntimeError(f"Export policy changed unexpectedly: {path}")
+        return path
+    if path.exists():
+        raise FileExistsError(f"Refusing to overwrite invalid export policy: {path}")
+    write_text_atomic(path, json.dumps(expected, indent=2, sort_keys=True) + "\n")
+    return path
+
+
+def versioned_directory(base: Path, version: int) -> Path:
+    if version == 1:
+        return base
+    return base.with_name(f"{base.name}_v{version}")
+
+
+def versioned_file(base: Path, version: int) -> Path:
+    if version == 1:
+        return base
+    return base.with_name(f"{base.stem}_v{version}{base.suffix}")
+
+
+def load_finalization_overrides_contract(
+    root: Path,
+) -> tuple[dict[str, Any], dict[str, str] | None]:
+    """Load and fingerprint the run-local winner-policy override, if present."""
+
+    path = root / "finalization_overrides.json"
+    if not path.is_file():
+        return {}, None
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(record, dict) or record.get("schema_version") != 1:
+        raise RuntimeError(f"Unsupported finalization override schema: {path}")
+    allowed = {
+        "schema_version",
+        "balanced_srg_gate",
+        "baseline_srg",
+        "balanced_removal_fraction",
+        "provenance",
+    }
+    extras = sorted(set(record) - allowed)
+    if extras:
+        raise RuntimeError(f"Unknown finalization override keys: {extras}")
+    return record, {"path": str(path.resolve()), "sha256": sha256(path)}
+
+
+def build_finalization_contract(
+    args: argparse.Namespace,
+    *,
+    root: Path,
+    source_journal_sha256: str,
+    base_config_sha256: str,
+) -> dict[str, Any]:
+    """Build the complete immutable recheck and export reuse fingerprint."""
+
+    overrides, override_fingerprint = load_finalization_overrides_contract(root)
+    balanced_srg_gate = overrides.get(
+        "balanced_srg_gate", args.balanced_srg_gate
+    )
+    baseline_srg_override = overrides.get("baseline_srg")
+    removal_fraction = float(
+        overrides.get(
+            "balanced_removal_fraction",
+            args.balanced_removal_fraction,
+        )
+    )
+    return {
+        "schema_version": 1,
+        "source_journal_sha256": source_journal_sha256,
+        "base_config_sha256": base_config_sha256,
+        "top_n": args.finalist_top_n,
+        "selection_policy": args.finalist_selection_policy,
+        "ppl": {
+            "chunks": args.recheck_ppl_chunks,
+            "window": args.recheck_ppl_window,
+        },
+        "gates": {
+            "max_ppl_drift": args.max_ppl_drift,
+            "max_keyword_rate": args.max_keywords / args.keyword_total,
+            "max_keywords": args.max_keywords,
+            "keyword_total": args.keyword_total,
+            "balanced_srg_gate": (
+                None
+                if balanced_srg_gate is None
+                else float(balanced_srg_gate)
+            ),
+            "balanced_removal_fraction": removal_fraction,
+            "baseline_srg_override": (
+                None
+                if baseline_srg_override is None
+                else float(baseline_srg_override)
+            ),
+        },
+        "overrides": override_fingerprint,
+        "export": {
+            "root": str((args.export_root or root / "exports").resolve()),
+            "strategy": args.export_strategy,
+            "variants": ["Balanced", "Max"],
+            # This is the immutable recheck-era release contract. A later
+            # weight-storage correction for collapsed roles is recorded
+            # separately under the versioned export root, never by rewriting
+            # an already frozen finalist contract.
+            "distinct_winners": True,
+            "heretic_executable": str(args.heretic_path),
+            "heretic_executable_sha256": args.heretic_sha256,
+        },
+    }
+
+
+def finalization_manifest_matches(
+    manifest: dict[str, Any],
+    contract: dict[str, Any],
+) -> bool:
+    try:
+        top_n = int(manifest.get("top_n", -1))
+        manifest_gates = manifest["gates"]
+        expected_gates = contract["gates"]
+        if not isinstance(manifest_gates, dict):
+            return False
+        gate_keys = (
+            "max_ppl_drift",
+            "max_keyword_rate",
+            "max_keywords",
+            "keyword_total",
+            "balanced_srg_gate",
+            "balanced_removal_fraction",
+        )
+        gates_match = all(
+            manifest_gates.get(key) == expected_gates[key] for key in gate_keys
+        )
+        baseline_override = expected_gates["baseline_srg_override"]
+        if baseline_override is not None:
+            gates_match = (
+                gates_match
+                and manifest_gates.get("baseline_srg") == baseline_override
+            )
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (
+        manifest.get("version") == 1
+        and manifest.get("status") == "prepared"
+        and manifest.get("source_journal_sha256")
+        == contract["source_journal_sha256"]
+        and manifest.get("base_config_sha256")
+        == contract["base_config_sha256"]
+        and top_n == contract["top_n"]
+        and manifest.get("selection_policy") == contract["selection_policy"]
+        and manifest.get("ppl") == contract["ppl"]
+        and manifest.get("finalization_overrides") == contract["overrides"]
+        and gates_match
+    )
+
+
+def prepared_finalization_artifacts_match(manifest: dict[str, Any]) -> bool:
+    try:
+        config = Path(str(manifest["config"]))
+        journal = Path(str(manifest["journal"]))
+        return (
+            config.is_file()
+            and sha256(config) == manifest["config_sha256"]
+            and journal.is_file()
+        )
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+
+
+def finalization_contract_record(
+    contract: dict[str, Any],
+    manifest_path: Path,
+) -> dict[str, Any]:
+    """Bind the controller contract to the complete prepared selection manifest."""
+
+    return {
+        "schema_version": 1,
+        "contract": contract,
+        "prepared_manifest_sha256": sha256(manifest_path),
+    }
+
+
+def path_is_occupied(path: Path) -> bool:
+    if not path.exists():
+        return False
+    if not path.is_dir():
+        return True
+    return any(path.iterdir())
+
+
+def load_json_object(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def load_valid_winners_report(path: Path) -> dict[str, Any] | None:
+    report = load_json_object(path)
+    if report is None or report.get("status") != "PASS":
+        return None
+    contract = report.get("contract")
+    if contract not in {
+        "two_distinct_extremes_from_one_high_fidelity_top_n",
+        "pareto_extremes_or_single_winner",
+    }:
+        return None
+    winners = report.get("winners")
+    if not isinstance(winners, dict) or set(winners) != {"Balanced", "Max"}:
+        return None
+    if not all(isinstance(winners[variant], dict) for variant in winners):
+        return None
+    try:
+        balanced_number = int(winners["Balanced"]["trial_number"])
+        max_number = int(winners["Max"]["trial_number"])
+        balanced_source = int(winners["Balanced"]["source_trial_index"])
+        max_source = int(winners["Max"]["source_trial_index"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    distinct = balanced_number != max_number and balanced_source != max_source
+    if contract == "two_distinct_extremes_from_one_high_fidelity_top_n":
+        if not distinct:
+            return None
+    elif (
+        report.get("winners_distinct") is not distinct
+        or not isinstance(report.get("pareto_source_trial_indices"), list)
+        or balanced_source not in report["pareto_source_trial_indices"]
+        or max_source not in report["pareto_source_trial_indices"]
+        or report.get("expansion_recommended") is not (not distinct)
+    ):
+        return None
+    return report
+
+
+def finalization_outputs_resumable(
+    args: argparse.Namespace,
+    *,
+    version: int,
+    finalist_dir: Path,
+    export_root: Path,
+    workflow_path: Path,
+    source_journal_sha256: str,
+) -> tuple[bool, str]:
+    """Reject partial or mismatched immutable outputs before choosing a version."""
+
+    if export_root.exists() and not export_root.is_dir():
+        return False, "export_root_not_directory"
+    if export_root.is_dir():
+        unexpected = sorted(
+            path.name
+            for path in export_root.iterdir()
+            if path.name not in {"balanced", "max", "export_policy.json"}
+        )
+        if unexpected:
+            return False, f"unexpected_export_entries:{','.join(unexpected[:8])}"
+
+    winners_path = finalist_dir / "winners.json"
+    winners_report = load_valid_winners_report(winners_path)
+    if winners_path.exists() and winners_report is None:
+        return False, "invalid_winners_report"
+    winners = (
+        winners_report.get("winners")
+        if winners_report is not None
+        else None
+    )
+    collapsed_roles = (
+        isinstance(winners, dict) and winners_share_physical_export(winners)
+    )
+    complete_variants: set[str] = set()
+    for variant in ("Balanced", "Max"):
+        output = export_root / variant.lower()
+        if not output.exists():
+            continue
+        if not output.is_dir():
+            return False, f"export_not_directory:{variant}"
+        if not any(output.iterdir()):
+            continue
+        if not isinstance(winners, dict) or not isinstance(
+            winners.get(variant), dict
+        ):
+            return False, f"export_without_winner_contract:{variant}"
+        if collapsed_roles and variant == "Max":
+            valid_export = export_alias_is_complete(
+                output,
+                variant=variant,
+                winner=winners[variant],
+                export_strategy=args.export_strategy,
+                physical_directory=export_root / "balanced",
+                physical_variant="Balanced",
+                physical_winner=winners["Balanced"],
+            )
+        else:
+            valid_export = export_is_complete(
+                output,
+                variant=variant,
+                winner=winners[variant],
+                export_strategy=args.export_strategy,
+            )
+        if not valid_export:
+            return False, f"incomplete_or_mismatched_export:{variant}"
+        complete_variants.add(variant)
+
+    export_policy_path = export_root / "export_policy.json"
+    expected_policy = (
+        expected_collapsed_export_policy(
+            export_root,
+            winners,
+            finalist_dir / "finalization_contract.json",
+        )
+        if isinstance(winners, dict) and collapsed_roles
+        else None
+    )
+    recorded_policy = load_json_object(export_policy_path)
+    if collapsed_roles:
+        if export_policy_path.exists() and recorded_policy != expected_policy:
+            return False, "collapsed_export_policy_mismatch"
+    elif export_policy_path.exists():
+        return False, "unexpected_collapsed_export_policy"
+
+    if not workflow_path.exists():
+        return True, "resumable"
+    if collapsed_roles and (
+        expected_policy is None or recorded_policy != expected_policy
+    ):
+        return False, "workflow_without_collapsed_export_policy"
+    workflow = load_json_object(workflow_path)
+    if workflow is None:
+        return False, "invalid_workflow_report"
+    if complete_variants != {"Balanced", "Max"} or winners_report is None:
+        return False, "workflow_without_complete_exports"
+    expected_exports = {
+        variant: str(export_root / variant.lower())
+        for variant in ("Balanced", "Max")
+    }
+    expected_policy_reference = (
+        {
+            "path": str(export_policy_path),
+            "sha256": sha256(export_policy_path),
+        }
+        if collapsed_roles and export_policy_path.is_file()
+        else None
+    )
+    if (
+        workflow.get("schema_version") != 1
+        or workflow.get("status") != "PASS"
+        or workflow.get("finalization_version") != version
+        or workflow.get("search_journal_sha256") != source_journal_sha256
+        or workflow.get("finalist_report") != str(winners_path)
+        or workflow.get("finalist_report_sha256") != sha256(winners_path)
+        or workflow.get("finalization_contract")
+        != str(finalist_dir / "finalization_contract.json")
+        or workflow.get("finalization_contract_sha256")
+        != sha256(finalist_dir / "finalization_contract.json")
+        or workflow.get("exports") != expected_exports
+        or (
+            collapsed_roles
+            and workflow.get("export_roles")
+            != expected_export_roles(export_root, winners_report["winners"])
+        )
+        or workflow.get("export_policy") != expected_policy_reference
+    ):
+        return False, "workflow_contract_mismatch"
+    return True, "resumable_complete"
+
+
+def select_finalization_paths(
+    args: argparse.Namespace,
+    *,
+    root: Path,
+    source_journal_sha256: str,
+    base_config: Path,
+) -> tuple[int, Path, Path, Path, dict[str, Any]]:
+    """Return a resumable matching version without mutating older results."""
+
+    base_export = (args.export_root or root / "exports").resolve()
+    base_config_sha256 = sha256(base_config)
+    expected_contract = build_finalization_contract(
+        args,
+        root=root,
+        source_journal_sha256=source_journal_sha256,
+        base_config_sha256=base_config_sha256,
+    )
+    version = 1
+    while True:
+        finalist_dir = versioned_directory(root / "finalist_recheck", version)
+        export_root = versioned_directory(base_export, version)
+        workflow_path = versioned_file(root / "heretic_moe_workflow.json", version)
+        manifest_path = finalist_dir / "manifest.json"
+        if manifest_path.is_file():
+            manifest = load_json_object(manifest_path)
+            recorded_contract = load_json_object(
+                finalist_dir / "finalization_contract.json"
+            )
+            expected_record = (
+                finalization_contract_record(expected_contract, manifest_path)
+                if manifest is not None
+                else None
+            )
+            contract_matches = (
+                manifest is not None
+                and recorded_contract == expected_record
+                and finalization_manifest_matches(manifest, expected_contract)
+                and prepared_finalization_artifacts_match(manifest)
+            )
+            if contract_matches:
+                resumable, reason = finalization_outputs_resumable(
+                    args,
+                    version=version,
+                    finalist_dir=finalist_dir,
+                    export_root=export_root,
+                    workflow_path=workflow_path,
+                    source_journal_sha256=source_journal_sha256,
+                )
+                if resumable:
+                    return (
+                        version,
+                        finalist_dir,
+                        export_root,
+                        workflow_path,
+                        expected_contract,
+                    )
+            else:
+                reason = "source_or_contract_mismatch"
+            print(
+                json.dumps(
+                    {
+                        "event": "immutable_finalization_skipped",
+                        "version": version,
+                        "path": str(finalist_dir),
+                        "reason": reason,
+                        "recorded_source_sha256": (
+                            manifest.get("source_journal_sha256")
+                            if manifest is not None
+                            else None
+                        ),
+                        "current_source_sha256": source_journal_sha256,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            version += 1
+            continue
+        if path_is_occupied(finalist_dir):
+            print(
+                json.dumps(
+                    {
+                        "event": "immutable_finalization_skipped",
+                        "version": version,
+                        "path": str(finalist_dir),
+                        "reason": "nonempty_without_manifest",
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            version += 1
+            continue
+        if workflow_path.exists():
+            print(
+                json.dumps(
+                    {
+                        "event": "immutable_workflow_skipped",
+                        "version": version,
+                        "path": str(workflow_path),
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            version += 1
+            continue
+        if path_is_occupied(export_root):
+            print(
+                json.dumps(
+                    {
+                        "event": "immutable_export_skipped",
+                        "version": version,
+                        "path": str(export_root),
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            version += 1
+            continue
+        return (
+            version,
+            finalist_dir,
+            export_root,
+            workflow_path,
+            expected_contract,
+        )
+
+
 def finalize_and_export(
     args: argparse.Namespace,
     *,
@@ -1073,10 +2092,10 @@ def finalize_and_export(
     executable: Path,
 ) -> None:
     finalist_script = Path(__file__).with_name("finalist_recheck.py")
-    finalist_dir = root / "finalist_recheck"
-    export_root = (args.export_root or root / "exports").resolve()
     devices = assigned_devices(args)
     if args.dry_run:
+        finalist_dir = root / "finalist_recheck"
+        export_root = (args.export_root or root / "exports").resolve()
         print(
             json.dumps(
                 {
@@ -1097,6 +2116,36 @@ def finalize_and_export(
             flush=True,
         )
         return
+
+    source_journal_sha256 = sha256(shared_stage.journal)
+    (
+        finalization_version,
+        finalist_dir,
+        export_root,
+        workflow_path,
+        finalization_contract,
+    ) = select_finalization_paths(
+        args,
+        root=root,
+        source_journal_sha256=source_journal_sha256,
+        base_config=base_config,
+    )
+    args.finalization_version = finalization_version
+    args.resolved_finalist_dir = str(finalist_dir)
+    args.resolved_export_root = str(export_root)
+    print(
+        json.dumps(
+            {
+                "event": "finalization_version_selected",
+                "version": finalization_version,
+                "finalist_dir": str(finalist_dir),
+                "export_root": str(export_root),
+                "source_journal_sha256": source_journal_sha256,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
 
     finalist_manifest = finalist_dir / "manifest.json"
     if not finalist_manifest.is_file():
@@ -1143,35 +2192,99 @@ def finalize_and_export(
             flush=True,
         )
 
-    recheck_command = [
-        sys.executable,
-        str(finalist_script),
-        "run",
-        "--output-dir",
-        str(finalist_dir),
-        "--heretic",
-        str(executable),
-        "--devices",
-        *devices,
-    ]
-    run_checked(recheck_command, cwd=Path(__file__).parents[2], event="finalist_recheck")
+    prepared_manifest = load_json_object(finalist_manifest)
+    if prepared_manifest is None or not finalization_manifest_matches(
+        prepared_manifest,
+        finalization_contract,
+    ) or not prepared_finalization_artifacts_match(prepared_manifest):
+        raise RuntimeError(
+            f"Prepared finalist manifest violates the selected contract: "
+            f"{finalist_manifest}"
+        )
+    contract_path = finalist_dir / "finalization_contract.json"
+    recorded_contract = load_json_object(contract_path)
+    expected_contract_record = finalization_contract_record(
+        finalization_contract,
+        finalist_manifest,
+    )
+    if recorded_contract is None:
+        write_text_atomic(
+            contract_path,
+            json.dumps(expected_contract_record, indent=2, sort_keys=True) + "\n",
+        )
+    elif recorded_contract != expected_contract_record:
+        raise RuntimeError(
+            f"Finalization contract changed unexpectedly: {contract_path}"
+        )
+    args.finalization_contract = str(contract_path)
+    args.finalization_contract_sha256 = sha256(contract_path)
+
+    if workflow_path.is_file():
+        print(
+            json.dumps(
+                {
+                    "event": "workflow_resume",
+                    "version": finalization_version,
+                    "report": str(workflow_path),
+                    "report_sha256": sha256(workflow_path),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
 
     winners_path = finalist_dir / "winners.json"
-    winners_report = json.loads(winners_path.read_text(encoding="utf-8"))
+    winners_report = load_valid_winners_report(winners_path)
+    if winners_report is None:
+        recheck_command = [
+            sys.executable,
+            str(finalist_script),
+            "run",
+            "--output-dir",
+            str(finalist_dir),
+            "--heretic",
+            str(executable),
+            "--devices",
+            *devices,
+        ]
+        run_checked(
+            recheck_command,
+            cwd=Path(__file__).parents[2],
+            event="finalist_recheck",
+        )
+        winners_report = load_valid_winners_report(winners_path)
+        if winners_report is None:
+            raise RuntimeError(f"Invalid finalist winners report: {winners_path}")
+    else:
+        print(
+            json.dumps(
+                {"event": "finalist_recheck_resume", "report": str(winners_path)},
+                sort_keys=True,
+            ),
+            flush=True,
+        )
     winners = winners_report.get("winners", {})
-    if set(winners) != {"Balanced", "Max"}:
-        raise RuntimeError(f"Expected Balanced and Max winners, found {sorted(winners)}")
-    if winners["Balanced"]["trial_number"] == winners["Max"]["trial_number"]:
-        raise RuntimeError("Balanced and Max must be distinct rechecked trials")
 
     export_root.mkdir(parents=True, exist_ok=True)
     export_jobs: list[
         tuple[str, str, Path, dict[str, Any], subprocess.Popen[bytes]]
     ] = []
-    export_assignments = (("Balanced", devices[0]), ("Max", devices[-1]))
+    collapsed_roles = winners_share_physical_export(winners)
+    export_assignments = (
+        (("Balanced", devices[0]),)
+        if collapsed_roles
+        else (("Balanced", devices[0]), ("Max", devices[-1]))
+    )
     for variant, device in export_assignments:
         output = export_root / variant.lower()
-        if export_is_complete(output):
+        winner = winners[variant]
+        if export_is_complete(
+            output,
+            variant=variant,
+            winner=winner,
+            export_strategy=args.export_strategy,
+        ):
             print(
                 json.dumps(
                     {"event": "export_resume", "variant": variant, "path": str(output)},
@@ -1185,7 +2298,6 @@ def finalize_and_export(
                 f"Refusing to overwrite incomplete {variant} export: {output}"
             )
         output.mkdir(parents=True, exist_ok=True)
-        winner = winners[variant]
         command = [
             str(executable),
             "--checkpoint-action",
@@ -1221,8 +2333,8 @@ def finalize_and_export(
         )
         export_jobs.append((variant, str(device), output, winner, process))
 
-        # Two distinct GPUs export concurrently. With one GPU, finish each
-        # variant before loading the next full model to avoid deterministic OOM.
+        # Distinct physical winners export concurrently on distinct GPUs. With
+        # one GPU, finish each payload before loading the next full model.
         if len(devices) == 1:
             return_code = process.wait()
             if return_code != 0:
@@ -1278,22 +2390,108 @@ def finalize_and_export(
     if export_failures:
         raise RuntimeError("Export failure(s): " + "; ".join(export_failures))
 
+    if collapsed_roles:
+        alias_variant = "Max"
+        alias_output = export_root / alias_variant.lower()
+        alias_winner = winners[alias_variant]
+        physical_output = export_root / "balanced"
+        if export_alias_is_complete(
+            alias_output,
+            variant=alias_variant,
+            winner=alias_winner,
+            export_strategy=args.export_strategy,
+            physical_directory=physical_output,
+            physical_variant="Balanced",
+            physical_winner=winners["Balanced"],
+        ):
+            print(
+                json.dumps(
+                    {
+                        "event": "export_role_alias_resume",
+                        "variant": alias_variant,
+                        "path": str(alias_output),
+                        "physical_variant": "Balanced",
+                        "physical_path": str(physical_output),
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+        else:
+            if alias_output.exists() and any(alias_output.iterdir()):
+                raise FileExistsError(
+                    f"Refusing to overwrite incomplete {alias_variant} role alias: "
+                    f"{alias_output}"
+                )
+            alias_manifest = write_export_alias_manifest(
+                alias_output,
+                variant=alias_variant,
+                winner=alias_winner,
+                export_strategy=args.export_strategy,
+                physical_directory=physical_output,
+                physical_variant="Balanced",
+                physical_winner=winners["Balanced"],
+            )
+            print(
+                json.dumps(
+                    {
+                        "event": "export_role_alias_complete",
+                        "variant": alias_variant,
+                        "path": str(alias_output),
+                        "manifest": str(alias_manifest),
+                        "manifest_sha256": sha256(alias_manifest),
+                        "physical_variant": "Balanced",
+                        "physical_path": str(physical_output),
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+
+    export_policy_reference = None
+    if collapsed_roles:
+        export_policy_path = write_collapsed_export_policy(
+            export_root,
+            winners,
+            contract_path,
+        )
+        export_policy_reference = {
+            "path": str(export_policy_path),
+            "sha256": sha256(export_policy_path),
+        }
+        print(
+            json.dumps(
+                {
+                    "event": "collapsed_export_policy_complete",
+                    **export_policy_reference,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
     workflow_report = {
         "schema_version": 1,
         "status": "PASS",
+        "finalization_version": finalization_version,
         "search_journal": str(shared_stage.journal),
         "search_journal_sha256": sha256(shared_stage.journal),
         "finalist_report": str(winners_path),
         "finalist_report_sha256": sha256(winners_path),
+        "finalization_contract": str(contract_path),
+        "finalization_contract_sha256": sha256(contract_path),
         "exports": {
             variant: str(export_root / variant.lower())
             for variant in ("Balanced", "Max")
         },
+        "export_roles": expected_export_roles(export_root, winners),
+        "export_policy": export_policy_reference,
     }
-    workflow_path = root / "heretic_moe_workflow.json"
-    workflow_path.write_text(
+    if workflow_path.exists():
+        raise FileExistsError(f"Refusing to overwrite workflow report: {workflow_path}")
+    write_text_atomic(
+        workflow_path,
         json.dumps(workflow_report, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
     print(
         json.dumps(
@@ -1518,12 +2716,23 @@ def main() -> None:
     else:
         completed_trials, waiting_trials = journal_trial_counts(shared_stage.journal)
 
-    existing_queue_path = root / f"trial-work-queue-{args.target_trials}.sqlite3"
-    resuming_dynamic_queue = (
+    selected_queue: TrialWorkQueue | None = None
+    selected_queue_path = queue_path_for_version(root, args.target_trials, 1)
+    queue_rejections: list[dict[str, Any]] = []
+    if (
         args.dynamic_worker_queue
         and not args.dry_run
-        and existing_queue_path.is_file()
-    )
+    ):
+        selected_queue, candidate_path, queue_rejections = select_verified_queue(
+            root,
+            shared_stage.journal,
+            target_trial_count=args.target_trials,
+            tpe_concurrency=shared_worker_count,
+        )
+        assert candidate_path is not None
+        selected_queue_path = candidate_path
+    args.worker_queue_rejections = queue_rejections
+    resuming_dynamic_queue = selected_queue is not None
     if completed_trials > args.target_trials and not resuming_dynamic_queue:
         raise ValueError(
             f"Shared study already has {completed_trials} trials, above target "
@@ -1535,23 +2744,48 @@ def main() -> None:
     remaining_trials = max(0, args.target_trials - completed_trials) + (
         0 if args.dry_run else waiting_trials
     )
-    queue: TrialWorkQueue | None = None
+    queue: TrialWorkQueue | None = selected_queue
     queue_expected_tasks = remaining_trials
     if args.dynamic_worker_queue and (remaining_trials or resuming_dynamic_queue):
         first_task_id = completed_trials - (0 if args.dry_run else waiting_trials)
-        queue_path = existing_queue_path
+        queue_path = selected_queue_path
         args.worker_queue_path = str(queue_path.resolve())
         if not args.dry_run:
-            queue = TrialWorkQueue(queue_path)
             if resuming_dynamic_queue:
+                assert queue is not None
                 contract = queue.contract()
-                if contract.last_task_id_exclusive != args.target_trials:
+                if (
+                    contract.last_task_id_exclusive != args.target_trials
+                    or contract.target_trial_count != args.target_trials
+                    or contract.tpe_concurrency != shared_worker_count
+                ):
                     raise RuntimeError(
-                        f"Queue target mismatch: {contract.last_task_id_exclusive} "
-                        f"!= {args.target_trials}"
+                        "Verified queue contract changed unexpectedly: "
+                        f"{contract}"
                     )
                 queue_expected_tasks = contract.task_count
             else:
+                running = (
+                    [
+                        trial.number
+                        for trial in load_journal_trials(shared_stage.journal)
+                        if trial.state == optuna.trial.TrialState.RUNNING
+                    ]
+                    if shared_stage.journal.is_file()
+                    else []
+                )
+                if running:
+                    raise RuntimeError(
+                        "Refusing to allocate a replacement queue while the journal "
+                        f"contains RUNNING trials: {running[:8]}"
+                    )
+                if shared_stage.journal.is_file():
+                    journal_base_size_bytes = shared_stage.journal.stat().st_size
+                    journal_base_sha256 = sha256(shared_stage.journal)
+                else:
+                    journal_base_size_bytes = 0
+                    journal_base_sha256 = hashlib.sha256().hexdigest()
+                queue = TrialWorkQueue(queue_path)
                 queue.initialize(
                     first_task_id=first_task_id,
                     task_count=remaining_trials,
@@ -1560,6 +2794,11 @@ def main() -> None:
                         if not args.continue_shared_only and first_task_id == 0
                         else 0
                     ),
+                    target_trial_count=args.target_trials,
+                    tpe_concurrency=shared_worker_count,
+                    journal_base_trial_count=completed_trials,
+                    journal_base_size_bytes=journal_base_size_bytes,
+                    journal_base_sha256=journal_base_sha256,
                 )
                 queue_expected_tasks = remaining_trials
             prelaunch_recoveries: list[dict[str, Any]] = []
@@ -1681,6 +2920,17 @@ def main() -> None:
                 or queue_stats.complete != queue_expected_tasks
             ):
                 raise RuntimeError(f"Dynamic worker queue incomplete: {queue_stats}")
+            queue_valid, queue_reason = verify_queue_against_journal(
+                queue,
+                shared_stage.journal,
+                target_trial_count=args.target_trials,
+                tpe_concurrency=shared_worker_count,
+            )
+            if not queue_valid:
+                raise RuntimeError(
+                    "Completed dynamic queue failed journal verification: "
+                    f"{queue_reason}"
+                )
         final_trial_count = journal_trial_count(shared_stage.journal)
         if final_trial_count < args.target_trials:
             raise RuntimeError(

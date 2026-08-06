@@ -177,17 +177,33 @@ def executable_path(override: Path | None) -> Path:
     if override is not None:
         result = override.resolve()
     else:
-        # The public ``hereticMOE`` executable dispatches back into this
-        # supervisor. GPU children must use the worker entry point directly;
-        # selecting the public executable here recursively re-enters the
-        # dispatcher and can corrupt internal worker arguments.
-        discovered = shutil.which("heretic")
+        # Child processes receive HERETIC_MOE_INTERNAL=1 from the controller,
+        # so the same public launcher safely dispatches them to worker_main.
+        # Keeping one executable also makes a clean install independent of the
+        # legacy upstream ``heretic`` console entry point.
+        launcher_name = "hereticMOE.exe" if os.name == "nt" else "hereticMOE"
+        candidates = (
+            Path(sys.argv[0]),
+            Path(sys.prefix)
+            / ("Scripts" if os.name == "nt" else "bin")
+            / launcher_name,
+            Path(sys.executable).resolve().parent / launcher_name,
+        )
+        discovered = next(
+            (
+                str(candidate.resolve())
+                for candidate in candidates
+                if candidate.is_file()
+                and candidate.name.lower() == launcher_name.lower()
+            ),
+            None,
+        )
         if not discovered:
-            candidate = Path(sys.executable).resolve().parent / "heretic.exe"
-            discovered = str(candidate) if candidate.is_file() else None
+            discovered = shutil.which("hereticMOE")
         if not discovered:
             raise FileNotFoundError(
-                "Cannot locate heretic worker executable; provide --worker-executable"
+                "Cannot locate hereticMOE worker launcher; provide "
+                "--worker-executable"
             )
         result = Path(discovered).resolve()
     if not result.is_file():
@@ -208,8 +224,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-workers", type=int)
     parser.add_argument("--min-free-fraction", type=float, default=0.70)
     parser.add_argument("--min-free-gib", type=float, default=4.0)
-    parser.add_argument("--exploration-trials", type=int, default=120)
-    parser.add_argument("--n-trials", type=int, default=600)
+    parser.add_argument(
+        "--exploration-trials",
+        type=int,
+        default=120,
+        help="Alternating Random/Sobol queue prefix (default: 120).",
+    )
+    parser.add_argument(
+        "--n-trials",
+        type=int,
+        default=600,
+        help=(
+            "Exact work-permit target (default: 600); increase it to extend a "
+            "compatible shared journal."
+        ),
+    )
     parser.add_argument("--continue-shared-only", action="store_true")
     parser.add_argument(
         "--finalize", action=argparse.BooleanOptionalAction, default=True

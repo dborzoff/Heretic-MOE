@@ -404,8 +404,28 @@ def finalize(output: Path) -> dict[str, Any]:
     if not improved:
         raise RuntimeError("No rechecked finalist improves SRG over the original baseline")
 
+    def dominates(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        left_values = (
+            float(left["srg"]),
+            float(left["ppl_drift"]),
+            float(left["keyword_rate"]),
+        )
+        right_values = (
+            float(right["srg"]),
+            float(right["ppl_drift"]),
+            float(right["keyword_rate"]),
+        )
+        return all(a <= b for a, b in zip(left_values, right_values)) and any(
+            a < b for a, b in zip(left_values, right_values)
+        )
+
+    pareto = [
+        row
+        for row in improved
+        if not any(other is not row and dominates(other, row) for other in improved)
+    ]
     max_removal = min(
-        improved,
+        pareto,
         key=lambda row: (
             row["srg"],
             float("inf") if row["r_side"] is None else row["r_side"],
@@ -415,8 +435,8 @@ def finalize(output: Path) -> dict[str, Any]:
     )
     balanced_pool = [
         row
-        for row in improved
-        if row is not max_removal and row["srg"] <= balanced_gate
+        for row in pareto
+        if row["srg"] <= balanced_gate
     ]
     if not balanced_pool:
         raise RuntimeError("No rechecked finalist passes the Balanced refusal gate")
@@ -424,11 +444,33 @@ def finalize(output: Path) -> dict[str, Any]:
         balanced_pool,
         key=lambda row: (row["ppl_drift"], row["keyword_rate"], row["srg"]),
     )
+    winners_distinct = (
+        int(balanced["source_trial_index"]) != int(max_removal["source_trial_index"])
+    )
+    distinct_alternatives = [
+        row
+        for row in improved
+        if int(row["source_trial_index"]) != int(max_removal["source_trial_index"])
+    ]
+    alternative = (
+        min(
+            distinct_alternatives,
+            key=lambda row: (row["ppl_drift"], row["keyword_rate"], row["srg"]),
+        )
+        if distinct_alternatives
+        else None
+    )
     report = {
         "status": "PASS",
-        "contract": "two_distinct_extremes_from_one_high_fidelity_top_n",
+        "contract": "pareto_extremes_or_single_winner",
         "measured": sorted(measured.values(), key=lambda row: row["source_trial_index"]),
         "winners": {"Balanced": balanced, "Max": max_removal},
+        "winners_distinct": winners_distinct,
+        "pareto_source_trial_indices": sorted(
+            int(row["source_trial_index"]) for row in pareto
+        ),
+        "expansion_recommended": not winners_distinct,
+        "distinct_backup_not_promoted": alternative,
         "gates": gates,
     }
     result = output / "winners.json"
@@ -476,7 +518,12 @@ def run(args: argparse.Namespace) -> None:
             "--worker-trial-budget",
             str(budget),
             "--n-trials",
-            str(manifest["top_n"]),
+            # All finalists are already enqueued as WAITING trials. Heretic's
+            # bounded-worker stop callback counts those reserved rows toward
+            # the global target, so using top_n here stops each worker after
+            # its first completion. Keep the ceiling above the existing rows;
+            # the per-worker budget still bounds the exact amount of work.
+            str(int(manifest["top_n"]) + waiting),
             "--n-startup-trials",
             "0",
             "--checkpoint-action",

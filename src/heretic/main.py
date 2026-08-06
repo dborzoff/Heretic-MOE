@@ -412,6 +412,8 @@ def run():
     except IndexError:
         existing_study = None
 
+    resumed_existing_study = False
+
     if (
         existing_study is not None
         and settings.evaluate_model is None
@@ -486,6 +488,7 @@ def run():
             return
 
         if action == "continue":
+            resumed_existing_study = True
             _cli = settings
             settings = Settings.model_validate_json(
                 existing_study.user_attrs["settings"]
@@ -503,6 +506,8 @@ def run():
                 "export_strategy",
                 "parallel_workers",
                 "worker_trial_budget",
+                "worker_queue_path",
+                "worker_id",
                 "seed",
                 "save_trial_responses",
                 "trial_responses_file",
@@ -680,9 +685,32 @@ def run():
         else:
             print("* None found")
 
-    evaluator = Evaluator(settings, model)
+    # A non-interactive save of an explicit completed trial does not need any
+    # scorer.  Historically it followed the normal optimization path, which
+    # reloaded every evaluation dataset and reran all baseline measurements
+    # before it could restore the already-measured trial.  Keep direction
+    # reconstruction below (the edited weights depend on it), but avoid the
+    # unrelated SRG/Keyword/PPL work.
+    direct_trial_save = (
+        resumed_existing_study
+        and settings.model_action == "save"
+        and settings.restore_trial_number is not None
+        and settings.evaluate_model is None
+        and not reproduction_mode
+    )
+
+    evaluator = None
+    if direct_trial_save:
+        print()
+        print(
+            "Direct trial export: skipping scorer initialization and baseline "
+            "evaluation."
+        )
+    else:
+        evaluator = Evaluator(settings, model)
 
     if settings.evaluate_model is not None:
+        assert evaluator is not None
         print()
         print(f"Loading model [bold]{settings.evaluate_model}[/]...")
         settings.model = settings.evaluate_model
@@ -697,7 +725,12 @@ def run():
             )
         return
 
-    if not reproduction_mode and not evaluator.get_objective_names():
+    if (
+        not direct_trial_save
+        and not reproduction_mode
+        and evaluator is not None
+        and not evaluator.get_objective_names()
+    ):
         print()
         print(
             "[red]No optimization objectives configured.[/] At least one scorer "
@@ -756,10 +789,83 @@ def run():
     # This should free up memory from the objects released with the del statements above.
     empty_cache()
 
+    if direct_trial_save:
+        study = optuna.load_study(study_name="heretic", storage=storage)
+        completed_trials = [
+            trial for trial in study.trials if trial.state == TrialState.COMPLETE
+        ]
+        selected_trial = next(
+            (
+                trial
+                for trial in completed_trials
+                if trial.number == settings.restore_trial_number
+            ),
+            None,
+        )
+        if selected_trial is None:
+            raise ValueError(
+                "restore_trial_number "
+                f"{settings.restore_trial_number} does not name a completed trial"
+            )
+
+        print()
+        print(
+            "Restoring model from trial "
+            f"[bold]{selected_trial.user_attrs['index']}[/]..."
+        )
+        print("* Parameters:")
+        for name, value in get_trial_parameters(selected_trial).items():
+            print(f"  * {name} = [bold]{value}[/]")
+
+        print("* Resetting model...")
+        model.reset_model()
+        print("* Abliterating...")
+        model.abliterate(
+            residual_directions,
+            selected_trial.user_attrs["direction_index"],
+            {
+                key: AbliterationParameters(**value)
+                for key, value in selected_trial.user_attrs["parameters"].items()
+            },
+        )
+
+        save_directory = settings.save_directory
+        if not save_directory:
+            raise ValueError(
+                "save_directory is required for a non-interactive direct trial export"
+            )
+        strategy = obtain_export_strategy(settings, model)
+        if strategy is None:
+            raise ValueError("export_strategy is required for a direct trial export")
+
+        if strategy == ExportStrategy.ADAPTER:
+            print("Saving LoRA adapter...")
+            model.model.save_pretrained(
+                save_directory,
+                max_shard_size=settings.max_shard_size,
+            )
+        else:
+            print("Saving merged model...")
+            merged_model = model.get_merged_model()
+            merged_model.save_pretrained(
+                save_directory,
+                max_shard_size=settings.max_shard_size,
+            )
+            del merged_model
+            empty_cache()
+            model.tokenizer.save_pretrained(save_directory)
+            if model.processor is not None:
+                model.processor.save_pretrained(save_directory)
+
+        print(f"Model saved to [bold]{save_directory}[/].")
+        return
+
     trial_index = 0
     start_index = 0
     worker_trial_count = 0
     start_time = time.perf_counter()
+
+    assert evaluator is not None
 
     def objective(trial: Trial) -> tuple[float, ...]:
         nonlocal trial_index, worker_trial_count
@@ -1433,7 +1539,12 @@ def run():
                                 model.tokenizer.save_pretrained(save_directory)
                                 if model.processor is not None:
                                     model.processor.save_pretrained(save_directory)
-                                reset_trial_model()
+                                # A scripted one-shot save exits immediately, so
+                                # reloading and re-abliterating the source model is
+                                # pure overhead. Interactive mode still needs the
+                                # restored trial for a possible next action.
+                                if settings.model_action is None:
+                                    reset_trial_model()
 
                             print(f"Model saved to [bold]{save_directory}[/].")
 
