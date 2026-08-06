@@ -243,9 +243,18 @@ class OptimizationRunner:
         objective: Objective,
         *,
         trial_budget: int,
+        target_trial_count: int | None = None,
         callbacks: Sequence[StudyCallback] = (),
     ) -> None:
-        """Run this worker's exact TPE budget against a shared study."""
+        """Run a bounded TPE worker against a shared global target.
+
+        ``trial_budget`` is a per-worker safety ceiling. When
+        ``target_trial_count`` is provided, every worker observes the shared
+        study and stops as soon as the global journal has reserved the exact
+        target number of trials. Counting RUNNING trials prevents a fast worker
+        from leaving a long single-GPU tail without allowing the study to grow
+        past the requested total.
+        """
 
         if trial_budget <= 0:
             raise ValueError("trial_budget must be positive")
@@ -254,8 +263,19 @@ class OptimizationRunner:
                 "Parallel worker budgets require the exploration prefix to be complete"
             )
         study.sampler = self.tpe_sampler
+
+        effective_callbacks = list(callbacks)
+        if target_trial_count is not None:
+            if target_trial_count <= 0:
+                raise ValueError("target_trial_count must be positive")
+
+            def stop_at_global_target(shared_study: Study, _: FrozenTrial) -> None:
+                if len(shared_study.trials) >= target_trial_count:
+                    shared_study.stop()
+
+            effective_callbacks.append(stop_at_global_target)
         study.optimize(
             objective,
             n_trials=trial_budget,
-            callbacks=list(callbacks),
+            callbacks=effective_callbacks,
         )

@@ -115,7 +115,7 @@ def parse_args() -> argparse.Namespace:
         "--search-only",
         dest="finalize",
         action="store_false",
-        help="Stop after the 600-trial journal without recheck or model export.",
+        help="Stop at --target-trials without recheck or model export.",
     )
     parser.add_argument("--finalist-top-n", type=int, default=5)
     parser.add_argument(
@@ -144,10 +144,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--balanced-removal-fraction",
         type=float,
-        default=0.8,
+        default=0.0,
         help=(
-            "Required fraction of the SRG improvement from the original baseline "
-            "to the best rechecked finalist when no absolute gate is supplied."
+            "Minimum fraction of the best SRG improvement required from the "
+            "Balanced finalist. The default 0 accepts any genuine improvement "
+            "over the original baseline."
         ),
     )
     parser.add_argument(
@@ -1058,8 +1059,8 @@ def main() -> None:
         raise ValueError("--max-ppl-drift cannot be negative")
     if args.max_keywords < 0 or args.keyword_total <= 0:
         raise ValueError("Keyword gate values are invalid")
-    if not 0 < args.balanced_removal_fraction <= 1:
-        raise ValueError("--balanced-removal-fraction must be in (0, 1]")
+    if not 0 <= args.balanced_removal_fraction <= 1:
+        raise ValueError("--balanced-removal-fraction must be in [0, 1]")
 
     source_base_config = args.base_config.resolve()
     executable_value = args.heretic or shutil.which("heretic")
@@ -1240,6 +1241,9 @@ def main() -> None:
     )
     if not args.dry_run:
         require_constraint_metadata(shared_stage)
+    # Split the exact remaining budget between workers. This guarantees that a
+    # concurrent shared study cannot reserve a trial beyond the requested global
+    # target; the target callback remains a second line of defence.
     worker_budgets = split_worker_budget(remaining_trials, shared_worker_count)
     if not args.dry_run:
         write_run_manifest(

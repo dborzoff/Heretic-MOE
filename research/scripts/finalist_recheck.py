@@ -183,8 +183,8 @@ def prepare(args: argparse.Namespace) -> None:
             "journals record it automatically; for an older journal provide "
             "--baseline-srg or a run-local finalization_overrides.json."
         )
-    if not 0 < float(removal_fraction) <= 1:
-        raise RuntimeError("balanced_removal_fraction must be in (0, 1]")
+    if not 0 <= float(removal_fraction) <= 1:
+        raise RuntimeError("balanced_removal_fraction must be in [0, 1]")
     settings_data = json.loads(source.user_attrs["settings"])
     constraint_names = list(source.user_attrs.get("constraint_names", []))
     selection_policy = SelectionPolicy(args.selection_policy)
@@ -373,13 +373,13 @@ def finalize(output: Path) -> dict[str, Any]:
     if not eligible:
         raise RuntimeError("No rechecked finalist passes the PPL and keyword gates")
 
+    baseline_value = gates.get("baseline_srg")
+    baseline_srg = None if baseline_value is None else float(baseline_value)
     balanced_gate = gates.get("balanced_srg_gate")
     if balanced_gate is None:
-        baseline_srg = gates.get("baseline_srg")
         if baseline_srg is None:
             raise RuntimeError("Relative Balanced selection has no SRG baseline")
         best_srg = min(float(row["srg"]) for row in eligible)
-        baseline_srg = float(baseline_srg)
         if best_srg >= baseline_srg:
             raise RuntimeError(
                 "No eligible finalist improves SRG over the original-model baseline"
@@ -396,24 +396,33 @@ def finalize(output: Path) -> dict[str, Any]:
         gates["balanced_gate_mode"] = "absolute"
         gates["resolved_balanced_srg_gate"] = balanced_gate
 
-    balanced_pool = [row for row in eligible if row["srg"] <= balanced_gate]
-    if not balanced_pool:
-        raise RuntimeError("No rechecked finalist passes the Balanced refusal gate")
-    balanced = min(
-        balanced_pool,
-        key=lambda row: (row["ppl_drift"], row["keyword_rate"], row["srg"]),
+    improved = (
+        eligible
+        if baseline_srg is None
+        else [row for row in eligible if row["srg"] < baseline_srg]
     )
-    removal_pool = [row for row in eligible if row is not balanced]
-    if not removal_pool:
-        raise RuntimeError("Need at least two distinct eligible finalists")
+    if not improved:
+        raise RuntimeError("No rechecked finalist improves SRG over the original baseline")
+
     max_removal = min(
-        removal_pool,
+        improved,
         key=lambda row: (
             row["srg"],
             float("inf") if row["r_side"] is None else row["r_side"],
             row["keyword_rate"],
             row["ppl_drift"],
         ),
+    )
+    balanced_pool = [
+        row
+        for row in improved
+        if row is not max_removal and row["srg"] <= balanced_gate
+    ]
+    if not balanced_pool:
+        raise RuntimeError("No rechecked finalist passes the Balanced refusal gate")
+    balanced = min(
+        balanced_pool,
+        key=lambda row: (row["ppl_drift"], row["keyword_rate"], row["srg"]),
     )
     report = {
         "status": "PASS",
@@ -535,7 +544,7 @@ def parse_args() -> argparse.Namespace:
     prepare_parser.add_argument("--balanced-srg-gate", type=float)
     prepare_parser.add_argument("--baseline-srg", type=float)
     prepare_parser.add_argument(
-        "--balanced-removal-fraction", type=float, default=0.8
+        "--balanced-removal-fraction", type=float, default=0.0
     )
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--output-dir", type=Path, required=True)

@@ -371,7 +371,7 @@ def check_environment(
 
         return ask_if_unset(
             settings.ignore_mismatches,
-            questionary.select(
+            lambda: questionary.select(
                 "How would you like to proceed?",
                 choices=[
                     Choice(

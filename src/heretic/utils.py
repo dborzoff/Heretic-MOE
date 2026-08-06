@@ -7,6 +7,7 @@ import os
 import platform
 import tempfile
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import version
@@ -117,12 +118,17 @@ def format_exception(error: Exception) -> str:
     return traceback.format_exc().strip()
 
 
-def ask_if_unset(value: T, question: Question, unsafe: bool = False) -> T:
+def ask_if_unset(
+    value: T,
+    question: Question | Callable[[], Question],
+    unsafe: bool = False,
+) -> T:
     if value is None:
+        resolved_question = question() if callable(question) else question
         if unsafe:
-            return question.unsafe_ask()
+            return resolved_question.unsafe_ask()
         else:
-            return question.ask()
+            return resolved_question.ask()
     else:
         return value
 

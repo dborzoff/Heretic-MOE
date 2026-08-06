@@ -231,7 +231,7 @@ def obtain_export_strategy(
 
     return ask_if_unset(
         settings.export_strategy,
-        questionary.select(
+        lambda: questionary.select(
             "How do you want to export the model?",
             choices=[
                 Choice(
@@ -1096,6 +1096,7 @@ def run():
                     study,
                     objective_wrapper,
                     trial_budget=settings.worker_trial_budget,
+                    target_trial_count=settings.n_trials,
                     callbacks=study_callbacks,
                 )
         except KeyboardInterrupt:
@@ -1242,7 +1243,7 @@ def run():
 
                 trial = ask_if_unset(
                     selected_trial,
-                    questionary.select(
+                    lambda: questionary.select(
                         "Which trial do you want to use?",
                         choices=choices,
                         style=Style([("highlighted", "reverse")]),
@@ -1257,7 +1258,7 @@ def run():
                         try:
                             n_additional_trials = ask_if_unset(
                                 settings.n_additional_trials,
-                                questionary.text(
+                                lambda: questionary.text(
                                     "How many additional trials do you want to run?"
                                 ),
                             )
@@ -1332,7 +1333,7 @@ def run():
 
                 action = ask_if_unset(
                     settings.model_action,
-                    questionary.select(
+                    lambda: questionary.select(
                         "What do you want to do with the decensored model?",
                         choices=[
                             Choice(
@@ -1376,7 +1377,7 @@ def run():
                         case "save":
                             save_directory = ask_if_unset(
                                 settings.save_directory,
-                                questionary.path(
+                                lambda: questionary.path(
                                     "Path to the folder:",
                                     only_directories=True,
                                 ),
@@ -1462,7 +1463,7 @@ def run():
 
                             repo_id = ask_if_unset(
                                 settings.upload_repo_id,
-                                questionary.text(
+                                lambda: questionary.text(
                                     "Name of repository:",
                                     default=f"{user['name']}/{Path(settings.model).name}-heretic",
                                 ),
@@ -1478,7 +1479,7 @@ def run():
                                     if settings.upload_repo_private
                                     else "Public"
                                 ),
-                                questionary.select(
+                                lambda: questionary.select(
                                     "Should the repository be public or private?",
                                     choices=[
                                         "Public",
@@ -1532,7 +1533,7 @@ def run():
 
                                 reproducibility_information = ask_if_unset(
                                     settings.upload_reproducibility_information,
-                                    questionary.select(
+                                    lambda: questionary.select(
                                         "Which reproducibility information do you want to add?",
                                         choices=[
                                             Choice(
