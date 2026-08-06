@@ -611,6 +611,22 @@ class Settings(BaseSettings):
         exclude=True,
     )
 
+    worker_queue_path: str | None = Field(
+        default=None,
+        description=(
+            "Internal durable work queue used by the HereticMOE multi-GPU "
+            "supervisor. Workers claim one trial at a time instead of receiving "
+            "a fixed per-device budget."
+        ),
+        exclude=True,
+    )
+
+    worker_id: str | None = Field(
+        default=None,
+        description="Internal stable identifier for a supervised GPU worker.",
+        exclude=True,
+    )
+
     seed_trials_from: str | None = Field(
         default=None,
         description=(

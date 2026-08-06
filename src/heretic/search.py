@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Sequence
 
 from optuna import Trial
@@ -12,6 +13,7 @@ from optuna.study import Study
 from optuna.trial import FrozenTrial
 
 from .config import StartupDesign
+from .work_queue import TrialWorkQueue
 
 Objective = Callable[[Trial], float | Sequence[float]]
 StudyCallback = Callable[[Study, FrozenTrial], None]
@@ -165,17 +167,19 @@ class OptimizationRunner:
             constraints_func=(constraints_func if constraint_count else None),
             seed=seed,
         )
+        self.queue_random_sampler = RandomSampler(seed=seed)
+        self.queue_sobol_sampler = StratifiedQMCSampler(
+            qmc_type="sobol",
+            scramble=True,
+            seed=seed,
+        )
         self.random_sampler = (
-            RandomSampler(seed=seed)
+            self.queue_random_sampler
             if startup_design == StartupDesign.HYBRID
             else None
         )
         self.sobol_sampler = (
-            StratifiedQMCSampler(
-                qmc_type="sobol",
-                scramble=True,
-                seed=seed,
-            )
+            self.queue_sobol_sampler
             if startup_design in (StartupDesign.SOBOL, StartupDesign.HYBRID)
             else None
         )
@@ -279,3 +283,78 @@ class OptimizationRunner:
             n_trials=trial_budget,
             callbacks=effective_callbacks,
         )
+
+    def optimize_queue(
+        self,
+        study: Study,
+        objective: Objective,
+        *,
+        queue_path: str,
+        worker_id: str,
+        callbacks: Sequence[StudyCallback] = (),
+    ) -> None:
+        """Consume dynamically scheduled trials while keeping the model resident."""
+
+        if not worker_id.strip():
+            raise ValueError("worker_id cannot be empty")
+        queue = TrialWorkQueue(queue_path)
+        while True:
+            item = queue.claim(worker_id)
+            if item is None:
+                stats = queue.stats()
+                if stats.pending or stats.claimed:
+                    time.sleep(0.25)
+                    continue
+                break
+
+            study.sampler = {
+                "random": self.queue_random_sampler,
+                "sobol": self.queue_sobol_sampler,
+                "tpe": self.tpe_sampler,
+            }[item.task_kind]
+            finished: list[FrozenTrial] = []
+
+            def queued_objective(trial: Trial, *, queue_item=item):
+                trial.set_user_attr("queue_worker_id", worker_id)
+                trial.set_user_attr("queue_task_id", queue_item.task_id)
+                trial.set_user_attr("queue_attempt", queue_item.attempt)
+                trial.set_user_attr("queue_task_kind", queue_item.task_kind)
+                return objective(trial)
+
+            def capture_trial(
+                _: Study,
+                trial: FrozenTrial,
+                *,
+                target=finished,
+            ) -> None:
+                target.append(trial)
+
+            try:
+                study.optimize(
+                    queued_objective,
+                    n_trials=1,
+                    callbacks=[*callbacks, capture_trial],
+                )
+            except BaseException as error:
+                if finished:
+                    trial = finished[-1]
+                    queue.finish(
+                        item,
+                        trial_number=trial.number,
+                        trial_state=trial.state.name,
+                    )
+                else:
+                    queue.fail(item, error_type=type(error).__name__, retry=True)
+                raise
+
+            if not finished:
+                queue.fail(item, error_type="missing_trial_callback", retry=True)
+                raise RuntimeError(
+                    f"Optuna returned without a terminal trial for task {item.task_id}"
+                )
+            trial = finished[-1]
+            queue.finish(
+                item,
+                trial_number=trial.number,
+                trial_state=trial.state.name,
+            )

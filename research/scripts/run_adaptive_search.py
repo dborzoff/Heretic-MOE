@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Run the bounded Random/Sobol -> shared TPE Heretic workflow.
+"""Run the bounded Random/Sobol -> shared TPE HereticMOE workflow.
 
 The controller owns only configuration, processes, journals, and text-free
 provenance. Prompt and response payloads remain inside the scorer processes.
@@ -17,16 +17,21 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import tomli_w
 import optuna
+import tomli_w
+import tomllib
 from optuna.storages import JournalStorage
 from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
+
+from heretic.work_queue import TrialWorkQueue
+
+_OUTPUT_PUMPS: dict[int, threading.Thread] = {}
 
 
 @dataclass(frozen=True)
@@ -41,8 +46,8 @@ class Stage:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run two bounded exploration branches, merge their completed trials, "
-            "then continue one shared multivariate-TPE study."
+            "Run a bounded alternating Random/Sobol prefix and continue the same "
+            "shared journal with multivariate TPE."
         )
     )
     parser.add_argument("--base-config", type=Path, required=True)
@@ -76,6 +81,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-trials", type=int, default=600)
     parser.add_argument("--random-device", default="0")
     parser.add_argument("--sobol-device", default="1")
+    parser.add_argument(
+        "--devices",
+        help=(
+            "Comma-separated physical GPU indices used by the shared TPE queue. "
+            "When omitted, random-device and sobol-device are used."
+        ),
+    )
+    parser.add_argument(
+        "--dynamic-worker-queue",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Let each resident GPU worker claim the next available trial instead "
+            "of assigning fixed per-device budgets."
+        ),
+    )
     parser.add_argument(
         "--sequential-exploration",
         action="store_true",
@@ -422,15 +443,41 @@ def start_stage(
             env=process_environment(effective_device),
             creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
-    return subprocess.Popen(
+    environment = process_environment(effective_device)
+    if os.environ.get("HERETIC_SUPERVISED") != "1":
+        return subprocess.Popen(command, cwd=stage.directory, env=environment)
+
+    process = subprocess.Popen(
         command,
         cwd=stage.directory,
-        env=process_environment(effective_device),
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
     )
+
+    def forward_output() -> None:
+        assert process.stdout is not None
+        prefix = f"GPU {effective_device} | "
+        for line in process.stdout:
+            print(prefix + line.rstrip("\r\n"), flush=True)
+
+    pump = threading.Thread(
+        target=forward_output,
+        name=f"output-{effective_name}",
+        daemon=True,
+    )
+    pump.start()
+    _OUTPUT_PUMPS[id(process)] = pump
+    return process
 
 
 def wait_stage(stage: Stage, process: subprocess.Popen) -> None:
     return_code = process.wait()
+    finish_output_pump(process)
     if return_code != 0:
         raise RuntimeError(f"Stage {stage.name} failed with exit code {return_code}")
     if not stage.journal.is_file():
@@ -447,6 +494,14 @@ def wait_stage(stage: Stage, process: subprocess.Popen) -> None:
         ),
         flush=True,
     )
+
+
+def finish_output_pump(process: subprocess.Popen) -> None:
+    """Drain and join a supervised worker's output forwarding thread."""
+
+    pump = _OUTPUT_PUMPS.pop(id(process), None)
+    if pump is not None:
+        pump.join()
 
 
 def run_stage(
@@ -479,6 +534,150 @@ def wait_parallel(
             failures.append(f"{stage.name}: {error}")
     if failures:
         raise RuntimeError("Parallel stage failure(s): " + "; ".join(failures))
+
+
+def fail_running_trials_for_worker(journal: Path, worker_id: str) -> list[int]:
+    """Turn orphaned trials from a dead queue worker into terminal failures."""
+
+    if not journal.is_file():
+        return []
+    storage = JournalStorage(
+        JournalFileBackend(
+            str(journal),
+            lock_obj=JournalFileOpenLock(str(journal)),
+        )
+    )
+    summaries = storage.get_all_studies()
+    if len(summaries) != 1:
+        raise ValueError(f"Expected one study in {journal}, found {len(summaries)}")
+    study = optuna.load_study(study_name=summaries[0].study_name, storage=storage)
+    failed: list[int] = []
+    for trial in study.get_trials(deepcopy=False):
+        if (
+            trial.state == optuna.trial.TrialState.RUNNING
+            and trial.user_attrs.get("queue_worker_id") == worker_id
+        ):
+            trial_id = storage.get_trial_id_from_study_id_trial_number(
+                study._study_id,
+                trial.number,
+            )
+            if storage.set_trial_state_values(
+                trial_id,
+                optuna.trial.TrialState.FAIL,
+            ):
+                failed.append(trial.number)
+    return failed
+
+
+def wait_dynamic_workers(
+    workers: list[tuple[Stage, subprocess.Popen, str, tuple[str, ...], int]],
+    *,
+    queue: TrialWorkQueue,
+    executable: Path,
+    expected_tasks: int,
+    visible_worker_window: bool,
+    max_restarts_per_gpu: int = 2,
+) -> list[dict[str, Any]]:
+    """Monitor queue workers concurrently and recover abandoned claims."""
+
+    active = list(workers)
+    recoveries: list[dict[str, Any]] = []
+    while active:
+        next_active: list[
+            tuple[Stage, subprocess.Popen, str, tuple[str, ...], int]
+        ] = []
+        changed = False
+        for stage, process, worker_id, command_args, restart_count in active:
+            return_code = process.poll()
+            if return_code is None:
+                next_active.append(
+                    (stage, process, worker_id, command_args, restart_count)
+                )
+                continue
+
+            changed = True
+            finish_output_pump(process)
+            if return_code == 0:
+                print(
+                    json.dumps(
+                        {
+                            "event": "worker_complete",
+                            "worker_id": worker_id,
+                            "device": stage.device,
+                            "restarts": restart_count,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                continue
+
+            orphaned_trials = fail_running_trials_for_worker(
+                stage.journal,
+                worker_id,
+            )
+            released_tasks = queue.release_worker(worker_id)
+            recovery = {
+                "event": "worker_failure",
+                "worker_id": worker_id,
+                "device": stage.device,
+                "exit_code": return_code,
+                "orphaned_trials_failed": orphaned_trials,
+                "released_tasks": released_tasks,
+                "restart_count": restart_count,
+            }
+            recoveries.append(recovery)
+            print(json.dumps(recovery, sort_keys=True), flush=True)
+
+            queue_stats = queue.stats()
+            unfinished = queue_stats.pending or queue_stats.claimed
+            if unfinished and restart_count < max_restarts_per_gpu:
+                replacement = start_stage(
+                    stage,
+                    executable,
+                    dry_run=False,
+                    display_name=stage.name,
+                    device=stage.device,
+                    command_args=command_args,
+                    visible_worker_window=visible_worker_window,
+                )
+                next_active.append(
+                    (
+                        stage,
+                        replacement,
+                        worker_id,
+                        command_args,
+                        restart_count + 1,
+                    )
+                )
+                print(
+                    json.dumps(
+                        {
+                            "event": "worker_restarted",
+                            "worker_id": worker_id,
+                            "device": stage.device,
+                            "restart_count": restart_count + 1,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+
+        active = next_active
+        stats = queue.stats()
+        if not active and (
+            stats.pending
+            or stats.claimed
+            or stats.failed
+            or stats.complete != expected_tasks
+        ):
+            raise RuntimeError(
+                "All dynamic workers exited before the queue completed: "
+                f"{stats}"
+            )
+        if active and not changed:
+            time.sleep(0.25)
+    return recoveries
 
 
 def journal_trial_count(journal: Path) -> int:
@@ -560,7 +759,18 @@ def split_worker_budget(remaining_trials: int, worker_count: int = 2) -> list[in
 def assigned_devices(args: argparse.Namespace) -> list[str]:
     """Return distinct worker devices in stable user-specified order."""
 
-    return list(dict.fromkeys((str(args.random_device), str(args.sobol_device))))
+    if args.devices:
+        requested = [part.strip() for part in str(args.devices).split(",")]
+        if any(not part for part in requested):
+            raise ValueError("--devices contains an empty GPU index")
+        devices = list(dict.fromkeys(requested))
+    else:
+        devices = list(
+            dict.fromkeys((str(args.random_device), str(args.sobol_device)))
+        )
+    if not devices:
+        raise ValueError("At least one worker device is required")
+    return devices
 
 
 def merge_branches(
@@ -644,6 +854,9 @@ def write_run_manifest(
         "parallel_exploration": not args.sequential_exploration and len(devices) > 1,
         "worker_devices": devices,
         "shared_worker_count": len(devices),
+        "dynamic_worker_queue": args.dynamic_worker_queue,
+        "worker_queue": getattr(args, "worker_queue_path", None),
+        "worker_recoveries": getattr(args, "worker_recoveries", []),
         "visible_worker_windows": args.visible_worker_windows,
         "continue_shared_only": args.continue_shared_only,
         "finalize": args.finalize,
@@ -1099,42 +1312,47 @@ def main() -> None:
     branch_trials = args.exploration_trials // 2
     devices = assigned_devices(args)
     shared_worker_count = len(devices)
+    random_device = devices[0]
+    sobol_device = devices[1] if len(devices) > 1 else devices[0]
     response_archive = root / "trial-responses.sqlite3"
     scorer_updates = (
         frozenset({"scorer"})
         if args.allow_scorer_config_update
         else frozenset()
     )
-    random_stage = build_stage(
-        root,
-        "random_branch",
-        base,
-        n_trials=branch_trials,
-        n_startup_trials=branch_trials,
-        startup_design="random",
-        device=args.random_device,
-        response_archive=response_archive,
-        response_number_offset=0,
-        response_number_stride=2,
-        parallel_workers=1,
-        dry_run=args.dry_run,
-        allowed_config_updates=scorer_updates,
-    )
-    sobol_stage = build_stage(
-        root,
-        "sobol_branch",
-        base,
-        n_trials=branch_trials,
-        n_startup_trials=branch_trials,
-        startup_design="sobol",
-        device=args.sobol_device,
-        response_archive=response_archive,
-        response_number_offset=1,
-        response_number_stride=2,
-        parallel_workers=1,
-        dry_run=args.dry_run,
-        allowed_config_updates=scorer_updates,
-    )
+    random_stage: Stage | None = None
+    sobol_stage: Stage | None = None
+    if not args.dynamic_worker_queue:
+        random_stage = build_stage(
+            root,
+            "random_branch",
+            base,
+            n_trials=branch_trials,
+            n_startup_trials=branch_trials,
+            startup_design="random",
+            device=random_device,
+            response_archive=response_archive,
+            response_number_offset=0,
+            response_number_stride=2,
+            parallel_workers=1,
+            dry_run=args.dry_run,
+            allowed_config_updates=scorer_updates,
+        )
+        sobol_stage = build_stage(
+            root,
+            "sobol_branch",
+            base,
+            n_trials=branch_trials,
+            n_startup_trials=branch_trials,
+            startup_design="sobol",
+            device=sobol_device,
+            response_archive=response_archive,
+            response_number_offset=1,
+            response_number_stride=2,
+            parallel_workers=1,
+            dry_run=args.dry_run,
+            allowed_config_updates=scorer_updates,
+        )
     shared_stage = build_stage(
         root,
         "shared_tpe",
@@ -1142,7 +1360,7 @@ def main() -> None:
         n_trials=args.target_trials,
         n_startup_trials=0,
         startup_design="random",
-        device=args.random_device,
+        device=random_device,
         response_archive=response_archive,
         response_number_offset=0,
         response_number_stride=1,
@@ -1150,13 +1368,16 @@ def main() -> None:
         dry_run=args.dry_run,
         allowed_config_updates=frozenset({"n_trials"}) | scorer_updates,
     )
+    manifest_stages = [shared_stage]
+    if random_stage is not None and sobol_stage is not None:
+        manifest_stages = [random_stage, sobol_stage, shared_stage]
     manifest_path = root / "adaptive_run_manifest.json"
     if not args.dry_run:
         write_run_manifest(
             manifest_path,
             args=args,
             base_config=base_config,
-            stages=[random_stage, sobol_stage, shared_stage],
+            stages=manifest_stages,
             status=(
                 "tpe_preparing"
                 if args.continue_shared_only
@@ -1164,7 +1385,9 @@ def main() -> None:
             ),
         )
 
-    if not args.continue_shared_only:
+    if not args.continue_shared_only and not args.dynamic_worker_queue:
+        assert random_stage is not None
+        assert sobol_stage is not None
         if not args.sequential_exploration and len(devices) > 1:
             random_process = start_stage(
                 random_stage,
@@ -1216,19 +1439,38 @@ def main() -> None:
                 manifest_path,
                 args=args,
                 base_config=base_config,
-                stages=[random_stage, sobol_stage, shared_stage],
+                stages=manifest_stages,
                 status="exploration_merged",
             )
-    elif not args.dry_run and not shared_stage.journal.is_file():
+    elif (
+        args.continue_shared_only
+        and not args.dry_run
+        and not shared_stage.journal.is_file()
+    ):
         raise FileNotFoundError(
             f"No shared journal to continue: {shared_stage.journal}"
         )
 
     if args.dry_run:
-        completed_trials = args.exploration_trials
+        completed_trials = (
+            0
+            if args.dynamic_worker_queue and not args.continue_shared_only
+            else args.exploration_trials
+        )
+        waiting_trials = 0
+    elif not shared_stage.journal.is_file():
+        completed_trials = 0
+        waiting_trials = 0
     else:
         completed_trials, waiting_trials = journal_trial_counts(shared_stage.journal)
-    if completed_trials > args.target_trials:
+
+    existing_queue_path = root / f"trial-work-queue-{args.target_trials}.sqlite3"
+    resuming_dynamic_queue = (
+        args.dynamic_worker_queue
+        and not args.dry_run
+        and existing_queue_path.is_file()
+    )
+    if completed_trials > args.target_trials and not resuming_dynamic_queue:
         raise ValueError(
             f"Shared study already has {completed_trials} trials, above target "
             f"{args.target_trials}"
@@ -1236,27 +1478,82 @@ def main() -> None:
     # WAITING trials already occupy trial numbers but still need one optimization
     # call each. Add them back so queued remeasurements do not silently reduce the
     # requested number of actual evaluations.
-    remaining_trials = args.target_trials - completed_trials + (
+    remaining_trials = max(0, args.target_trials - completed_trials) + (
         0 if args.dry_run else waiting_trials
     )
-    if not args.dry_run:
+    queue: TrialWorkQueue | None = None
+    queue_expected_tasks = remaining_trials
+    if args.dynamic_worker_queue and (remaining_trials or resuming_dynamic_queue):
+        first_task_id = completed_trials - (0 if args.dry_run else waiting_trials)
+        queue_path = existing_queue_path
+        args.worker_queue_path = str(queue_path.resolve())
+        if not args.dry_run:
+            queue = TrialWorkQueue(queue_path)
+            if resuming_dynamic_queue:
+                contract = queue.contract()
+                if contract.last_task_id_exclusive != args.target_trials:
+                    raise RuntimeError(
+                        f"Queue target mismatch: {contract.last_task_id_exclusive} "
+                        f"!= {args.target_trials}"
+                    )
+                queue_expected_tasks = contract.task_count
+            else:
+                queue.initialize(
+                    first_task_id=first_task_id,
+                    task_count=remaining_trials,
+                    exploration_task_count=(
+                        min(args.exploration_trials, remaining_trials)
+                        if not args.continue_shared_only and first_task_id == 0
+                        else 0
+                    ),
+                )
+                queue_expected_tasks = remaining_trials
+            prelaunch_recoveries: list[dict[str, Any]] = []
+            for stale_worker_id in queue.claimed_workers():
+                orphaned_trials = fail_running_trials_for_worker(
+                    shared_stage.journal,
+                    stale_worker_id,
+                )
+                released_tasks = queue.release_worker(stale_worker_id)
+                recovery = {
+                    "event": "prelaunch_worker_recovery",
+                    "worker_id": stale_worker_id,
+                    "orphaned_trials_failed": orphaned_trials,
+                    "released_tasks": released_tasks,
+                }
+                prelaunch_recoveries.append(recovery)
+                print(json.dumps(recovery, sort_keys=True), flush=True)
+            args.worker_recoveries = prelaunch_recoveries
+            queue_stats = queue.stats()
+            if queue_stats.failed:
+                raise RuntimeError(f"Dynamic worker queue has failed tasks: {queue_stats}")
+            remaining_trials = queue_stats.pending + queue_stats.claimed
+    else:
+        args.worker_queue_path = None
+    if not args.dry_run and shared_stage.journal.is_file():
         require_constraint_metadata(shared_stage)
-    # Split the exact remaining budget between workers. This guarantees that a
-    # concurrent shared study cannot reserve a trial beyond the requested global
-    # target; the target callback remains a second line of defence.
-    worker_budgets = split_worker_budget(remaining_trials, shared_worker_count)
+    # Dynamic workers receive the same safety ceiling but consume exact work
+    # permits from the queue. The legacy path still splits fixed budgets.
+    worker_budgets = (
+        [remaining_trials] * min(shared_worker_count, remaining_trials)
+        if args.dynamic_worker_queue and remaining_trials
+        else split_worker_budget(remaining_trials, shared_worker_count)
+    )
+    active_devices = devices[: len(worker_budgets)]
     if not args.dry_run:
         write_run_manifest(
             manifest_path,
             args=args,
             base_config=base_config,
-            stages=[random_stage, sobol_stage, shared_stage],
+            stages=manifest_stages,
             status="tpe_running" if remaining_trials else "complete",
         )
     worker_seed_base = int(base.get("seed") or 0) + 10_000
-    worker_processes: list[tuple[Stage, subprocess.Popen]] = []
+    worker_processes: list[
+        tuple[Stage, subprocess.Popen, str, tuple[str, ...], int]
+    ] = []
     for worker_index, (device, budget) in enumerate(
-        zip(devices, worker_budgets, strict=True)
+        zip(active_devices, worker_budgets, strict=True)
     ):
         if budget == 0:
             continue
@@ -1268,35 +1565,73 @@ def main() -> None:
             shared_stage.journal,
             device,
         )
+        worker_id = f"gpu-{device}"
+        worker_arguments = [
+            "--n-trials",
+            str(args.target_trials),
+            "--n-startup-trials",
+            "0",
+            "--parallel-workers",
+            str(len(active_devices)),
+            f"--seed={worker_seed_base + worker_index}",
+        ]
+        if args.dynamic_worker_queue:
+            worker_arguments.extend(
+                (
+                    "--worker-queue-path",
+                    str(args.worker_queue_path),
+                    "--worker-id",
+                    worker_id,
+                )
+            )
+        else:
+            worker_arguments.extend(("--worker-trial-budget", str(budget)))
         process = start_stage(
             worker_stage,
             executable,
             dry_run=args.dry_run,
             display_name=display_name,
             device=device,
-            command_args=(
-                "--n-trials",
-                str(args.target_trials),
-                "--n-startup-trials",
-                "0",
-                "--parallel-workers",
-                str(shared_worker_count),
-                "--worker-trial-budget",
-                str(budget),
-                f"--seed={worker_seed_base + worker_index}",
-            ),
+            command_args=tuple(worker_arguments),
             visible_worker_window=args.visible_worker_windows,
         )
-        worker_processes.append((worker_stage, process))
+        worker_processes.append(
+            (worker_stage, process, worker_id, tuple(worker_arguments), 0)
+        )
     if args.dry_run:
-        for _, process in worker_processes:
+        for _, process, _, _, _ in worker_processes:
             process.wait()
     else:
-        wait_parallel(worker_processes)
+        if queue is not None:
+            recoveries = [
+                *getattr(args, "worker_recoveries", []),
+                *wait_dynamic_workers(
+                worker_processes,
+                queue=queue,
+                executable=executable,
+                expected_tasks=queue_expected_tasks,
+                visible_worker_window=args.visible_worker_windows,
+                ),
+            ]
+        else:
+            wait_parallel(
+                [(stage, process) for stage, process, _, _, _ in worker_processes]
+            )
+            recoveries = []
+        args.worker_recoveries = recoveries
+        if queue is not None:
+            queue_stats = queue.stats()
+            if (
+                queue_stats.pending
+                or queue_stats.claimed
+                or queue_stats.failed
+                or queue_stats.complete != queue_expected_tasks
+            ):
+                raise RuntimeError(f"Dynamic worker queue incomplete: {queue_stats}")
         final_trial_count = journal_trial_count(shared_stage.journal)
-        if final_trial_count != args.target_trials:
+        if final_trial_count < args.target_trials:
             raise RuntimeError(
-                f"Shared study ended at {final_trial_count}, expected "
+                f"Shared study ended at {final_trial_count}, below target "
                 f"{args.target_trials}"
             )
     if not args.dry_run:
@@ -1304,7 +1639,7 @@ def main() -> None:
             manifest_path,
             args=args,
             base_config=base_config,
-            stages=[random_stage, sobol_stage, shared_stage],
+            stages=manifest_stages,
             status="complete",
         )
     if args.finalize:
@@ -1320,7 +1655,7 @@ def main() -> None:
                 manifest_path,
                 args=args,
                 base_config=base_config,
-                stages=[random_stage, sobol_stage, shared_stage],
+                stages=manifest_stages,
                 status="release_complete",
             )
 

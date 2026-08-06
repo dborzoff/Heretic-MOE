@@ -93,6 +93,7 @@ from .search import OptimizationRunner
 from .study_diagnostics import make_parameter_importance_callbacks
 from .system import empty_cache, get_accelerator_info
 from .trial_selection import candidate_trials, trial_selection_cost
+from .work_queue import TrialWorkQueue
 from .utils import (
     ask_if_unset,
     format_duration,
@@ -261,19 +262,21 @@ def run():
     ):
         os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
-    # Modified "Pagga" font from https://budavariam.github.io/asciiart-text/
-    print(
-        f"[cyan]█░█░█▀▀░█▀▄░█▀▀░▀█▀░█░█▀▀[/]  "
-        f"[bold cyan]Heretic-MOE[/] v{version('heretic-llm')}"
-    )
-    print(
-        "[cyan]█▀█░█▀▀░█▀▄░█▀▀░░█░░█░█░░[/]  Adaptive multi-GPU search"
-    )
-    print(
-        "[cyan]▀░▀░▀▀▀░▀░▀░▀▀▀░░▀░░▀░▀▀▀[/]  "
-        "[blue underline]https://github.com/dborzoff/Heretic-MOE[/]"
-    )
-    print()
+    supervised = os.environ.get("HERETIC_SUPERVISED") == "1"
+    if not supervised:
+        # Modified "Pagga" font from https://budavariam.github.io/asciiart-text/
+        print(
+            f"[cyan]█░█░█▀▀░█▀▄░█▀▀░▀█▀░█░█▀▀[/]  "
+            f"[bold cyan]HereticMOE[/] v{version('heretic-llm')}"
+        )
+        print(
+            "[cyan]█▀█░█▀▀░█▀▄░█▀▀░░█░░█░█░░[/]  Adaptive multi-GPU search"
+        )
+        print(
+            "[cyan]▀░▀░▀▀▀░▀░▀░▀▀▀░░▀░░▀░▀▀▀[/]  "
+            "[blue underline]https://github.com/dborzoff/Heretic-MOE[/]"
+        )
+        print()
 
     if (
         # There is at least one argument (argv[0] is the program name).
@@ -310,7 +313,7 @@ def run():
 
         print()
         print(
-            "Run [bold]heretic --help[/] or see [bold]config.default.toml[/] for details about configuration parameters."
+            "Run [bold]hereticMOE --help[/] or see [bold]config.default.toml[/] for details about configuration parameters."
         )
         return
 
@@ -352,7 +355,8 @@ def run():
 
     transformers.set_seed(settings.seed)
 
-    print(get_accelerator_info())
+    if not supervised:
+        print(get_accelerator_info())
 
     if settings.print_debug_information:
         print()
@@ -873,7 +877,11 @@ def run():
         trial.set_user_attr("parameters", {k: asdict(v) for k, v in parameters.items()})
         trial.set_user_attr("component_enabled", component_enabled)
 
-        worker_label = os.environ.get("HERETIC_WORKER_LABEL", "").strip()
+        worker_label = (
+            ""
+            if supervised
+            else os.environ.get("HERETIC_WORKER_LABEL", "").strip()
+        )
         worker_prefix = f"[bold cyan]{worker_label}[/] | " if worker_label else ""
         print()
         print(
@@ -1084,7 +1092,19 @@ def run():
             print(f"Enqueued [bold]{len(seeds)}[/] seed trials from a previous study.")
 
         try:
-            if settings.worker_trial_budget is None:
+            if settings.worker_queue_path is not None:
+                if settings.worker_id is None:
+                    raise ValueError(
+                        "worker_id is required when worker_queue_path is configured"
+                    )
+                optimization_runner.optimize_queue(
+                    study,
+                    objective_wrapper,
+                    queue_path=settings.worker_queue_path,
+                    worker_id=settings.worker_id,
+                    callbacks=study_callbacks,
+                )
+            elif settings.worker_trial_budget is None:
                 optimization_runner.optimize_to(
                     study,
                     objective_wrapper,
@@ -1105,7 +1125,13 @@ def run():
             # defined in objective_wrapper above.
             pass
 
-        if len(study.trials) == settings.n_trials:
+        queue_finished = False
+        if settings.worker_queue_path is not None:
+            queue_stats = TrialWorkQueue(settings.worker_queue_path).stats()
+            queue_finished = not (
+                queue_stats.pending or queue_stats.claimed or queue_stats.failed
+            )
+        if len(study.trials) == settings.n_trials or queue_finished:
             study.set_user_attr("finished", True)
 
         report_bound_pressure(study)

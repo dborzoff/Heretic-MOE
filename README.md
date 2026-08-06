@@ -5,9 +5,10 @@
 > [!NOTE]
 >
 > This repository is **Heretic-MOE**, the maintained `dborzoff/Heretic-MOE` fork. It
-> keeps the original CLI while adding architecture-aware editing, perplexity
-> optimization, reproducible journal exports, mixed Random/Sobol exploration,
-> multivariate-TPE continuation, and optional shared-study workers. See
+> keeps the direct model-processing workflow while adding architecture-aware
+> editing, perplexity optimization, reproducible journal exports, mixed
+> Random/Sobol exploration, multivariate-TPE continuation, and a dynamic
+> multi-GPU worker queue. See
 > [FORK.md](FORK.md) for the complete implementation notes, measured evidence,
 > limitations, and reproducibility links.
 
@@ -22,7 +23,7 @@ parts that made modern architectures hard to search or reproduce:
 | Hybrid blocks shared one depth schedule | Separate full attention, linear attention, routed experts, and shared experts |
 | First-token KL missed later degradation | Add GPU perplexity with frozen local text and a larger post-export check |
 | One startup sequence left coverage gaps | Combine Random and scrambled Sobol exploration before multivariate TPE |
-| Parallel runs could duplicate work | Share one locked Optuna journal with constant-liar TPE and exact worker budgets |
+| Fixed per-GPU budgets left slow tails | Let persistent GPU workers claim numbered trials from one durable queue |
 | Pareto ordering changed over time | Restore and export by immutable Optuna trial number |
 | Semantic judging made every trial slow | Keep fast proxies in the search loop and judge only exported finalists |
 
@@ -32,7 +33,7 @@ Heretic-MOE 1.5 can run the complete adaptive workflow unattended from one
 command:
 
 ```powershell
-python research/scripts/run_adaptive_search.py --base-config research/configs/adaptive_search/ministral3_sparse_geometry.toml --model F:/models/my-model --data-root F:/data/adaptive-search --run-root F:/runs/my-model-heretic-moe --exploration-trials 120 --target-trials 600 --random-device 0 --sobol-device 1
+hereticMOE adaptive --base-config research/configs/adaptive_search/ministral3_sparse_geometry.toml --model F:/models/my-model --data-root F:/data/adaptive-search --run-root F:/runs/my-model-heretic-moe --exploration-trials 120 --n-trials 600
 ```
 
 `--model` replaces only the model path; the base config still defines the frozen
@@ -40,16 +41,20 @@ prompt sets, scorers, constraints, and search geometry. The target architecture
 must be supported and each worker GPU must have enough memory for one full
 Heretic process.
 
-The controller runs 60 Random trials on GPU 0 and 60 scrambled-Sobol trials on
-GPU 1, merges them in deterministic round-robin order, and splits the remaining
-480 multivariate-TPE trials across both GPUs. It then remeasures five
-constraint-feasible candidates selected from different regions of the Pareto
-front with 64 x 1,024-token PPL windows, selects two distinct models, and
-exports them as `exports/balanced` and `exports/max`:
+The supervisor detects available GPUs and keeps one model-resident worker on
+each selected device. The first 120 globally numbered tasks alternate Random
+and scrambled Sobol. After that prefix is complete, the same workers consume
+multivariate-TPE tasks from the same journal without reloading the model. Faster
+GPUs naturally complete more tasks because there are no fixed per-device
+budgets. The supervisor then remeasures five constraint-feasible candidates
+from different regions of the Pareto front with 64 x 1,024-token PPL windows,
+selects two distinct models, and exports them as `exports/balanced` and
+`exports/max`.
 
-When both device arguments name the same GPU, the controller automatically
-switches exploration, shared TPE, recheck, and export to a memory-safe
-single-worker sequence. No separate one-GPU script is required.
+`--devices auto` is the default. Use `--devices 0,1,2` to select devices
+explicitly or `--max-workers N` to cap the number of resident workers. The same
+command works with one GPU; no separate single-GPU script is required. A
+run-root lock prevents two supervisors from writing into the same journal.
 
 `--data-root` removes machine-specific prompt paths from the base TOML. The
 directory is local-only and must contain `direction_safe.jsonl`,
@@ -99,12 +104,14 @@ results for one frozen evaluation, not a claim of universal behavior.
   <img width="960" alt="Animation of the Heretic Adaptive Pareto front across 600 trials" src="docs/assets/adaptive-search-progress.gif" />
 </p>
 
-The published reference run predates the current one-command controller: it used
+The published reference run predates the current dynamic-queue controller: it used
 60 Random startup trials, 60 follow-up TPE trials, 60 scrambled-Sobol startup
 trials, 60 follow-up TPE trials, and 360 shared multivariate-TPE trials after
-merging both histories. The current controller merges immediately after the two
-60-trial startup branches and runs 480 shared trials. The animation uses the fast search-time
-proxies; the table and static graph use the larger post-export validation.
+merging both histories. The current controller instead keeps one shared journal
+and one resident worker per GPU throughout the 120-trial alternating
+Random/Sobol prefix and the following 480 TPE trials. The animation uses the
+fast search-time proxies; the table and static graph use the larger post-export
+validation.
 
 </details>
 
