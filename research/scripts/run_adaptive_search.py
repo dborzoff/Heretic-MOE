@@ -569,7 +569,7 @@ def fail_running_trials_for_worker(journal: Path, worker_id: str) -> list[int]:
     return failed
 
 
-def wait_dynamic_workers(
+def _monitor_dynamic_workers(
     workers: list[tuple[Stage, subprocess.Popen, str, tuple[str, ...], int]],
     *,
     queue: TrialWorkQueue,
@@ -580,7 +580,7 @@ def wait_dynamic_workers(
 ) -> list[dict[str, Any]]:
     """Monitor queue workers concurrently and recover abandoned claims."""
 
-    active = list(workers)
+    active = workers
     recoveries: list[dict[str, Any]] = []
     while active:
         next_active: list[
@@ -663,7 +663,7 @@ def wait_dynamic_workers(
                     flush=True,
                 )
 
-        active = next_active
+        active[:] = next_active
         stats = queue.stats()
         if not active and (
             stats.pending
@@ -678,6 +678,59 @@ def wait_dynamic_workers(
         if active and not changed:
             time.sleep(0.25)
     return recoveries
+
+
+def wait_dynamic_workers(
+    workers: list[tuple[Stage, subprocess.Popen, str, tuple[str, ...], int]],
+    *,
+    queue: TrialWorkQueue,
+    executable: Path,
+    expected_tasks: int,
+    visible_worker_window: bool,
+    max_restarts_per_gpu: int = 2,
+) -> list[dict[str, Any]]:
+    """Monitor workers and guarantee child cleanup if the controller exits."""
+
+    try:
+        return _monitor_dynamic_workers(
+            workers,
+            queue=queue,
+            executable=executable,
+            expected_tasks=expected_tasks,
+            visible_worker_window=visible_worker_window,
+            max_restarts_per_gpu=max_restarts_per_gpu,
+        )
+    except BaseException:
+        for _, process, _, _, _ in workers:
+            if process.poll() is None:
+                process.terminate()
+        for stage, process, worker_id, _, _ in workers:
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            finish_output_pump(process)
+            orphaned_trials = fail_running_trials_for_worker(
+                stage.journal,
+                worker_id,
+            )
+            released_tasks = queue.release_worker(worker_id)
+            print(
+                json.dumps(
+                    {
+                        "event": "worker_shutdown_cleanup",
+                        "worker_id": worker_id,
+                        "device": stage.device,
+                        "orphaned_trials_failed": orphaned_trials,
+                        "released_tasks": released_tasks,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+        raise
 
 
 def journal_trial_count(journal: Path) -> int:
