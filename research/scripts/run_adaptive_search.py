@@ -720,7 +720,7 @@ def write_export_manifest(
     device: str,
     export_strategy: str,
 ) -> Path:
-    files = []
+    files: list[dict[str, Any]] = []
     for path in sorted(candidate for candidate in directory.rglob("*") if candidate.is_file()):
         if path.name == "heretic_moe_export.json":
             continue
