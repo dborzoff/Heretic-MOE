@@ -47,7 +47,7 @@
 
 **Files:**
 - Commit the specification, plan, tests, and controller change.
-- Reuse: `F:/AI/hf_originals/heretic_out/research/searches/Qwen__Qwen3-0.6B-Base/HereticMOE-v1.5-search-only`
+- Reuse: `F:/AI/hf_originals/heretic_out/research/searches/mistralai__Ministral-3-3B-Instruct-2512-BF16/HereticMOE-v1.5-search-only`
 
 1. Let the active search reach exactly 600 trials without restart.
 2. Resume the same run root at target 600 in recheck-only mode with TOP 6 and PPL 64x1024.

@@ -131,23 +131,38 @@ def parse_args() -> argparse.Namespace:
             "managed stage configs, for example when increasing PPL windows."
         ),
     )
-    parser.add_argument(
+    post_search = parser.add_mutually_exclusive_group()
+    post_search.add_argument(
         "--finalize",
-        action=argparse.BooleanOptionalAction,
-        default=True,
+        dest="post_search_mode",
+        action="store_const",
+        const="export",
+        default="export",
         help=(
             "After the search, remeasure the TOP-N finalists at higher PPL "
             "fidelity, select Pareto-valid Balanced and Max roles, and export both. "
             "Both roles may resolve to one winner when every alternative is dominated."
         ),
     )
-    parser.add_argument(
+    post_search.add_argument(
+        "--no-finalize",
         "--search-only",
-        dest="finalize",
-        action="store_false",
+        dest="post_search_mode",
+        action="store_const",
+        const="none",
         help="Stop at --target-trials without recheck or model export.",
     )
-    parser.add_argument("--finalist-top-n", type=int, default=5)
+    post_search.add_argument(
+        "--recheck-only",
+        dest="post_search_mode",
+        action="store_const",
+        const="recheck",
+        help=(
+            "After the search, remeasure and select the TOP-N finalists but "
+            "do not assemble or export model weights."
+        ),
+    )
+    parser.add_argument("--finalist-top-n", type=int, default=6)
     parser.add_argument(
         "--finalist-selection-policy",
         choices=("pareto", "feasible_lexicographic", "feasible_diverse", "feasible_cost"),
@@ -192,7 +207,22 @@ def parse_args() -> argparse.Namespace:
         default="merge",
     )
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.finalize = args.post_search_mode == "export"
+    args.recheck_only = args.post_search_mode == "recheck"
+    return args
+
+
+def post_search_completion_status(mode: str) -> str:
+    """Return the durable manifest status for one completed post-search mode."""
+
+    if mode == "export":
+        return "release_complete"
+    if mode == "recheck":
+        return "recheck_complete"
+    if mode == "none":
+        return "complete"
+    raise ValueError(f"Unknown post-search mode: {mode}")
 
 
 def sha256(path: Path) -> str:
@@ -783,6 +813,28 @@ def journal_trial_counts(journal: Path) -> tuple[int, int]:
     return len(trials), waiting
 
 
+def controller_trial_counts(
+    journal: Path,
+    *,
+    dry_run: bool,
+    continue_shared_only: bool,
+    dynamic_worker_queue: bool,
+    exploration_trials: int,
+) -> tuple[int, int]:
+    """Resolve existing work without making a resume dry-run invent workers."""
+
+    if journal.is_file() and (not dry_run or continue_shared_only):
+        return journal_trial_counts(journal)
+    if dry_run:
+        completed = (
+            0
+            if dynamic_worker_queue and not continue_shared_only
+            else exploration_trials
+        )
+        return completed, 0
+    return 0, 0
+
+
 def load_journal_trials(journal: Path) -> list[optuna.trial.FrozenTrial]:
     """Load one journal's text-free Optuna trial metadata."""
 
@@ -1201,7 +1253,9 @@ def write_run_manifest(
         "worker_recoveries": getattr(args, "worker_recoveries", []),
         "visible_worker_windows": args.visible_worker_windows,
         "continue_shared_only": args.continue_shared_only,
+        "post_search_mode": args.post_search_mode,
         "finalize": args.finalize,
+        "recheck_only": args.recheck_only,
         "finalist_top_n": args.finalist_top_n,
         "finalist_selection_policy": args.finalist_selection_policy,
         "finalization_version": getattr(args, "finalization_version", None),
@@ -2090,6 +2144,7 @@ def finalize_and_export(
     base_config: Path,
     shared_stage: Stage,
     executable: Path,
+    export_models: bool = True,
 ) -> None:
     finalist_script = Path(__file__).with_name("finalist_recheck.py")
     devices = assigned_devices(args)
@@ -2109,6 +2164,7 @@ def finalize_and_export(
                         "devices": devices,
                     },
                     "winners": ["Balanced", "Max"],
+                    "export_models": export_models,
                     "export_root": str(export_root),
                 },
                 sort_keys=True,
@@ -2265,6 +2321,23 @@ def finalize_and_export(
             flush=True,
         )
     winners = winners_report.get("winners", {})
+
+    if not export_models:
+        print(
+            json.dumps(
+                {
+                    "event": "recheck_only_complete",
+                    "version": finalization_version,
+                    "finalist_dir": str(finalist_dir),
+                    "winners": str(winners_path),
+                    "winners_sha256": sha256(winners_path),
+                    "source_journal_sha256": source_journal_sha256,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
 
     export_root.mkdir(parents=True, exist_ok=True)
     export_jobs: list[
@@ -2703,18 +2776,13 @@ def main() -> None:
             f"No shared journal to continue: {shared_stage.journal}"
         )
 
-    if args.dry_run:
-        completed_trials = (
-            0
-            if args.dynamic_worker_queue and not args.continue_shared_only
-            else args.exploration_trials
-        )
-        waiting_trials = 0
-    elif not shared_stage.journal.is_file():
-        completed_trials = 0
-        waiting_trials = 0
-    else:
-        completed_trials, waiting_trials = journal_trial_counts(shared_stage.journal)
+    completed_trials, waiting_trials = controller_trial_counts(
+        shared_stage.journal,
+        dry_run=args.dry_run,
+        continue_shared_only=args.continue_shared_only,
+        dynamic_worker_queue=args.dynamic_worker_queue,
+        exploration_trials=args.exploration_trials,
+    )
 
     selected_queue: TrialWorkQueue | None = None
     selected_queue_path = queue_path_for_version(root, args.target_trials, 1)
@@ -2945,13 +3013,14 @@ def main() -> None:
             stages=manifest_stages,
             status="complete",
         )
-    if args.finalize:
+    if args.post_search_mode in {"export", "recheck"}:
         finalize_and_export(
             args,
             root=root,
             base_config=base_config,
             shared_stage=shared_stage,
             executable=executable,
+            export_models=args.finalize,
         )
         if not args.dry_run:
             write_run_manifest(
@@ -2959,7 +3028,7 @@ def main() -> None:
                 args=args,
                 base_config=base_config,
                 stages=manifest_stages,
-                status="release_complete",
+                status=post_search_completion_status(args.post_search_mode),
             )
 
 
