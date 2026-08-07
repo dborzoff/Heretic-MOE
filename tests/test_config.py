@@ -86,7 +86,7 @@ class SearchSettingsTests(unittest.TestCase):
         self.assertFalse(settings.optimization_only)
         self.assertEqual(settings.seed_selection, SeedSelection.FIRST_OBJECTIVE)
         self.assertEqual(
-            settings.selection_policy, SelectionPolicy.FEASIBLE_LEXICOGRAPHIC
+            settings.selection_policy, SelectionPolicy.FEASIBLE_COST
         )
         self.assertFalse(settings.conditional_components)
         self.assertFalse(settings.tpe_group)

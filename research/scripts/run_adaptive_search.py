@@ -166,7 +166,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--finalist-selection-policy",
         choices=("pareto", "feasible_lexicographic", "feasible_diverse", "feasible_cost"),
-        default="feasible_diverse",
+        default="feasible_cost",
         help=(
             "Ranking used only to build the high-fidelity finalist shortlist. "
             "The default deliberately covers distinct Pareto regions."

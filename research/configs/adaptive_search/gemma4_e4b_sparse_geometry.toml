@@ -21,8 +21,10 @@ row_normalization = "full"
 full_normalization_lora_rank = 3
 tpe_group = true
 conditional_components = false
-selection_policy = "feasible_lexicographic"
+selection_policy = "feasible_cost"
 primary_objective = "Sparse refusal geometry"
+selection_score_targets = { "Sparse refusal geometry" = -0.0088, "Keywords" = 0.014705882352941176, "Perplexity drift" = 0.0 }
+selection_score_weights = { "Sparse refusal geometry" = 344.0, "Keywords" = 697.68, "Perplexity drift" = 200.0 }
 parameter_importance_interval = 20
 optimization_only = true
 seed = 20260805

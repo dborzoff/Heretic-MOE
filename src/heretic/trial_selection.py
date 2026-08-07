@@ -277,18 +277,69 @@ def _cost_ranked_trials(
     score_targets: dict[str, float],
     score_weights: dict[str, float],
 ) -> list[FrozenTrial]:
-    """Rank feasible trials by weighted excess above lower-is-better targets."""
+    """Rank feasible trials by calibrated or automatic preservation cost."""
+
+    costs = trial_selection_costs(
+        feasible,
+        directions,
+        score_targets,
+        score_weights,
+    )
 
     def cost_key(trial: FrozenTrial) -> tuple[float, ...]:
         values = minimized_values(trial, directions)
         return (
-            trial_selection_cost(trial, score_targets, score_weights),
+            costs[trial.number],
             values[primary_objective_index],
             *values,
             float(trial.number),
         )
 
     return sorted(feasible, key=cost_key)
+
+
+def trial_selection_costs(
+    trials: Sequence[FrozenTrial],
+    directions: Sequence[StudyDirection],
+    score_targets: dict[str, float],
+    score_weights: dict[str, float],
+) -> dict[int, float]:
+    """Return calibrated costs or deterministic ideal-point fallback costs."""
+
+    score_names = tuple(name for name in score_targets if name in score_weights)
+    if score_names:
+        return {
+            trial.number: trial_selection_cost(
+                trial,
+                score_targets,
+                score_weights,
+            )
+            for trial in trials
+        }
+
+    points = [(trial, minimized_values(trial, directions)) for trial in trials]
+    if not points:
+        return {}
+    front = _nondominated_coordinates(points)
+    lows = [
+        min(values[index] for _, values in front)
+        for index in range(len(directions))
+    ]
+    highs = [
+        max(values[index] for _, values in front)
+        for index in range(len(directions))
+    ]
+
+    costs: dict[int, float] = {}
+    for trial, values in points:
+        normalized = (
+            0.0
+            if highs[index] == lows[index]
+            else (value - lows[index]) / (highs[index] - lows[index])
+            for index, value in enumerate(values)
+        )
+        costs[trial.number] = sum(value * value for value in normalized)
+    return costs
 
 
 def trial_selection_cost(
