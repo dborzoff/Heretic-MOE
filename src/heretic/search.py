@@ -10,13 +10,47 @@ from optuna import Trial
 from optuna.distributions import CategoricalDistribution
 from optuna.samplers import BaseSampler, QMCSampler, RandomSampler, TPESampler
 from optuna.study import Study
-from optuna.trial import FrozenTrial
+from optuna.trial import FrozenTrial, TrialState
 
 from .config import StartupDesign
 from .work_queue import TrialWorkQueue
 
 Objective = Callable[[Trial], float | Sequence[float]]
 StudyCallback = Callable[[Study, FrozenTrial], None]
+
+
+def record_trial_constraints(trial: Trial, values: Sequence[float]) -> None:
+    """Store constraints where both Heretic selection and Optuna samplers read them."""
+
+    serialized = [float(value) for value in values]
+    trial.set_user_attr("constraints", serialized)
+    # Optuna's Random/QMC samplers do not run a constraints_func, while TPE
+    # reads its feasibility metadata from this system attribute. Write it while
+    # the trial is still RUNNING; finished trials are intentionally immutable.
+    trial.storage.set_trial_system_attr(trial._trial_id, "constraints", serialized)
+
+
+class ConstraintAwareTPESampler(TPESampler):
+    """Teach constrained TPE to reuse legacy constraints stored as user attrs."""
+
+    def _sample(self, study: Study, trial: FrozenTrial, search_space):
+        states = [TrialState.COMPLETE, TrialState.PRUNED]
+        if self._constant_liar:
+            states.append(TrialState.RUNNING)
+        trials = study._get_trials(
+            deepcopy=False,
+            states=states,
+            use_cache=not self._constant_liar,
+        )
+        for completed in trials:
+            if "constraints" in completed.system_attrs:
+                continue
+            constraints = completed.user_attrs.get("constraints")
+            if isinstance(constraints, (list, tuple)):
+                completed.system_attrs["constraints"] = [
+                    float(value) for value in constraints
+                ]
+        return super()._sample(study, trial, search_space)
 
 
 class StratifiedQMCSampler(QMCSampler):
@@ -156,7 +190,7 @@ class OptimizationRunner:
                 return [float("inf")] * constraint_count
             return [float(value) for value in values]
 
-        self.tpe_sampler = TPESampler(
+        self.tpe_sampler = ConstraintAwareTPESampler(
             n_startup_trials=(
                 n_startup_trials if startup_design == StartupDesign.RANDOM else 0
             ),

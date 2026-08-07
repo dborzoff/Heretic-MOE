@@ -15,7 +15,12 @@ from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 from optuna.trial import TrialState
 
 from heretic.config import StartupDesign
-from heretic.search import OptimizationRunner, select_spread_points
+from heretic.search import (
+    ConstraintAwareTPESampler,
+    OptimizationRunner,
+    record_trial_constraints,
+    select_spread_points,
+)
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 warnings.filterwarnings("ignore", category=ExperimentalWarning)
@@ -28,6 +33,42 @@ def objective(trial: optuna.Trial) -> tuple[float, float]:
 
 
 class OptimizationRunnerTests(unittest.TestCase):
+    def test_constraint_record_is_visible_to_every_sampler_before_completion(self) -> None:
+        study = optuna.create_study(direction="minimize", sampler=RandomSampler(seed=3))
+        trial = study.ask()
+
+        record_trial_constraints(trial, (0.125,))
+
+        frozen = study._storage.get_trial(trial._trial_id)
+        self.assertEqual(frozen.user_attrs["constraints"], [0.125])
+        self.assertEqual(frozen.system_attrs["constraints"], [0.125])
+        study.tell(trial, 1.0)
+        self.assertEqual(study.trials[0].system_attrs["constraints"], [0.125])
+
+    def test_tpe_hydrates_legacy_exploration_constraints_from_user_attrs(self) -> None:
+        study = optuna.create_study(direction="minimize", sampler=RandomSampler(seed=3))
+        exploration = study.ask()
+        exploration.set_user_attr("constraints", [0.125])
+        exploration.suggest_float("x", 0.0, 1.0)
+        study.tell(exploration, 1.0)
+        study.sampler = ConstraintAwareTPESampler(
+            n_startup_trials=0,
+            multivariate=True,
+            constant_liar=True,
+            constraints_func=lambda trial: trial.user_attrs["constraints"],
+            seed=4,
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            next_trial = study.ask()
+            next_trial.suggest_float("x", 0.0, 1.0)
+
+        self.assertFalse(
+            any("does not have constraint values" in str(item.message) for item in caught)
+        )
+        self.assertEqual(study.trials[0].system_attrs["constraints"], [0.125])
+
     def test_random_design_matches_legacy_tpe_sequence(self) -> None:
         legacy_sampler = TPESampler(
             n_startup_trials=6,

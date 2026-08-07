@@ -89,7 +89,7 @@ from .reproduce import (
     collect_reproducibles,
     load_reproduction_information,
 )
-from .search import OptimizationRunner
+from .search import OptimizationRunner, record_trial_constraints
 from .study_diagnostics import make_parameter_importance_callbacks
 from .system import empty_cache, get_accelerator_info
 from .trial_selection import candidate_trials, trial_selection_cost
@@ -1050,7 +1050,7 @@ def run():
         scores = evaluator.get_scores(response_archive_id=trial.number)
         objective_values = evaluator.get_objective_values(scores)
         constraint_values = evaluator.get_constraint_values(scores)
-        trial.set_user_attr("constraints", list(constraint_values))
+        record_trial_constraints(trial, constraint_values)
         trial.set_user_attr(
             "feasible", all(value <= 0 for value in constraint_values)
         )
