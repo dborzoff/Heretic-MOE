@@ -13,6 +13,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -169,7 +170,8 @@ def parse_args() -> argparse.Namespace:
         default="feasible_cost",
         help=(
             "Ranking used only to build the high-fidelity finalist shortlist. "
-            "The default deliberately covers distinct Pareto regions."
+            "The default uses the calibrated Cost contract from the adaptive "
+            "profile."
         ),
     )
     parser.add_argument("--recheck-ppl-chunks", type=int, default=64)
@@ -220,6 +222,24 @@ def parse_args() -> argparse.Namespace:
     args.finalize = args.post_search_mode == "export"
     args.recheck_only = args.post_search_mode == "recheck"
     return args
+
+
+def preserve_existing_search_provenance(
+    args: argparse.Namespace,
+    run_root: Path,
+) -> bool:
+    """Return whether this invocation is only finalizing an existing search.
+
+    ``--recheck-only`` describes the post-search action and is also valid for a
+    brand-new full run.  Search artifacts are immutable only when the caller is
+    explicitly continuing an already materialized shared stage.
+    """
+
+    return bool(
+        args.recheck_only
+        and args.continue_shared_only
+        and (run_root / "shared_tpe" / "config.toml").is_file()
+    )
 
 
 def post_search_completion_status(mode: str) -> str:
@@ -295,6 +315,69 @@ def read_config(path: Path) -> dict[str, Any]:
     if not isinstance(model, str) or not model:
         raise ValueError(f"Base config has no non-empty model: {path}")
     return config
+
+
+_ADAPTIVE_COST_SCORERS = {
+    "Sparse refusal geometry": "SparseRefusalGeometry",
+    "Keywords": "KeywordRate",
+    "Perplexity drift": "Perplexity",
+}
+
+
+def validate_adaptive_cost_contract(
+    config: dict[str, Any], *, source: Path
+) -> None:
+    """Fail before GPU work when an adaptive profile cannot use calibrated Cost."""
+
+    if config.get("selection_policy") != "feasible_cost":
+        raise ValueError(
+            f"Adaptive config must use selection_policy='feasible_cost': {source}"
+        )
+
+    required = set(_ADAPTIVE_COST_SCORERS)
+    targets = config.get("selection_score_targets")
+    weights = config.get("selection_score_weights")
+    if not isinstance(targets, dict) or set(targets) != required:
+        missing = sorted(required - set(targets or {}))
+        extra = sorted(set(targets or {}) - required)
+        raise ValueError(
+            f"Invalid Cost targets in {source}; missing={missing}, extra={extra}"
+        )
+    if not isinstance(weights, dict) or set(weights) != required:
+        missing = sorted(required - set(weights or {}))
+        extra = sorted(set(weights or {}) - required)
+        raise ValueError(
+            f"Invalid Cost weights in {source}; missing={missing}, extra={extra}"
+        )
+
+    for name in required:
+        target = targets[name]
+        weight = weights[name]
+        if not isinstance(target, (int, float)) or not math.isfinite(float(target)):
+            raise ValueError(f"Cost target {name!r} must be finite in {source}")
+        if (
+            not isinstance(weight, (int, float))
+            or not math.isfinite(float(weight))
+            or float(weight) < 0
+        ):
+            raise ValueError(
+                f"Cost weight {name!r} must be finite and non-negative in {source}"
+            )
+
+    configured_plugins = {
+        str(entry.get("plugin", "")).rsplit(".", 1)[-1]
+        for entry in config.get("scorers", [])
+        if isinstance(entry, dict)
+    }
+    missing_scorers = sorted(
+        name
+        for name, plugin_class in _ADAPTIVE_COST_SCORERS.items()
+        if plugin_class not in configured_plugins
+    )
+    if missing_scorers:
+        raise ValueError(
+            f"Cost scorers are not configured in {source}: {missing_scorers}"
+        )
 
 
 def apply_data_root(base: dict[str, Any], data_root: Path) -> dict[str, Any]:
@@ -405,6 +488,7 @@ def build_stage(
     parallel_workers: int,
     dry_run: bool,
     allowed_config_updates: frozenset[str] = frozenset(),
+    preserve_existing_config: bool = False,
 ) -> Stage:
     directory = root / name
     checkpoint_dir = directory / "checkpoints"
@@ -420,12 +504,18 @@ def build_stage(
         response_number_stride=response_number_stride,
         parallel_workers=parallel_workers,
     )
-    write_managed_config(
-        config_path,
-        config,
-        dry_run=dry_run,
-        allowed_updates=allowed_config_updates,
-    )
+    if preserve_existing_config:
+        if not config_path.is_file():
+            raise FileNotFoundError(
+                f"Recheck requires the immutable search-stage config: {config_path}"
+            )
+    else:
+        write_managed_config(
+            config_path,
+            config,
+            dry_run=dry_run,
+            allowed_updates=allowed_config_updates,
+        )
     journal = checkpoint_dir / f"{sanitized_model_name(str(base['model']))}.jsonl"
     return Stage(name, directory, config_path, journal, device)
 
@@ -2682,6 +2772,7 @@ def main() -> None:
         root.mkdir(parents=True, exist_ok=True)
 
     base = read_config(source_base_config)
+    validate_adaptive_cost_contract(base, source=source_base_config)
     base_config = source_base_config
     if args.data_root:
         base = apply_data_root(base, args.data_root)
@@ -2702,6 +2793,7 @@ def main() -> None:
         if args.allow_scorer_config_update
         else frozenset()
     )
+    preserve_search_provenance = preserve_existing_search_provenance(args, root)
     random_stage: Stage | None = None
     sobol_stage: Stage | None = None
     if not args.dynamic_worker_queue:
@@ -2749,12 +2841,13 @@ def main() -> None:
         parallel_workers=shared_worker_count,
         dry_run=args.dry_run,
         allowed_config_updates=frozenset({"n_trials"}) | scorer_updates,
+        preserve_existing_config=preserve_search_provenance,
     )
     manifest_stages = [shared_stage]
     if random_stage is not None and sobol_stage is not None:
         manifest_stages = [random_stage, sobol_stage, shared_stage]
     manifest_path = root / "adaptive_run_manifest.json"
-    if not args.dry_run:
+    if not args.dry_run and not preserve_search_provenance:
         write_run_manifest(
             manifest_path,
             args=args,
@@ -2962,7 +3055,7 @@ def main() -> None:
         else split_worker_budget(remaining_trials, shared_worker_count)
     )
     active_devices = devices[: len(worker_budgets)]
-    if not args.dry_run:
+    if not args.dry_run and not preserve_search_provenance:
         write_run_manifest(
             manifest_path,
             args=args,
@@ -3066,7 +3159,7 @@ def main() -> None:
                 f"Shared study ended at {final_trial_count}, below target "
                 f"{args.target_trials}"
             )
-    if not args.dry_run:
+    if not args.dry_run and not preserve_search_provenance:
         write_run_manifest(
             manifest_path,
             args=args,
@@ -3083,7 +3176,7 @@ def main() -> None:
             executable=executable,
             export_models=args.finalize,
         )
-        if not args.dry_run:
+        if not args.dry_run and not preserve_search_provenance:
             write_run_manifest(
                 manifest_path,
                 args=args,

@@ -2,7 +2,7 @@
 # Runtime directories, response numbering, worker count, and device visibility
 # are materialized by research/scripts/run_adaptive_search.py.
 
-model = "F:/AI/hf_originals/google__gemma-4-E4B-it"
+model = "F:/AI/hf_originals/LLM/google__gemma-4-E4B-it"
 dtypes = ["bfloat16"]
 device_map = "cuda:0"
 offload_outputs_to_cpu = true

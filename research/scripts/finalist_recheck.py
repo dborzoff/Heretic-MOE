@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import threading
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +122,27 @@ def source_baseline_srg(source: optuna.study.Study) -> float | None:
     return next(iter(values))
 
 
+def finalist_ranking_settings(
+    source_settings: dict[str, Any],
+    base_config: dict[str, Any],
+) -> tuple[list[str], dict[str, float], dict[str, float]]:
+    """Resolve finalist ranking from the current contract, not stale journals.
+
+    Old search journals legitimately predate calibrated Cost metadata.  The
+    recheck is launched with a currently validated base config, so its ranking
+    targets and weights are authoritative.  Source settings remain a fallback
+    only for optional diagnostic names used by non-Cost policies.
+    """
+
+    diagnostics = base_config.get(
+        "selection_diagnostics",
+        source_settings.get("selection_diagnostics", []),
+    )
+    targets = base_config.get("selection_score_targets", {})
+    weights = base_config.get("selection_score_weights", {})
+    return list(diagnostics), dict(targets), dict(weights)
+
+
 def load_finalization_overrides(source_journal: Path) -> tuple[dict[str, Any], Path | None]:
     """Load an explicit run-local recovery policy, if one was provided."""
 
@@ -169,6 +191,8 @@ def trial_metrics(trial: FrozenTrial) -> dict[str, Any]:
 
 def prepare(args: argparse.Namespace) -> None:
     source = load_study(args.source_journal.resolve())
+    with args.base_config.open("rb") as stream:
+        base_config_data = tomllib.load(stream)
     overrides, override_path = load_finalization_overrides(args.source_journal)
     balanced_srg_gate = overrides.get("balanced_srg_gate", args.balanced_srg_gate)
     baseline_srg = overrides.get("baseline_srg", args.baseline_srg)
@@ -186,6 +210,10 @@ def prepare(args: argparse.Namespace) -> None:
     if not 0 <= float(removal_fraction) <= 1:
         raise RuntimeError("balanced_removal_fraction must be in [0, 1]")
     settings_data = json.loads(source.user_attrs["settings"])
+    diagnostic_names, score_targets, score_weights = finalist_ranking_settings(
+        settings_data,
+        base_config_data,
+    )
     constraint_names = list(source.user_attrs.get("constraint_names", []))
     selection_policy = SelectionPolicy(args.selection_policy)
     ranked = candidate_trials(
@@ -194,9 +222,9 @@ def prepare(args: argparse.Namespace) -> None:
         policy=selection_policy,
         constraint_count=len(constraint_names),
         primary_objective_index=0,
-        diagnostic_names=settings_data.get("selection_diagnostics", []),
-        score_targets=settings_data.get("selection_score_targets", {}),
-        score_weights=settings_data.get("selection_score_weights", {}),
+        diagnostic_names=diagnostic_names,
+        score_targets=score_targets,
+        score_weights=score_weights,
     )
     if args.trial_indices:
         if len(args.trial_indices) != args.top_n:
@@ -239,6 +267,10 @@ def prepare(args: argparse.Namespace) -> None:
             "checkpoint_action": "continue",
             "leaderboard_size": args.top_n,
             "study_checkpoint_dir": str(checkpoints).replace("\\", "/"),
+            "selection_policy": selection_policy.value,
+            "selection_diagnostics": diagnostic_names,
+            "selection_score_targets": score_targets,
+            "selection_score_weights": score_weights,
         }
     )
     scorer_settings = settings_data.setdefault("scorer", {})

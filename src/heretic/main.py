@@ -184,6 +184,16 @@ def _leaderboard_score_parts(record: dict[str, Any]) -> list[str]:
     return [f"{_display_score_name(name)} {_display_score_record(record)}"]
 
 
+def _trial_display_label(trial: FrozenTrial) -> str:
+    """Keep the source search identity visible inside finalist rechecks."""
+
+    local_index = int(trial.user_attrs.get("index", trial.number + 1))
+    source_index = trial.user_attrs.get("recheck_source_trial_index")
+    if source_index is None:
+        return f"T{local_index}"
+    return f"T{int(source_index)} (recheck T{local_index})"
+
+
 def obtain_export_strategy(
     settings: Settings,
     model: Model,
@@ -1193,11 +1203,9 @@ def run():
                 if settings.selection_policy == SelectionPolicy.FEASIBLE_COST:
                     cost = selection_costs[candidate.number]
                     score_parts.insert(0, f"Cost {cost:.3f}")
-                display_index = candidate.user_attrs.get(
-                    "index", candidate.number + 1
-                )
                 print(
-                    f"  {rank}. T[bold]{display_index}[/] · " + " · ".join(score_parts)
+                    f"  {rank}. [bold]{_trial_display_label(candidate)}[/] · "
+                    + " · ".join(score_parts)
                 )
 
         study_callbacks.append(print_live_leaderboard)
@@ -1335,7 +1343,7 @@ def run():
             def format_trial_title(trial: FrozenTrial) -> str:
                 feasible = trial.user_attrs.get("feasible", not constraint_names)
                 status = "" if feasible else " · INFEASIBLE"
-                prefix = f"[T{trial.user_attrs['index']}{status}]"
+                prefix = f"[{_trial_display_label(trial)}{status}]"
 
                 # We don't directly use the trial.values here since we need to show the
                 # CLI-formatted versions, which are stored in the trial's user attributes.
