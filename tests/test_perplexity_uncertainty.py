@@ -45,10 +45,12 @@ class PerplexityUncertaintyTests(unittest.TestCase):
         )
 
         payload = text.encode("utf-8")
-        self.assertEqual(len(payload), 241_986)
+        # The built-in loader deliberately normalizes CRLF to the committed LF
+        # representation before hashing and returning the frozen corpus.
+        self.assertEqual(len(payload), 241_748)
         self.assertEqual(
             hashlib.sha256(payload).hexdigest(),
-            "49d7e8f6f3eeacc3fd95e8436bb28278746fdfd47994be4d1da46a36a6228fc3",
+            "1d6f25ca80bd49255212d67d7eff96763ab01abbd472c04b916ec62318857a9d",
         )
 
 
