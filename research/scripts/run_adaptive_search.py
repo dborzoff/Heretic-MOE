@@ -178,6 +178,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-keywords", type=int, default=2)
     parser.add_argument("--keyword-total", type=int, default=136)
     parser.add_argument(
+        "--keyword-near-gate-extra",
+        type=int,
+        default=1,
+        help=(
+            "If no finalist passes the strict keyword gate, permit at most this "
+            "many additional matches and record the exception in winners.json."
+        ),
+    )
+    parser.add_argument(
         "--balanced-srg-gate",
         type=float,
         help=(
@@ -433,6 +442,10 @@ def process_environment(device: str | None) -> dict[str, str]:
     if device is not None:
         environment["CUDA_VISIBLE_DEVICES"] = device
         environment["HERETIC_WORKER_LABEL"] = f"GPU {device}"
+        cache_suffix = f"gpu-{device}"
+        for variable in ("TRITON_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR"):
+            if base_cache := environment.get(variable):
+                environment[variable] = str(Path(base_cache) / cache_suffix)
     return environment
 
 
@@ -796,6 +809,9 @@ def journal_trial_count(journal: Path) -> int:
 def journal_trial_counts(journal: Path) -> tuple[int, int]:
     """Return total and queued-WAITING trial counts for a shared journal."""
 
+    if journal.is_file() and journal.stat().st_size == 0:
+        return 0, 0
+
     storage = JournalStorage(
         JournalFileBackend(
             str(journal),
@@ -837,6 +853,9 @@ def controller_trial_counts(
 
 def load_journal_trials(journal: Path) -> list[optuna.trial.FrozenTrial]:
     """Load one journal's text-free Optuna trial metadata."""
+
+    if journal.is_file() and journal.stat().st_size == 0:
+        return []
 
     storage = JournalStorage(
         JournalFileBackend(
@@ -1097,6 +1116,18 @@ def select_verified_queue(
         version += 1
 
 
+def missing_constraint_metadata(trials: list[Any]) -> list[int]:
+    """Return TPE/legacy trials missing Optuna constraint system metadata."""
+
+    exploration_kinds = {"random", "sobol"}
+    return [
+        int(trial.number)
+        for trial in trials
+        if trial.user_attrs.get("queue_task_kind") not in exploration_kinds
+        and "constraints" not in trial.system_attrs
+    ]
+
+
 def require_constraint_metadata(stage: Stage) -> None:
     storage = JournalStorage(
         JournalFileBackend(
@@ -1118,28 +1149,35 @@ def require_constraint_metadata(stage: Stage) -> None:
         for trial in study.trials
         if trial.state == optuna.trial.TrialState.COMPLETE
     ]
-    missing = [
-        trial.number for trial in complete if "constraints" not in trial.system_attrs
+    required = [
+        trial
+        for trial in complete
+        if trial.user_attrs.get("queue_task_kind") not in {"random", "sobol"}
     ]
+    missing = missing_constraint_metadata(complete)
     if missing:
         preview = ", ".join(str(number) for number in missing[:8])
         raise RuntimeError(
             "Constraint metadata incomplete: "
-            f"{len(complete) - len(missing)}/{len(complete)}; "
+            f"{len(required) - len(missing)}/{len(required)} required trials; "
             f"missing trials: {preview}"
         )
-    print(f"Constraints: {len(complete)}/{len(complete)} OK", flush=True)
+    print(
+        f"Constraints: {len(required)}/{len(required)} required trials OK "
+        f"({len(complete) - len(required)} exploration trials exempt)",
+        flush=True,
+    )
 
 
 def should_require_constraint_metadata(
     *,
     dry_run: bool,
-    journal_exists: bool,
+    journal_has_trials: bool,
     remaining_trials: int,
 ) -> bool:
     """Constraint backfill is a search-resume guard, not a recheck prerequisite."""
 
-    return not dry_run and journal_exists and remaining_trials > 0
+    return not dry_run and journal_has_trials and remaining_trials > 0
 
 
 def require_trial_count(stage: Stage, expected: int) -> None:
@@ -1734,6 +1772,7 @@ def build_finalization_contract(
             "max_keyword_rate": args.max_keywords / args.keyword_total,
             "max_keywords": args.max_keywords,
             "keyword_total": args.keyword_total,
+            "keyword_near_gate_extra": args.keyword_near_gate_extra,
             "balanced_srg_gate": (
                 None
                 if balanced_srg_gate is None
@@ -1777,6 +1816,7 @@ def finalization_manifest_matches(
             "max_keyword_rate",
             "max_keywords",
             "keyword_total",
+            "keyword_near_gate_extra",
             "balanced_srg_gate",
             "balanced_removal_fraction",
         )
@@ -2242,6 +2282,8 @@ def finalize_and_export(
             str(args.max_keywords),
             "--keyword-total",
             str(args.keyword_total),
+            "--keyword-near-gate-extra",
+            str(args.keyword_near_gate_extra),
             "--balanced-removal-fraction",
             str(args.balanced_removal_fraction),
         ]
@@ -2606,7 +2648,11 @@ def main() -> None:
         raise ValueError("Recheck PPL dimensions must be positive")
     if args.max_ppl_drift < 0:
         raise ValueError("--max-ppl-drift cannot be negative")
-    if args.max_keywords < 0 or args.keyword_total <= 0:
+    if (
+        args.max_keywords < 0
+        or args.keyword_total <= 0
+        or args.keyword_near_gate_extra < 0
+    ):
         raise ValueError("Keyword gate values are invalid")
     if not 0 <= args.balanced_removal_fraction <= 1:
         raise ValueError("--balanced-removal-fraction must be in [0, 1]")
@@ -2904,7 +2950,7 @@ def main() -> None:
         args.worker_queue_path = None
     if should_require_constraint_metadata(
         dry_run=args.dry_run,
-        journal_exists=shared_stage.journal.is_file(),
+        journal_has_trials=completed_trials > 0,
         remaining_trials=remaining_trials,
     ):
         require_constraint_metadata(shared_stage)

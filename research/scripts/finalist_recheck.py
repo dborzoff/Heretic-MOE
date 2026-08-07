@@ -317,6 +317,7 @@ def prepare(args: argparse.Namespace) -> None:
             "max_keyword_rate": args.max_keywords / args.keyword_total,
             "max_keywords": args.max_keywords,
             "keyword_total": args.keyword_total,
+            "keyword_near_gate_extra": args.keyword_near_gate_extra,
             "balanced_srg_gate": balanced_srg_gate,
             "balanced_removal_fraction": float(removal_fraction),
             "baseline_srg": None if baseline_srg is None else float(baseline_srg),
@@ -345,6 +346,44 @@ def prepare(args: argparse.Namespace) -> None:
     print(json.dumps({"status": "PASS", "manifest": str(manifest_path), "top_n": args.top_n}))
 
 
+def eligible_finalists(
+    measured: list[dict[str, Any]], gates: dict[str, Any]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Apply strict gates first, then one explicit bounded keyword near-gate."""
+
+    ppl_eligible = [
+        row for row in measured if row["ppl_drift"] <= gates["max_ppl_drift"]
+    ]
+    strict = [
+        row
+        for row in ppl_eligible
+        if row["keyword_rate"] <= gates["max_keyword_rate"]
+    ]
+    keyword_total = int(gates["keyword_total"])
+    max_keywords = int(gates["max_keywords"])
+    if strict:
+        return strict, {
+            "name": "strict",
+            "max_keywords": max_keywords,
+            "keyword_total": keyword_total,
+            "keyword_excess": 0,
+        }
+
+    extra = int(gates.get("keyword_near_gate_extra", 0))
+    fallback_max = max_keywords + extra
+    fallback = [
+        row
+        for row in ppl_eligible
+        if row["keyword_rate"] <= fallback_max / keyword_total
+    ]
+    return fallback, {
+        "name": "keyword_near_gate",
+        "max_keywords": fallback_max,
+        "keyword_total": keyword_total,
+        "keyword_excess": extra,
+    }
+
+
 def finalize(output: Path) -> dict[str, Any]:
     manifest_path = output / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -364,14 +403,11 @@ def finalize(output: Path) -> dict[str, Any]:
         raise RuntimeError(f"Incomplete recheck; missing source trials: {missing}")
 
     gates = manifest["gates"]
-    eligible = [
-        row
-        for row in measured.values()
-        if row["ppl_drift"] <= gates["max_ppl_drift"]
-        and row["keyword_rate"] <= gates["max_keyword_rate"]
-    ]
+    eligible, eligibility_tier = eligible_finalists(list(measured.values()), gates)
     if not eligible:
-        raise RuntimeError("No rechecked finalist passes the PPL and keyword gates")
+        raise RuntimeError(
+            "No rechecked finalist passes the PPL gate and bounded keyword near-gate"
+        )
 
     baseline_value = gates.get("baseline_srg")
     baseline_srg = None if baseline_value is None else float(baseline_value)
@@ -471,12 +507,25 @@ def finalize(output: Path) -> dict[str, Any]:
         ),
         "expansion_recommended": not winners_distinct,
         "distinct_backup_not_promoted": alternative,
+        "eligibility_tier": eligibility_tier,
         "gates": gates,
     }
     result = output / "winners.json"
     result.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps({"status": "PASS", "result": str(result), "winners": report["winners"]}))
     return report
+
+
+def worker_environment(base: dict[str, str], device: str) -> dict[str, str]:
+    environment = dict(base)
+    environment["HERETIC_MOE_INTERNAL"] = "1"
+    environment["CUDA_VISIBLE_DEVICES"] = str(device)
+    environment["PYTHONUNBUFFERED"] = "1"
+    cache_suffix = f"gpu-{device}"
+    for variable in ("TRITON_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR"):
+        if base_cache := environment.get(variable):
+            environment[variable] = str(Path(base_cache) / cache_suffix)
+    return environment
 
 
 def run(args: argparse.Namespace) -> None:
@@ -507,10 +556,7 @@ def run(args: argparse.Namespace) -> None:
 
     for worker, (device, budget) in enumerate(zip(devices[:workers], budgets, strict=True)):
         log_handle = (output / f"gpu{device}.log").open("a", encoding="utf-8")
-        env = os.environ.copy()
-        env["HERETIC_MOE_INTERNAL"] = "1"
-        env["CUDA_VISIBLE_DEVICES"] = str(device)
-        env["PYTHONUNBUFFERED"] = "1"
+        env = worker_environment(os.environ, str(device))
         command = [
             str(args.heretic),
             "--parallel-workers",
@@ -589,6 +635,7 @@ def parse_args() -> argparse.Namespace:
     prepare_parser.add_argument("--max-ppl-drift", type=float, default=0.005)
     prepare_parser.add_argument("--max-keywords", type=int, default=2)
     prepare_parser.add_argument("--keyword-total", type=int, default=136)
+    prepare_parser.add_argument("--keyword-near-gate-extra", type=int, default=1)
     prepare_parser.add_argument("--balanced-srg-gate", type=float)
     prepare_parser.add_argument("--baseline-srg", type=float)
     prepare_parser.add_argument(

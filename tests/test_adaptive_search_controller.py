@@ -8,6 +8,7 @@ from argparse import Namespace
 from contextlib import redirect_stderr
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -46,6 +47,7 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
         self.assertTrue(args.finalize)
         self.assertFalse(args.recheck_only)
         self.assertEqual(args.finalist_top_n, 6)
+        self.assertEqual(args.keyword_near_gate_extra, 1)
 
     def test_recheck_only_is_distinct_from_search_only_and_export(self) -> None:
         args = self.parse_args("--recheck-only")
@@ -163,21 +165,76 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
         self.assertEqual(result, (600, 0))
         trial_counts.assert_called_once_with(journal)
 
+    def test_empty_journal_is_treated_as_an_uninitialized_study(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            journal = Path(temporary_directory) / "journal.log"
+            journal.touch()
+
+            self.assertEqual(controller.journal_trial_counts(journal), (0, 0))
+
+    def test_empty_journal_has_no_trials_for_queue_recovery(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            journal = Path(temporary_directory) / "journal.log"
+            journal.touch()
+
+            self.assertEqual(controller.load_journal_trials(journal), [])
+
     def test_completed_recheck_does_not_require_tpe_constraint_backfill(self) -> None:
         self.assertFalse(
             controller.should_require_constraint_metadata(
                 dry_run=False,
-                journal_exists=True,
+                journal_has_trials=True,
                 remaining_trials=0,
             )
         )
         self.assertTrue(
             controller.should_require_constraint_metadata(
                 dry_run=False,
-                journal_exists=True,
+                journal_has_trials=True,
                 remaining_trials=1,
             )
         )
+
+    def test_uninitialized_journal_does_not_require_constraint_backfill(self) -> None:
+        self.assertFalse(
+            controller.should_require_constraint_metadata(
+                dry_run=False,
+                journal_has_trials=False,
+                remaining_trials=600,
+            )
+        )
+
+    def test_constraint_guard_ignores_exploration_trials(self) -> None:
+        trials = [
+            SimpleNamespace(
+                number=0,
+                user_attrs={"queue_task_kind": "random"},
+                system_attrs={},
+            ),
+            SimpleNamespace(
+                number=1,
+                user_attrs={"queue_task_kind": "sobol"},
+                system_attrs={},
+            ),
+            SimpleNamespace(
+                number=2,
+                user_attrs={"queue_task_kind": "tpe"},
+                system_attrs={"constraints": [0.0]},
+            ),
+        ]
+
+        self.assertEqual(controller.missing_constraint_metadata(trials), [])
+
+    def test_constraint_guard_rejects_tpe_trial_without_metadata(self) -> None:
+        trials = [
+            SimpleNamespace(
+                number=120,
+                user_attrs={"queue_task_kind": "tpe"},
+                system_attrs={},
+            )
+        ]
+
+        self.assertEqual(controller.missing_constraint_metadata(trials), [120])
 
     def test_sanitized_model_name_matches_heretic_checkpoint_name(self) -> None:
         self.assertEqual(
@@ -210,6 +267,26 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
 
     def test_total_exploration_is_split_evenly_between_branches(self) -> None:
         self.assertEqual(controller.split_worker_budget(120, 2), [60, 60])
+
+    def test_worker_processes_use_device_specific_compiler_caches(self) -> None:
+        with patch.dict(
+            controller.os.environ,
+            {
+                "TRITON_CACHE_DIR": "F:/cache/triton",
+                "TORCHINDUCTOR_CACHE_DIR": "F:/cache/inductor",
+            },
+            clear=False,
+        ):
+            environment = controller.process_environment("1")
+
+        self.assertEqual(
+            Path(environment["TRITON_CACHE_DIR"]),
+            Path("F:/cache/triton/gpu-1"),
+        )
+        self.assertEqual(
+            Path(environment["TORCHINDUCTOR_CACHE_DIR"]),
+            Path("F:/cache/inductor/gpu-1"),
+        )
 
     def test_remaining_tpe_budget_is_split_between_two_gpus(self) -> None:
         self.assertEqual(controller.split_worker_budget(600 - 120, 2), [240, 240])
