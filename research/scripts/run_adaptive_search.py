@@ -1131,6 +1131,17 @@ def require_constraint_metadata(stage: Stage) -> None:
     print(f"Constraints: {len(complete)}/{len(complete)} OK", flush=True)
 
 
+def should_require_constraint_metadata(
+    *,
+    dry_run: bool,
+    journal_exists: bool,
+    remaining_trials: int,
+) -> bool:
+    """Constraint backfill is a search-resume guard, not a recheck prerequisite."""
+
+    return not dry_run and journal_exists and remaining_trials > 0
+
+
 def require_trial_count(stage: Stage, expected: int) -> None:
     actual = journal_trial_count(stage.journal)
     if actual != expected:
@@ -2891,7 +2902,11 @@ def main() -> None:
             remaining_trials = queue_stats.pending + queue_stats.claimed
     else:
         args.worker_queue_path = None
-    if not args.dry_run and shared_stage.journal.is_file():
+    if should_require_constraint_metadata(
+        dry_run=args.dry_run,
+        journal_exists=shared_stage.journal.is_file(),
+        remaining_trials=remaining_trials,
+    ):
         require_constraint_metadata(shared_stage)
     # Dynamic workers receive the same safety ceiling but consume exact work
     # permits from the queue. The legacy path still splits fixed budgets.

@@ -163,6 +163,22 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
         self.assertEqual(result, (600, 0))
         trial_counts.assert_called_once_with(journal)
 
+    def test_completed_recheck_does_not_require_tpe_constraint_backfill(self) -> None:
+        self.assertFalse(
+            controller.should_require_constraint_metadata(
+                dry_run=False,
+                journal_exists=True,
+                remaining_trials=0,
+            )
+        )
+        self.assertTrue(
+            controller.should_require_constraint_metadata(
+                dry_run=False,
+                journal_exists=True,
+                remaining_trials=1,
+            )
+        )
+
     def test_sanitized_model_name_matches_heretic_checkpoint_name(self) -> None:
         self.assertEqual(
             controller.sanitized_model_name("F:/models/example"),
