@@ -7,7 +7,8 @@ from heretic.config import Settings
 def test_auto_batch_defaults_and_search_profiles():
     settings = Settings(model="placeholder")
     assert settings.batch_size == 0
-    assert settings.max_batch_size == 512
+    assert settings.max_batch_size == 4096
+    assert settings.batch_size_vram_headroom_fraction == 0.10
 
     root = Path(__file__).parents[1]
     for name in (
@@ -21,4 +22,5 @@ def test_auto_batch_defaults_and_search_profiles():
             )
         )
         assert profile["batch_size"] == 0
-        assert profile["max_batch_size"] == 512
+        assert profile["max_batch_size"] == 4096
+        assert profile["batch_size_vram_headroom_fraction"] == 0.10

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the fixed batch size 8 in maintained search profiles with the existing measured automatic selector, allowing trials up to batch size 512.
+**Goal:** Use the existing measured automatic selector through batch size 4096 while retaining at least 10% of total VRAM.
 
 **Architecture:** Keep the current generation benchmark, VRAM-reserve check, and OOM fallback. Change only its default ceiling and the maintained profile inputs that currently bypass it.
 
@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Do not inspect prompt or response contents.
-- Do not change the batch size of the already-running Qwen study.
+- Preserve the old fixed-batch Qwen journal and restart in a separate run root.
 - Do not introduce new dependencies or a second batch-selection algorithm.
 
 ---
@@ -27,7 +27,7 @@
 
 **Interfaces:**
 - Consumes: `Settings.batch_size == 0` as the existing automatic-selection sentinel.
-- Produces: automatic search over powers of two through `Settings.max_batch_size == 512`.
+- Produces: automatic search over powers of two through `Settings.max_batch_size == 4096` with `Settings.batch_size_vram_headroom_fraction == 0.10`.
 
 - [x] **Step 1: Write the failing test**
 
@@ -41,7 +41,8 @@ from heretic.config import Settings
 def test_auto_batch_defaults_and_search_profiles():
     settings = Settings(model="placeholder")
     assert settings.batch_size == 0
-    assert settings.max_batch_size == 512
+    assert settings.max_batch_size == 4096
+    assert settings.batch_size_vram_headroom_fraction == 0.10
 
     root = Path(__file__).parents[1]
     for name in (
@@ -55,17 +56,19 @@ def test_auto_batch_defaults_and_search_profiles():
             )
         )
         assert profile["batch_size"] == 0
+        assert profile["max_batch_size"] == 4096
+        assert profile["batch_size_vram_headroom_fraction"] == 0.10
 ```
 
 - [x] **Step 2: Run test to verify it fails**
 
 Run: `F:\AI\heretic_env\Scripts\python.exe -m pytest tests/test_auto_batch_selection.py -q`
 
-Expected: FAIL because the current maximum is 128 and the profiles force batch size 8.
+Expected: FAIL because the current maximum is 512 and the VRAM reserve is 8%.
 
 - [x] **Step 3: Write minimal implementation**
 
-Set `Settings.max_batch_size` to 512 and change each maintained profile to `batch_size = 0`.
+Set `Settings.max_batch_size` to 4096 and `Settings.batch_size_vram_headroom_fraction` to 0.10. Mirror both values in each maintained profile while retaining `batch_size = 0`.
 
 - [x] **Step 4: Run focused and full tests**
 

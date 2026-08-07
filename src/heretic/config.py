@@ -293,7 +293,7 @@ class Settings(BaseSettings):
     )
 
     max_batch_size: PositiveInt = Field(
-        default=512,
+        default=4096,
         description="Maximum batch size to try when automatically determining the optimal batch size.",
         # When storing a settings object, the batch size is already fixed,
         # either determined by the automatic mechanism or by explicit user choice.
@@ -301,7 +301,7 @@ class Settings(BaseSettings):
     )
 
     batch_size_vram_headroom_fraction: float = Field(
-        default=0.08,
+        default=0.10,
         ge=0.0,
         le=1.0,
         description=(
