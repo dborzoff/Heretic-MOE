@@ -6,7 +6,8 @@ model = "F:/AI/hf_originals/mistralai__Ministral-3-3B-Instruct-2512-BF16"
 dtypes = ["bfloat16"]
 device_map = "cuda:0"
 offload_outputs_to_cpu = true
-batch_size = 8
+batch_size = 0
+max_batch_size = 512
 max_response_length = 48
 
 scorers = [
