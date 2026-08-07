@@ -109,6 +109,17 @@ from .utils import (
 )
 
 
+def _predict_next_batch_free_bytes(
+    *,
+    previous_free_bytes: int,
+    current_free_bytes: int,
+) -> int:
+    """Conservatively estimate free VRAM after doubling the current batch."""
+
+    latest_increment = max(previous_free_bytes - current_free_bytes, 0)
+    return max(current_free_bytes - 2 * latest_increment, 0)
+
+
 def _display_score_name(name: str) -> str:
     """Use compact console labels without changing stable journal keys."""
 
@@ -573,6 +584,7 @@ def run():
         batch_size = 1
         best_batch_size = -1
         best_performance = -1
+        previous_free_bytes: int | None = None
 
         while batch_size <= settings.max_batch_size:
             print(f"* Trying batch size [bold]{batch_size}[/]... ", end="")
@@ -641,7 +653,28 @@ def run():
                 best_batch_size = batch_size
                 best_performance = performance
 
-            batch_size *= 2
+            next_batch_size = batch_size * 2
+            if (
+                torch.cuda.is_available()
+                and previous_free_bytes is not None
+                and next_batch_size <= settings.max_batch_size
+            ):
+                predicted_free_bytes = _predict_next_batch_free_bytes(
+                    previous_free_bytes=previous_free_bytes,
+                    current_free_bytes=free_bytes,
+                )
+                if predicted_free_bytes < required_bytes:
+                    print(
+                        f"* Skipping batch size [bold]{next_batch_size}[/]: "
+                        f"predicted [bold]{predicted_free_bytes / gib:.1f}[/] GiB free, "
+                        f"[bold]{required_bytes / gib:.1f}[/] GiB required"
+                    )
+                    break
+
+            if torch.cuda.is_available():
+                previous_free_bytes = free_bytes
+
+            batch_size = next_batch_size
 
         settings.batch_size = best_batch_size
         print(f"* Chosen batch size: [bold]{settings.batch_size}[/]")

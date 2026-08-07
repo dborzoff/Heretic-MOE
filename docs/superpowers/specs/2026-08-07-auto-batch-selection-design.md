@@ -15,6 +15,7 @@ The three maintained adaptive-search profiles use `batch_size = 0`, which is the
 - New searches benchmark batch sizes `1, 2, 4, ... 4096` at startup.
 - The selected batch is fixed for the rest of that worker process.
 - A candidate is eligible only while at least `max(10% total VRAM, 2 GiB)` remains free.
+- Before doubling again, the selector extrapolates the latest VRAM-growth step and skips a candidate whose predicted free memory is below that reserve.
 - OOM handling remains unchanged.
 - A search that was started with fixed batch size 8 is preserved and replaced by a new run root; its journal is not mixed with the new batch regime.
 - A later process start or continuation performs selection again because the runtime profile requests `batch_size = 0`.

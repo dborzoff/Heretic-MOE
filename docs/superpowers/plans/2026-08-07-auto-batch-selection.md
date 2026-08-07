@@ -4,7 +4,7 @@
 
 **Goal:** Use the existing measured automatic selector through batch size 4096 while retaining at least 10% of total VRAM.
 
-**Architecture:** Keep the current generation benchmark, VRAM-reserve check, and OOM fallback. Change only its default ceiling and the maintained profile inputs that currently bypass it.
+**Architecture:** Keep the current generation benchmark, VRAM-reserve check, and OOM fallback. Before doubling the batch, extrapolate the latest VRAM-growth step so a predictably unsafe candidate is skipped without a long benchmark.
 
 **Tech Stack:** Python 3.12, Pydantic settings, TOML, pytest.
 
