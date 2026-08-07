@@ -580,6 +580,12 @@ def run():
     if settings.batch_size == 0:
         print()
         print("Determining optimal batch size...")
+        print(
+            f"* Policy: max [bold]{settings.max_batch_size}[/], "
+            f"reserve [bold]{settings.batch_size_vram_headroom_fraction * 100:.1f}%[/] "
+            f"or [bold]{settings.batch_size_vram_headroom_gib:.1f}[/] GiB, "
+            "predictive guard enabled"
+        )
 
         batch_size = 1
         best_batch_size = -1
@@ -662,6 +668,11 @@ def run():
                 predicted_free_bytes = _predict_next_batch_free_bytes(
                     previous_free_bytes=previous_free_bytes,
                     current_free_bytes=free_bytes,
+                )
+                print(
+                    f"* Preflight batch [bold]{next_batch_size}[/]: "
+                    f"predicted [bold]{predicted_free_bytes / gib:.1f}[/] GiB free, "
+                    f"[bold]{required_bytes / gib:.1f}[/] GiB required"
                 )
                 if predicted_free_bytes < required_bytes:
                     print(
