@@ -44,6 +44,13 @@ class Stage:
     device: str | None
 
 
+@dataclass(frozen=True)
+class JournalTrialCounts:
+    total: int
+    complete: int
+    waiting: int
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -892,15 +899,14 @@ def wait_dynamic_workers(
 
 
 def journal_trial_count(journal: Path) -> int:
-    total, _ = journal_trial_counts(journal)
-    return total
+    return journal_trial_counts(journal).complete
 
 
-def journal_trial_counts(journal: Path) -> tuple[int, int]:
-    """Return total and queued-WAITING trial counts for a shared journal."""
+def journal_trial_counts(journal: Path) -> JournalTrialCounts:
+    """Return total, successful, and queued-WAITING trial counts."""
 
     if journal.is_file() and journal.stat().st_size == 0:
-        return 0, 0
+        return JournalTrialCounts(total=0, complete=0, waiting=0)
 
     storage = JournalStorage(
         JournalFileBackend(
@@ -913,10 +919,26 @@ def journal_trial_counts(journal: Path) -> tuple[int, int]:
         raise ValueError(f"Expected one study in {journal}, found {len(summaries)}")
     study = optuna.load_study(study_name=summaries[0].study_name, storage=storage)
     trials = study.get_trials(deepcopy=False)
+    complete = sum(
+        trial.state == optuna.trial.TrialState.COMPLETE for trial in trials
+    )
     waiting = sum(
         trial.state == optuna.trial.TrialState.WAITING for trial in trials
     )
-    return len(trials), waiting
+    return JournalTrialCounts(
+        total=len(trials),
+        complete=complete,
+        waiting=waiting,
+    )
+
+
+def remaining_complete_trial_budget(
+    target_trial_count: int,
+    counts: JournalTrialCounts,
+) -> int:
+    """Return evaluations still needed to reach the successful-trial target."""
+
+    return max(0, target_trial_count - counts.complete)
 
 
 def controller_trial_counts(
@@ -926,7 +948,7 @@ def controller_trial_counts(
     continue_shared_only: bool,
     dynamic_worker_queue: bool,
     exploration_trials: int,
-) -> tuple[int, int]:
+) -> JournalTrialCounts:
     """Resolve existing work without making a resume dry-run invent workers."""
 
     if journal.is_file() and (not dry_run or continue_shared_only):
@@ -937,8 +959,12 @@ def controller_trial_counts(
             if dynamic_worker_queue and not continue_shared_only
             else exploration_trials
         )
-        return completed, 0
-    return 0, 0
+        return JournalTrialCounts(
+            total=completed,
+            complete=completed,
+            waiting=0,
+        )
+    return JournalTrialCounts(total=0, complete=0, waiting=0)
 
 
 def load_journal_trials(journal: Path) -> list[optuna.trial.FrozenTrial]:
@@ -980,7 +1006,7 @@ def verify_queue_against_journal(
         records = queue.task_records()
     except (OSError, RuntimeError, ValueError) as error:
         return False, f"unreadable_contract:{type(error).__name__}:{error}"
-    if contract.schema_version != 3:
+    if contract.schema_version != 4:
         return False, f"schema_version:{contract.schema_version}"
     if contract.target_trial_count != target_trial_count:
         return False, (
@@ -997,14 +1023,16 @@ def verify_queue_against_journal(
         )
     if contract.first_task_id < 0 or contract.task_count < 0:
         return False, "negative_task_range"
-    if not (
-        contract.first_task_id
-        <= contract.journal_base_trial_count
-        <= contract.target_trial_count
-    ):
+    if contract.journal_base_complete_count != contract.first_task_id:
+        return False, (
+            "journal_base_complete_count:"
+            f"{contract.journal_base_complete_count}!={contract.first_task_id}"
+        )
+    if contract.journal_base_trial_count < contract.journal_base_complete_count:
         return False, (
             "journal_base_trial_count:"
-            f"{contract.journal_base_trial_count}"
+            f"{contract.journal_base_trial_count}<"
+            f"{contract.journal_base_complete_count}"
         )
     if contract.journal_base_size_bytes < 0:
         return False, f"journal_base_size_bytes:{contract.journal_base_size_bytes}"
@@ -1047,6 +1075,7 @@ def verify_queue_against_journal(
         pristine = (
             contract.first_task_id == 0
             and contract.journal_base_trial_count == 0
+            and contract.journal_base_complete_count == 0
             and contract.journal_base_size_bytes == 0
             and contract.journal_base_sha256 == empty_sha256
             and all(
@@ -1143,8 +1172,8 @@ def verify_queue_against_journal(
         ):
             return False, f"trial_worker_mismatch:{record.task_id}"
         if record.state == "complete":
-            if current is None or current.state not in terminal:
-                return False, f"complete_without_terminal:{record.task_id}"
+            if current is None or current.state != optuna.trial.TrialState.COMPLETE:
+                return False, f"complete_without_success:{record.task_id}"
             if current.number != record.trial_number:
                 return False, f"trial_number_mismatch:{record.task_id}"
             if current.state.name != record.trial_state:
@@ -2926,13 +2955,14 @@ def main() -> None:
             f"No shared journal to continue: {shared_stage.journal}"
         )
 
-    completed_trials, waiting_trials = controller_trial_counts(
+    trial_counts = controller_trial_counts(
         shared_stage.journal,
         dry_run=args.dry_run,
         continue_shared_only=args.continue_shared_only,
         dynamic_worker_queue=args.dynamic_worker_queue,
         exploration_trials=args.exploration_trials,
     )
+    completed_trials = trial_counts.complete
 
     selected_queue: TrialWorkQueue | None = None
     selected_queue_path = queue_path_for_version(root, args.target_trials, 1)
@@ -2956,16 +2986,17 @@ def main() -> None:
             f"Shared study already has {completed_trials} trials, above target "
             f"{args.target_trials}"
         )
-    # WAITING trials already occupy trial numbers but still need one optimization
-    # call each. Add them back so queued remeasurements do not silently reduce the
-    # requested number of actual evaluations.
-    remaining_trials = max(0, args.target_trials - completed_trials) + (
-        0 if args.dry_run else waiting_trials
+    # Only successful evaluations satisfy the target. Failed, pruned, and
+    # queued-WAITING records remain in the immutable journal but do not reduce
+    # the remaining work budget.
+    remaining_trials = remaining_complete_trial_budget(
+        args.target_trials,
+        trial_counts,
     )
     queue: TrialWorkQueue | None = selected_queue
     queue_expected_tasks = remaining_trials
     if args.dynamic_worker_queue and (remaining_trials or resuming_dynamic_queue):
-        first_task_id = completed_trials - (0 if args.dry_run else waiting_trials)
+        first_task_id = completed_trials
         queue_path = selected_queue_path
         args.worker_queue_path = str(queue_path.resolve())
         if not args.dry_run:
@@ -3014,7 +3045,8 @@ def main() -> None:
                     ),
                     target_trial_count=args.target_trials,
                     tpe_concurrency=shared_worker_count,
-                    journal_base_trial_count=completed_trials,
+                    journal_base_trial_count=trial_counts.total,
+                    journal_base_complete_count=completed_trials,
                     journal_base_size_bytes=journal_base_size_bytes,
                     journal_base_sha256=journal_base_sha256,
                 )

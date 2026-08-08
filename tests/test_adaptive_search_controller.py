@@ -6,10 +6,17 @@ import sys
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stderr
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import optuna
+from optuna.storages import JournalStorage
+from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
+
+from heretic.work_queue import TrialWorkQueue
 
 
 def load_controller_module():
@@ -152,7 +159,11 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
             with patch.object(
                 controller,
                 "journal_trial_counts",
-                return_value=(600, 0),
+                return_value=controller.JournalTrialCounts(
+                    total=600,
+                    complete=600,
+                    waiting=0,
+                ),
             ) as trial_counts:
                 result = controller.controller_trial_counts(
                     journal,
@@ -162,7 +173,10 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
                     exploration_trials=120,
                 )
 
-        self.assertEqual(result, (600, 0))
+        self.assertEqual(
+            result,
+            controller.JournalTrialCounts(total=600, complete=600, waiting=0),
+        )
         trial_counts.assert_called_once_with(journal)
 
     def test_empty_journal_is_treated_as_an_uninitialized_study(self) -> None:
@@ -170,7 +184,10 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
             journal = Path(temporary_directory) / "journal.log"
             journal.touch()
 
-            self.assertEqual(controller.journal_trial_counts(journal), (0, 0))
+            self.assertEqual(
+                controller.journal_trial_counts(journal),
+                controller.JournalTrialCounts(total=0, complete=0, waiting=0),
+            )
 
     def test_empty_journal_has_no_trials_for_queue_recovery(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -178,6 +195,49 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
             journal.touch()
 
             self.assertEqual(controller.load_journal_trials(journal), [])
+
+    def test_failed_trials_do_not_satisfy_the_completed_trial_target(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            journal = Path(temporary_directory) / "journal.log"
+            storage = JournalStorage(
+                JournalFileBackend(
+                    str(journal),
+                    lock_obj=JournalFileOpenLock(str(journal)),
+                )
+            )
+            study = optuna.create_study(storage=storage, study_name="heretic")
+            study.optimize(lambda _: 1.0, n_trials=1)
+
+            def fail(_: optuna.Trial) -> float:
+                raise RuntimeError("synthetic failure")
+
+            study.optimize(fail, n_trials=1, catch=(RuntimeError,))
+            counts = controller.journal_trial_counts(journal)
+
+        self.assertEqual(counts.total, 2)
+        self.assertEqual(counts.complete, 1)
+        self.assertEqual(counts.waiting, 0)
+        self.assertEqual(controller.remaining_complete_trial_budget(2, counts), 1)
+
+    def test_queue_contract_separates_base_trial_records_from_completed_work(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            queue = TrialWorkQueue(Path(temporary_directory) / "queue.sqlite3")
+            queue.initialize(
+                first_task_id=599,
+                task_count=1,
+                target_trial_count=600,
+                tpe_concurrency=2,
+                journal_base_trial_count=602,
+                journal_base_complete_count=599,
+                journal_base_size_bytes=0,
+                journal_base_sha256=sha256().hexdigest(),
+            )
+
+            contract = queue.contract()
+
+        self.assertEqual(contract.first_task_id, 599)
+        self.assertEqual(contract.journal_base_trial_count, 602)
+        self.assertEqual(contract.journal_base_complete_count, 599)
 
     def test_completed_recheck_does_not_require_tpe_constraint_backfill(self) -> None:
         self.assertFalse(

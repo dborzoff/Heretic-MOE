@@ -40,6 +40,7 @@ class QueueContract:
     target_trial_count: int
     tpe_concurrency: int
     journal_base_trial_count: int
+    journal_base_complete_count: int
     journal_base_size_bytes: int
     journal_base_sha256: str
 
@@ -96,6 +97,7 @@ class TrialWorkQueue:
         target_trial_count: int,
         tpe_concurrency: int,
         journal_base_trial_count: int,
+        journal_base_complete_count: int,
         journal_base_size_bytes: int,
         journal_base_sha256: str,
     ) -> None:
@@ -113,10 +115,13 @@ class TrialWorkQueue:
             raise ValueError("tpe_concurrency must be positive")
         if journal_base_trial_count < 0:
             raise ValueError("journal_base_trial_count cannot be negative")
-        if not first_task_id <= journal_base_trial_count <= target_trial_count:
+        if journal_base_complete_count != first_task_id:
             raise ValueError(
-                "journal_base_trial_count must be between the completed-task "
-                "prefix and target_trial_count"
+                "journal_base_complete_count must equal first_task_id"
+            )
+        if journal_base_trial_count < journal_base_complete_count:
+            raise ValueError(
+                "journal_base_trial_count cannot be below the completed count"
             )
         if journal_base_size_bytes < 0:
             raise ValueError("journal_base_size_bytes cannot be negative")
@@ -163,7 +168,7 @@ class TrialWorkQueue:
                 for row in connection.execute("SELECT key, value FROM queue_meta")
             }
             expected = {
-                "schema_version": "3",
+                "schema_version": "4",
                 "first_task_id": str(first_task_id),
                 "task_count": str(task_count),
                 "last_task_id_exclusive": str(expected_last),
@@ -171,6 +176,7 @@ class TrialWorkQueue:
                 "target_trial_count": str(target_trial_count),
                 "tpe_concurrency": str(tpe_concurrency),
                 "journal_base_trial_count": str(journal_base_trial_count),
+                "journal_base_complete_count": str(journal_base_complete_count),
                 "journal_base_size_bytes": str(journal_base_size_bytes),
                 "journal_base_sha256": normalized_base_sha256,
             }
@@ -374,6 +380,7 @@ class TrialWorkQueue:
             "target_trial_count",
             "tpe_concurrency",
             "journal_base_trial_count",
+            "journal_base_complete_count",
             "journal_base_size_bytes",
             "journal_base_sha256",
         }
