@@ -704,7 +704,7 @@ def wait_parallel(
 def fail_running_trials_for_worker(journal: Path, worker_id: str) -> list[int]:
     """Turn orphaned trials from a dead queue worker into terminal failures."""
 
-    if not journal.is_file():
+    if not journal.is_file() or journal.stat().st_size == 0:
         return []
     storage = JournalStorage(
         JournalFileBackend(

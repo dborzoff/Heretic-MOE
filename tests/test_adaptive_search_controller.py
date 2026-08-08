@@ -196,6 +196,16 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
 
             self.assertEqual(controller.load_journal_trials(journal), [])
 
+    def test_empty_journal_has_no_orphaned_worker_trials(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            journal = Path(temporary_directory) / "journal.log"
+            journal.touch()
+
+            self.assertEqual(
+                controller.fail_running_trials_for_worker(journal, "gpu-0"),
+                [],
+            )
+
     def test_failed_trials_do_not_satisfy_the_completed_trial_target(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             journal = Path(temporary_directory) / "journal.log"
