@@ -5,6 +5,7 @@ import unittest
 from optuna.study import StudyDirection
 from optuna.trial import TrialState, create_trial
 
+from heretic import trial_selection
 from heretic.config import SelectionPolicy
 from heretic.trial_selection import candidate_trials, is_feasible
 
@@ -22,6 +23,15 @@ def make_trial(number: int, values: tuple[float, float], constraints):
 
 
 class TrialSelectionTests(unittest.TestCase):
+    def test_public_cost_is_higher_for_the_lower_internal_penalty(self) -> None:
+        cost_value = getattr(trial_selection, "selection_cost_value", None)
+
+        self.assertIsNotNone(cost_value)
+        self.assertAlmostEqual(cost_value(0.0), 1.0)
+        self.assertAlmostEqual(cost_value(0.25), 0.8)
+        self.assertGreater(cost_value(0.25), cost_value(0.75))
+        self.assertEqual(cost_value(float("inf")), 0.0)
+
     def test_filters_infeasible_zero_refusal_trial(self) -> None:
         trials = [
             make_trial(1, (0.0, 0.010), [0.005]),

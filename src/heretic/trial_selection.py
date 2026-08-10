@@ -342,6 +342,12 @@ def trial_selection_costs(
     return costs
 
 
+def selection_cost_value(penalty: float) -> float:
+    """Map the internal lower-is-better penalty to public higher-is-better Cost."""
+
+    return 1.0 / (1.0 + penalty)
+
+
 def trial_selection_cost(
     trial: FrozenTrial,
     score_targets: dict[str, float],

@@ -92,7 +92,11 @@ from .reproduce import (
 from .search import OptimizationRunner, record_trial_constraints
 from .study_diagnostics import make_parameter_importance_callbacks
 from .system import empty_cache, get_accelerator_info
-from .trial_selection import candidate_trials, trial_selection_costs
+from .trial_selection import (
+    candidate_trials,
+    selection_cost_value,
+    trial_selection_costs,
+)
 from .work_queue import TrialWorkQueue
 from .utils import (
     ask_if_unset,
@@ -182,6 +186,12 @@ def _leaderboard_score_parts(record: dict[str, Any]) -> list[str]:
     if name in {"Perplexity drift", "PPL drift"}:
         return [f"PPL {abs(float(score['value'])) * 100:.2f}%"]
     return [f"{_display_score_name(name)} {_display_score_record(record)}"]
+
+
+def _format_selection_cost(penalty: float) -> str:
+    """Format the public Cost metric with an explicit higher-is-better direction."""
+
+    return f"Cost↑ {selection_cost_value(penalty):.3f}"
 
 
 def _trial_display_label(trial: FrozenTrial) -> str:
@@ -1201,8 +1211,8 @@ def run():
                     for part in _leaderboard_score_parts(record)
                 ]
                 if settings.selection_policy == SelectionPolicy.FEASIBLE_COST:
-                    cost = selection_costs[candidate.number]
-                    score_parts.insert(0, f"Cost {cost:.3f}")
+                    penalty = selection_costs[candidate.number]
+                    score_parts.insert(0, _format_selection_cost(penalty))
                 print(
                     f"  {rank}. [bold]{_trial_display_label(candidate)}[/] · "
                     + " · ".join(score_parts)
@@ -1353,8 +1363,8 @@ def run():
                     for part in _leaderboard_score_parts(score)
                 ]
                 if settings.selection_policy == SelectionPolicy.FEASIBLE_COST:
-                    cost = selection_costs[trial.number]
-                    score_parts.insert(0, f"Cost {cost:.3f}")
+                    penalty = selection_costs[trial.number]
+                    score_parts.insert(0, _format_selection_cost(penalty))
 
                 return f"{prefix} " + " · ".join(score_parts)
 

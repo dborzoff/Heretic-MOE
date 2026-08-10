@@ -4,6 +4,7 @@ import tomllib
 
 import pytest
 
+import heretic.main as heretic_main
 from heretic.main import _trial_display_label
 from research.scripts.finalist_recheck import finalist_ranking_settings
 from research.scripts.run_adaptive_search import (
@@ -41,6 +42,13 @@ def adaptive_config() -> dict:
             {"plugin": "heretic.scorers.perplexity.Perplexity"},
         ],
     }
+
+
+def test_cost_display_marks_the_higher_is_better_contract() -> None:
+    formatter = getattr(heretic_main, "_format_selection_cost", None)
+
+    assert formatter is not None
+    assert formatter(0.25) == "Cost↑ 0.800"
 
 
 def test_all_adaptive_profiles_use_calibrated_cost() -> None:
