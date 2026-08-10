@@ -188,7 +188,7 @@ Require growing logs/output shards and live quantization counters; PID or VRAM a
 
 - [ ] **Step 3: Validate each intermediate export**
 
-Require three non-empty Safetensors shards, config files, 19 MTP tensors, 124468 total tensor keys, 30841 `*.input_scale` keys, 331 enabled input quantizers, finite tensors, and different Balanced/Max weight hashes.
+Require three non-empty Safetensors shards, config files, 19 MTP tensors, 124468 total tensor keys, 30971 `*.input_scale` keys (30841 more than W4A16), 331 enabled input quantizers, finite tensors, and different Balanced/Max weight hashes.
 
 ---
 
