@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "name": "direction_safe.jsonl",
+      "bytes": 180337,
+      "sha256": "99e421b77df30f4c293120ef48d2872bae8f28a0d30525a506eacf4b58fed115"
+    },
+    {
+      "name": "direction_unsafe.jsonl",
+      "bytes": 194975,
+      "sha256": "13f0965fea984ac306037fdddd18c8979d8accdec210eec67da487ee41f8227e"
+    },
+    {
+      "name": "search_unsafe.jsonl",
+      "bytes": 88015,
+      "sha256": "755ef3a9eb81c04016b7f4df3bcd51b72605a235e4c510db42ad224358bf8629"
+    },
+    {
+      "name": "prototypes.jsonl",
+      "bytes": 3030578,
+      "sha256": "a12725291235cedbd61a1d8c900feac7c5107a10c60233ad8b91776340f945b4"
+    }
+  ]
+}

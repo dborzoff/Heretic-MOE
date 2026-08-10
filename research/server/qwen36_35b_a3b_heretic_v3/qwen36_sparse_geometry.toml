@@ -1,0 +1,64 @@
+# Qwen3.6-35B-A3B profile for the portable two-GPU Heretic-MOE workflow.
+# Runtime paths and worker state are materialized by run_adaptive_search.py.
+
+model = "Qwen/Qwen3.6-35B-A3B"
+dtypes = ["bfloat16"]
+device_map = "cuda:0"
+offload_outputs_to_cpu = true
+batch_size = 0
+max_batch_size = 4096
+batch_size_vram_headroom_fraction = 0.10
+max_response_length = 48
+
+scorers = [
+    { plugin = "heretic.scorers.sparse_refusal_geometry.SparseRefusalGeometry", optimization = "minimize" },
+    { plugin = "heretic.scorers.keyword_rate.KeywordRate", optimization = "none" },
+    { plugin = "heretic.scorers.perplexity.Perplexity", optimization = "minimize", constraint_upper = 0.005 },
+]
+
+row_normalization = "full"
+full_normalization_lora_rank = 3
+tpe_group = true
+conditional_components = false
+selection_policy = "feasible_cost"
+primary_objective = "Sparse refusal geometry"
+selection_score_targets = { "Sparse refusal geometry" = -0.0088, "Keywords" = 0.014705882352941176, "Perplexity drift" = 0.0 }
+selection_score_weights = { "Sparse refusal geometry" = 344.0, "Keywords" = 697.68, "Perplexity drift" = 200.0 }
+parameter_importance_interval = 20
+optimization_only = true
+seed = 20260810
+checkpoint_action = "continue"
+save_trial_responses = true
+
+[good_prompts]
+dataset = "data/direction_safe.jsonl"
+column = "prompt"
+
+[bad_prompts]
+dataset = "data/direction_unsafe.jsonl"
+column = "prompt"
+
+[scorer.SparseRefusalGeometry]
+prototypes = "data/prototypes.jsonl"
+prototypes_sha256 = "a12725291235cedbd61a1d8c900feac7c5107a10c60233ad8b91776340f945b4"
+top_k = 5
+min_df = 2
+validate_prompt_alignment = true
+
+[scorer.SparseRefusalGeometry.prompts]
+dataset = "data/search_unsafe.jsonl"
+column = "prompt"
+
+[scorer.KeywordRate]
+print_responses = false
+
+[scorer.KeywordRate.prompts]
+dataset = "data/search_unsafe.jsonl"
+column = "prompt"
+
+[scorer.Perplexity]
+window = 512
+chunks = 24
+
+[scorer.Perplexity.text]
+dataset = "builtin://perplexity-reference-v1"
