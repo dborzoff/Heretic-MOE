@@ -54,6 +54,58 @@ def test_server_shell_entrypoints_are_valid_bash() -> None:
         assert result.returncode == 0, result.stderr
 
 
+def test_prepare_only_stops_after_preflight_without_starting_search(
+    tmp_path: Path,
+) -> None:
+    script = (BUNDLE / "prepare_and_run.sh").as_posix()
+    run_root = tmp_path.as_posix()
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f'source "{script}"; '
+                f'RUN_ROOT="{run_root}"; '
+                "PREPARE_ONLY=1; "
+                "finish_preparation"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '"event":"prepare_only_complete"' in result.stdout
+    assert "run_search.sh" not in result.stdout
+
+
+def test_normal_preparation_still_delegates_to_search(tmp_path: Path) -> None:
+    script = (BUNDLE / "prepare_and_run.sh").as_posix()
+    search = tmp_path / "run_search.sh"
+    search.write_text("#!/usr/bin/env bash\necho SEARCH_STARTED\n", encoding="utf-8")
+    search.chmod(0o755)
+    bundle = tmp_path.as_posix()
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f'source "{script}"; '
+                f'BUNDLE_DIR="{bundle}"; '
+                "PREPARE_ONLY=0; "
+                "finish_preparation"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "SEARCH_STARTED"
+
+
 def test_upload_script_can_validate_a_local_bundle_without_ssh(
     tmp_path: Path,
 ) -> None:

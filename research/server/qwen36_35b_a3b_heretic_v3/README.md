@@ -28,17 +28,24 @@ The first command performs the same frozen size and SHA-256 checks without
 opening an SSH connection. The upload command repeats those checks before
 transfer. Prompt and response contents are not printed or committed.
 
-## 3. Prepare and run in one visible server console
+## 3. Prepare in one visible server console
 
 ```bash
 read -rsp "HF token: " HF_TOKEN && echo
 export HF_TOKEN
-./prepare_and_run.sh
+PREPARE_ONLY=1 ./prepare_and_run.sh
 ```
 
 The environment installation and the pinned Hugging Face download run in
-parallel with `[ENV]` and `[MODEL]` prefixes. Search begins only after package,
-model-shard, data-hash, CUDA-count, and VRAM checks pass.
+parallel with `[ENV]` and `[MODEL]` prefixes. Preparation finishes only after
+package, model-shard, data-hash, CUDA-count, and VRAM checks pass. It does not
+start paid search work in `PREPARE_ONLY=1` mode.
+
+Review the generated `preflight.json`, then start the search explicitly:
+
+```bash
+./run_search.sh
+```
 
 Outputs are written to `/workspace/heretic-runs/qwen36-35b-a3b-v3`. The final
 step creates a high-fidelity top-six report but does not assemble model weights.
