@@ -55,6 +55,12 @@ def test_server_shell_entrypoints_are_valid_bash() -> None:
         assert result.returncode == 0, result.stderr
 
 
+def test_qwen36_finalist_shortlist_keeps_complementary_extremes() -> None:
+    command = (BUNDLE / "run_search.sh").read_text(encoding="utf-8")
+
+    assert "--finalist-selection-policy feasible_diverse" in command
+
+
 def test_prepare_only_stops_after_preflight_without_starting_search(
     tmp_path: Path,
 ) -> None:

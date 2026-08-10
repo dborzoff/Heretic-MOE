@@ -31,6 +31,7 @@ exec "$PYTHON" "$REPOSITORY/research/scripts/run_adaptive_search.py" \
   --exploration-trials "$EXPLORATION_TRIALS" \
   --target-trials "$TARGET_TRIALS" \
   --finalist-top-n 6 \
+  --finalist-selection-policy feasible_diverse \
   --recheck-ppl-chunks 64 \
   --recheck-ppl-window 1024 \
   --max-ppl-drift 0.005 \
