@@ -36,6 +36,7 @@ def test_qwen36_profile_uses_the_frozen_search_contract() -> None:
 
     validate_adaptive_cost_contract(config, source=profile)
     assert config["model"] == "Qwen/Qwen3.6-35B-A3B"
+    assert config["batch_size"] == 32
     perplexity = config["scorer"]["Perplexity"]
     assert perplexity["window"] == 512
     assert perplexity["chunks"] == 24

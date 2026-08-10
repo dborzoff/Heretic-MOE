@@ -5,7 +5,9 @@ model = "Qwen/Qwen3.6-35B-A3B"
 dtypes = ["bfloat16"]
 device_map = "cuda:0"
 offload_outputs_to_cpu = true
-batch_size = 0
+# Auto-selection reaches 64 on 96 GiB Blackwell cards, but the later
+# per-layer residual pass needs more headroom than the generation probe.
+batch_size = 32
 max_batch_size = 4096
 batch_size_vram_headroom_fraction = 0.10
 max_response_length = 48
