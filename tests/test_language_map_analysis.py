@@ -95,6 +95,7 @@ def test_report_writer_is_text_free(tmp_path: Path):
     write_geometry_reports(report, tmp_path)
 
     expected = {
+        "component_regions.json",
         "layer_statistics.json",
         "factor_map.json",
         "language_contributions.json",
@@ -122,3 +123,40 @@ def test_public_report_uses_neutral_group_names():
     assert "refusal" not in serialized
     assert "unsafe_cohesion" not in serialized
     assert "safe_cohesion" not in serialized
+
+
+def test_component_regions_separate_shared_and_conditioned_effects():
+    index = []
+    values = []
+    for direction in ("safe", "unsafe"):
+        for language in ("en", "ru"):
+            for category in ("C01", "C02"):
+                for repeat in range(2):
+                    index.append(
+                        {
+                            "canonical_id": f"{direction}-{category}-{repeat}",
+                            "row_id": f"{direction}-{language}-{category}-{repeat}",
+                            "language": language,
+                            "direction_class": direction,
+                            "category_id": category,
+                        }
+                    )
+                    vector = torch.zeros(100)
+                    if direction == "unsafe":
+                        vector[0] += 4.0
+                    if language == "ru":
+                        vector[1] += 4.0
+                    if direction == "unsafe" and language == "ru":
+                        vector[2] += 8.0
+                    if direction == "unsafe" and category == "C02":
+                        vector[3] += 8.0
+                    values.append(vector)
+
+    residuals = torch.stack(values).unsqueeze(1)
+    report = analyze_geometry(index, residuals)
+    regions = report["component_regions"]["layers"][0]["regions"]
+
+    assert regions["shared_contrast"][0]["component"] == 0
+    assert regions["language_core"][0]["component"] == 1
+    assert regions["language_conditioned_contrast"][0]["component"] == 2
+    assert regions["category_conditioned_contrast"][0]["component"] == 3

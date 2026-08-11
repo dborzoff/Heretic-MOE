@@ -338,6 +338,183 @@ def _policy_comparison(
     }
 
 
+def _robust_heat(values: Tensor) -> Tensor:
+    values = torch.abs(values.to(torch.float64))
+    positive = values[values > 0]
+    if not len(positive):
+        return torch.zeros_like(values)
+    scale = torch.quantile(positive, 0.75).clamp_min(
+        torch.finfo(torch.float64).eps
+    )
+    return torch.clamp(values / scale, min=0.0, max=1.0)
+
+
+def _geometric_membership(*values: Tensor) -> Tensor:
+    stacked = torch.stack([value.clamp(0.0, 1.0) for value in values])
+    return torch.prod(stacked, dim=0).pow(1.0 / len(values))
+
+
+def _top_components(scores: Tensor, limit: int) -> list[dict[str, float | int]]:
+    positive = torch.nonzero(scores > 0, as_tuple=False).flatten()
+    if not len(positive):
+        return []
+    count = min(limit, len(positive))
+    values, offsets = torch.topk(scores[positive], count)
+    components = positive[offsets]
+    return [
+        {"component": int(component), "score": float(score)}
+        for component, score in zip(components, values)
+    ]
+
+
+def _component_regions(
+    index: list[dict[str, object]], residuals: Tensor
+) -> dict[str, object]:
+    """Build neutral component-level fuzzy regions and their intersections."""
+
+    directions = _metadata(index, "direction_class")
+    languages = _metadata(index, "language")
+    categories = _metadata(index, "category_id")
+    unique_languages = sorted(set(languages))
+    direction_positions = {
+        direction: [i for i, value in enumerate(directions) if value == direction]
+        for direction in ("safe", "unsafe")
+    }
+    language_direction_positions = {
+        (direction, language): [
+            i
+            for i, (row_direction, row_language) in enumerate(
+                zip(directions, languages)
+            )
+            if row_direction == direction and row_language == language
+        ]
+        for direction in ("safe", "unsafe")
+        for language in unique_languages
+    }
+    category_positions: dict[tuple[str, str], list[int]] = defaultdict(list)
+    for position, (direction, category) in enumerate(zip(directions, categories)):
+        category_positions[(direction, category)].append(position)
+
+    top_k = max(8, min(64, math.ceil(residuals.shape[2] * 0.01)))
+    layer_reports = []
+    for layer in range(residuals.shape[1]):
+        x = residuals[:, layer, :].to(torch.float64)
+        direction_means = {
+            direction: _mean(x, positions)
+            for direction, positions in direction_positions.items()
+        }
+        contrast = direction_means["unsafe"] - direction_means["safe"]
+        cell_means = {
+            key: _mean(x, positions)
+            for key, positions in language_direction_positions.items()
+        }
+        language_effects = torch.stack(
+            [
+                torch.stack(
+                    [
+                        cell_means[(direction, language)]
+                        - direction_means[direction]
+                        for direction in ("safe", "unsafe")
+                    ]
+                ).mean(dim=0)
+                for language in unique_languages
+            ]
+        )
+        language_contrasts = torch.stack(
+            [
+                cell_means[("unsafe", language)]
+                - cell_means[("safe", language)]
+                for language in unique_languages
+            ]
+        )
+        interaction_effects = language_contrasts - contrast
+        category_effects = torch.stack(
+            [
+                _mean(x, positions) - direction_means[key[0]]
+                for key, positions in sorted(category_positions.items())
+            ]
+        )
+
+        contrast_heat = _robust_heat(contrast)
+        language_heat = _robust_heat(
+            torch.sqrt(torch.mean(language_effects**2, dim=0))
+        )
+        interaction_heat = _robust_heat(
+            torch.sqrt(torch.mean(interaction_effects**2, dim=0))
+        )
+        category_heat = _robust_heat(
+            torch.sqrt(torch.mean(category_effects**2, dim=0))
+        )
+        global_sign = torch.sign(contrast)
+        cross_language_alignment = torch.mean(
+            (torch.sign(language_contrasts) == global_sign).to(torch.float64),
+            dim=0,
+        ) * (global_sign != 0).to(torch.float64)
+
+        scores = {
+            "shared_contrast": _geometric_membership(
+                contrast_heat,
+                cross_language_alignment,
+                1.0 - language_heat,
+                1.0 - interaction_heat,
+                1.0 - category_heat,
+            ),
+            "language_core": _geometric_membership(
+                language_heat,
+                1.0 - interaction_heat,
+                1.0 - contrast_heat,
+            ),
+            "language_conditioned_contrast": _geometric_membership(
+                contrast_heat, interaction_heat
+            ),
+            "category_conditioned_contrast": _geometric_membership(
+                contrast_heat, category_heat
+            ),
+            "ambiguous_overlap": _geometric_membership(
+                contrast_heat,
+                torch.maximum(
+                    language_heat, torch.maximum(interaction_heat, category_heat)
+                ),
+            ),
+        }
+        regions = {
+            name: _top_components(score, top_k) for name, score in scores.items()
+        }
+        component_sets = {
+            name: {int(value["component"]) for value in values}
+            for name, values in regions.items()
+        }
+        overlaps = []
+        region_names = list(regions)
+        for left_index, left in enumerate(region_names):
+            for right in region_names[left_index + 1 :]:
+                union = component_sets[left] | component_sets[right]
+                intersection = component_sets[left] & component_sets[right]
+                overlaps.append(
+                    {
+                        "left": left,
+                        "right": right,
+                        "intersection": len(intersection),
+                        "union": len(union),
+                        "jaccard": len(intersection) / len(union) if union else 0.0,
+                    }
+                )
+        layer_reports.append(
+            {
+                "layer": layer,
+                "top_k": top_k,
+                "regions": regions,
+                "overlaps": overlaps,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "method": "robust_fuzzy_component_regions_v1",
+        "associative_not_causal": True,
+        "layers": layer_reports,
+    }
+
+
 def analyze_geometry(
     index: list[dict[str, object]], residuals: Tensor, seed: int = 42
 ) -> dict[str, Any]:
@@ -398,6 +575,7 @@ def analyze_geometry(
     subset_candidates = [
         _policy_comparison(index, residuals, policy, seed) for policy in policy_names
     ]
+    component_regions = _component_regions(index, residuals)
 
     return {
         "schema_version": 1,
@@ -413,6 +591,7 @@ def analyze_geometry(
             "category_is_nested_in_direction": True,
             "layers": factor_layers,
         },
+        "component_regions": component_regions,
         "language_contributions": language_contributions,
         "subset_candidates": subset_candidates,
     }
@@ -443,6 +622,7 @@ def write_geometry_reports(report: dict[str, Any], output_dir: Path) -> None:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     documents = {
+        "component_regions.json": report["component_regions"],
         "layer_statistics.json": {
             "schema_version": report["schema_version"],
             "layers": report["layer_statistics"],
