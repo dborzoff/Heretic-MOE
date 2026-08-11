@@ -90,6 +90,39 @@ def test_nonduplicated_policy_uses_one_language_per_canonical_id():
     assert {row["language"] for row in selected_rows} == {"en", "ru"}
 
 
+def test_weighted_and_fractional_policies_are_cached_only_and_deterministic():
+    index = []
+    for direction in ("safe", "unsafe"):
+        for canonical in range(100):
+            for language in ("en", "ru"):
+                index.append(
+                    {
+                        "canonical_id": f"{direction}-{canonical:04d}",
+                        "row_id": f"{direction}-{canonical:04d}-{language}",
+                        "language": language,
+                        "direction_class": direction,
+                        "category_id": "C01",
+                    }
+                )
+
+    weighted_policy = 'weighted:{"en":0.9,"ru":0.1}'
+    weighted = virtual_policy_indices(index, weighted_policy, seed=42)
+    repeated = virtual_policy_indices(index, weighted_policy, seed=42)
+    reduced = virtual_policy_indices(
+        index, "fraction:0.5:cycle_languages", seed=42
+    )
+
+    assert weighted == repeated
+    assert sum(index[position]["language"] == "en" for position in weighted) > 150
+    assert 0 < len(reduced) < 200
+    assert len(
+        {
+            (index[position]["direction_class"], index[position]["canonical_id"])
+            for position in reduced
+        }
+    ) == len(reduced)
+
+
 def test_report_writer_is_text_free(tmp_path: Path):
     report = analyze_geometry(aligned_index(), redundant_residuals())
     write_geometry_reports(report, tmp_path)

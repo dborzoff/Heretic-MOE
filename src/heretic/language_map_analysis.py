@@ -67,6 +67,50 @@ def virtual_policy_indices(
             for i, row in enumerate(index)
             if str(row["language"]).lower() != excluded
         ]
+    if policy.startswith("fraction:"):
+        _, raw_fraction, base_policy = policy.split(":", 2)
+        fraction = float(raw_fraction)
+        if not 0 < fraction <= 1:
+            raise ValueError("fraction policy must be in (0, 1]")
+        base = virtual_policy_indices(index, base_policy, seed=seed)
+        selected = [
+            position
+            for position in base
+            if _stable_unit_interval(
+                seed,
+                "fraction:"
+                + str(index[position]["direction_class"])
+                + ":"
+                + str(index[position]["canonical_id"]),
+            )
+            <= fraction
+        ]
+        required_directions = {
+            str(row["direction_class"]).lower() for row in index
+        }
+        selected_directions = {
+            str(index[position]["direction_class"]).lower()
+            for position in selected
+        }
+        for missing in sorted(required_directions - selected_directions):
+            candidates = [
+                position
+                for position in base
+                if str(index[position]["direction_class"]).lower() == missing
+            ]
+            selected.append(
+                min(
+                    candidates,
+                    key=lambda position: _stable_unit_interval(
+                        seed,
+                        "fraction:"
+                        + str(index[position]["direction_class"])
+                        + ":"
+                        + str(index[position]["canonical_id"]),
+                    ),
+                )
+            )
+        return sorted(selected)
 
     groups: dict[tuple[str, str], list[int]] = defaultdict(list)
     for position, row in enumerate(index):
@@ -572,6 +616,28 @@ def analyze_geometry(
     if "en" in unique_languages:
         policy_names.append("en_only")
     policy_names.extend(f"leave_out:{language}" for language in unique_languages)
+    if len(unique_languages) > 1:
+        equal_weights = {
+            language: 1.0 / len(unique_languages) for language in unique_languages
+        }
+        policy_names.append(
+            "weighted:"
+            + json.dumps(equal_weights, sort_keys=True, separators=(",", ":"))
+        )
+        remaining_weight = 0.3 / (len(unique_languages) - 1)
+        for dominant in unique_languages:
+            weights = {
+                language: 0.7 if language == dominant else remaining_weight
+                for language in unique_languages
+            }
+            policy_names.append(
+                "weighted:"
+                + json.dumps(weights, sort_keys=True, separators=(",", ":"))
+            )
+    policy_names.extend(
+        f"fraction:{fraction}:cycle_languages"
+        for fraction in (0.75, 0.5, 0.25)
+    )
     subset_candidates = [
         _policy_comparison(index, residuals, policy, seed) for policy in policy_names
     ]
