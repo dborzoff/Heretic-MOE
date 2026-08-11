@@ -361,20 +361,20 @@ def analyze_geometry(
         unsafe_mean = _mean(x, unsafe_positions)
         direction_separation = max(0.0, 1.0 - _cosine(safe_mean, unsafe_mean))
         factors = _layer_factor_statistics(x, directions, languages, categories)
-        safe_cohesion = _cohesion(x, safe_positions)
-        unsafe_cohesion = _cohesion(x, unsafe_positions)
-        refusal_candidate_heat = (
+        group_a_cohesion = _cohesion(x, safe_positions)
+        group_b_cohesion = _cohesion(x, unsafe_positions)
+        contrast_heat = (
             direction_separation
-            * max(0.0, unsafe_cohesion)
+            * max(0.0, group_b_cohesion)
             * max(0.0, 1.0 - min(1.0, factors["language_energy_ratio"]))
         )
         layer_statistics.append(
             {
                 "layer": layer,
-                "safe_cohesion": safe_cohesion,
-                "unsafe_cohesion": unsafe_cohesion,
+                "group_a_cohesion": group_a_cohesion,
+                "group_b_cohesion": group_b_cohesion,
                 "direction_separation": direction_separation,
-                "refusal_candidate_heat": refusal_candidate_heat,
+                "contrast_heat": contrast_heat,
                 **layer_temperatures[layer],
             }
         )

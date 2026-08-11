@@ -110,3 +110,15 @@ def test_report_writer_is_text_free(tmp_path: Path):
     assert json.loads((tmp_path / "factor_map.json").read_text(encoding="utf-8"))[
         "category_is_nested_in_direction"
     ] is True
+
+
+def test_public_report_uses_neutral_group_names():
+    report = analyze_geometry(aligned_index(), redundant_residuals())
+    serialized = json.dumps(report).lower()
+
+    assert "group_a_cohesion" in serialized
+    assert "group_b_cohesion" in serialized
+    assert "contrast_heat" in serialized
+    assert "refusal" not in serialized
+    assert "unsafe_cohesion" not in serialized
+    assert "safe_cohesion" not in serialized
