@@ -100,6 +100,37 @@ def test_schedule_randomizes_five_trial_blocks_without_losing_coverage() -> None
     )
 
 
+def test_each_five_trial_block_uses_new_id_level_panels() -> None:
+    index = _aligned_index()
+
+    def block_panels(
+        first_trial: int, direction: str
+    ) -> set[frozenset[tuple[str, str]]]:
+        panels = set()
+        for trial_number in range(first_trial, first_trial + len(LANGUAGES)):
+            selected = trial_language_indices(
+                index,
+                mode="scheduled",
+                languages=LANGUAGES,
+                trial_number=trial_number,
+                seed=20260811,
+            )
+            panels.add(
+                frozenset(
+                    (
+                        str(index[position]["canonical_id"]),
+                        str(index[position]["language"]),
+                    )
+                    for position in selected
+                    if index[position]["direction_class"] == direction
+                )
+            )
+        return panels
+
+    assert block_panels(0, "safe") != block_panels(5, "safe")
+    assert block_panels(0, "unsafe") != block_panels(5, "unsafe")
+
+
 def test_schedule_rejects_a_canonical_id_missing_a_translation() -> None:
     index = [
         row

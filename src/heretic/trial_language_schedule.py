@@ -24,6 +24,7 @@ def _base_slots(
     direction: str,
     language_count: int,
     seed: int,
+    block: int,
 ) -> dict[tuple[str, str], int]:
     by_category: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for key, positions in groups.items():
@@ -37,7 +38,9 @@ def _base_slots(
     for category in sorted(by_category):
         keys = sorted(
             by_category[category],
-            key=lambda key: _stable_key(seed, direction, category, key[1]),
+            key=lambda key: _stable_key(
+                seed, "block-slots", block, direction, category, key[1]
+            ),
         )
         for key in keys:
             result[key] = cursor % language_count
@@ -113,6 +116,7 @@ def trial_language_indices(
             raise ValueError("canonical group category mismatch between translations")
 
     directions = sorted({key[0] for key in groups})
+    block = trial_number // len(normalized_languages)
     selected: list[int] = []
     for direction in directions:
         slots = _base_slots(
@@ -121,6 +125,7 @@ def trial_language_indices(
             direction=direction,
             language_count=len(normalized_languages),
             seed=seed,
+            block=block,
         )
         phase = _phase_for_trial(
             direction=direction,

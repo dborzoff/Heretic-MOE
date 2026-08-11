@@ -203,8 +203,59 @@ class BenchmarkSpecification(BaseModel):
     )
 
 
+class MultilingualSearchSettings(BaseModel):
+    """Pinned dataset and generation contract for multilingual search v3."""
+
+    enabled: bool = False
+    dataset_root: str | None = Field(
+        default=None,
+        description="Root containing the frozen multilingual JSONL files.",
+    )
+    split_root: str | None = Field(
+        default=None,
+        description=(
+            "Optional operative 1000/400 split root. Defaults to the standard "
+            "subdirectory under dataset_root."
+        ),
+    )
+    languages: list[str] = Field(
+        default_factory=lambda: ["en", "ru", "zh", "es", "fr"]
+    )
+    direction_rows_per_cell: PositiveInt = 1000
+    trial_rows_per_cell: PositiveInt = 400
+    calibration_rows_per_language: PositiveInt = 132
+    ordinary_max_new_tokens: PositiveInt = 512
+    final_max_new_tokens: PositiveInt = 1024
+    schedule_seed: int = 20260811
+    schedule_version: PositiveInt = 2
+
+    @field_validator("languages")
+    @classmethod
+    def validate_languages(cls, value: list[str]) -> list[str]:
+        normalized = [language.strip().lower() for language in value]
+        if normalized != ["en", "ru", "zh", "es", "fr"]:
+            raise ValueError(
+                "languages must be exactly en, ru, zh, es, fr in frozen order"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_enabled_root(self) -> "MultilingualSearchSettings":
+        if self.enabled and not (self.dataset_root or "").strip():
+            raise ValueError("dataset_root is required when enabled=true")
+        return self
+
+
 class Settings(BaseSettings):
     model: str = Field(description="Hugging Face model ID, or path to model on disk.")
+
+    multilingual_search: MultilingualSearchSettings = Field(
+        default_factory=MultilingualSearchSettings,
+        exclude=True,
+        description=(
+            "Private frozen input contract for multilingual Heretic-MOE search v3."
+        ),
+    )
 
     model_commit: str | None = Field(
         default=None,

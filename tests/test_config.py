@@ -7,6 +7,7 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from heretic.config import (
+    MultilingualSearchSettings,
     ScorerConfig,
     SeedSelection,
     SelectionPolicy,
@@ -77,6 +78,31 @@ class ScorerConfigTests(unittest.TestCase):
 
 
 class SearchSettingsTests(unittest.TestCase):
+    def test_multilingual_search_contract_defaults_are_frozen(self) -> None:
+        contract = MultilingualSearchSettings(
+            enabled=True,
+            dataset_root="F:/datasets/heretic_moe_5lang_v1",
+        )
+
+        self.assertEqual(contract.languages, ["en", "ru", "zh", "es", "fr"])
+        self.assertEqual(contract.direction_rows_per_cell, 1000)
+        self.assertEqual(contract.trial_rows_per_cell, 400)
+        self.assertEqual(contract.calibration_rows_per_language, 132)
+        self.assertEqual(contract.ordinary_max_new_tokens, 512)
+        self.assertEqual(contract.final_max_new_tokens, 1024)
+
+    def test_enabled_multilingual_search_requires_dataset_root(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "dataset_root"):
+            MultilingualSearchSettings(enabled=True)
+
+    def test_multilingual_search_rejects_duplicate_languages(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "languages"):
+            MultilingualSearchSettings(
+                enabled=True,
+                dataset_root="F:/datasets/heretic_moe_5lang_v1",
+                languages=["en", "ru", "en"],
+            )
+
     def test_search_extensions_are_disabled_by_default(self) -> None:
         with patch("sys.argv", ["test"]):
             settings = Settings(model="example/model")
@@ -92,6 +118,7 @@ class SearchSettingsTests(unittest.TestCase):
         self.assertFalse(settings.tpe_group)
         self.assertEqual(settings.fused_expert_chunk_size, 8)
         self.assertTrue(settings.record_edit_telemetry)
+        self.assertFalse(settings.multilingual_search.enabled)
 
     def test_sobol_and_optimization_only_are_explicit(self) -> None:
         with patch("sys.argv", ["test"]):
