@@ -77,6 +77,41 @@ separate SQLite archive, while manifests contain only paths, hashes, settings,
 trial numbers, and numeric measurements. Use `--search-only` to stop after the
 600-trial journal without the high-fidelity recheck or exports.
 
+### Multilingual geometry map
+
+`geometry-map` is a separate diagnostic workflow. It does not run Optuna,
+modify weights, generate response archives, or export a model. It measures the
+first-generated-token residual state once for every aligned input and then
+compares language/group/category mixtures from an immutable numeric cache:
+
+```powershell
+hereticMOE geometry-map run `
+  --corpus-root F:/data/heretic_moe_5lang_v1 `
+  --split train `
+  --languages en,ru,zh,es,fr `
+  --rows-per-cell 1200 `
+  --model F:/models/original-bf16 `
+  --output-dir F:/results/model-geometry `
+  --devices auto `
+  --batch-size 8 `
+  --task-rows 32
+```
+
+The controller keeps one model resident per selected GPU and lets workers claim
+global row ranges dynamically. Faster devices therefore process more ranges;
+the final tensor is still merged in canonical input order. Each range is
+atomically hashed, interrupted claims are recoverable, and a final manifest is
+published only after exact coverage and finite-tensor checks pass.
+
+The cache contains numeric residuals and a text-free row index, not generated
+answers or modified weights. Re-run only the mathematical analysis with:
+
+```powershell
+hereticMOE geometry-map analyze `
+  --cache-dir F:/results/model-geometry/cache `
+  --output-dir F:/results/model-geometry/analysis-v2
+```
+
 The current reference study completed 600 trials on Ministral-3-3B. The two
 selected BF16 models are published together as
 [Ministral-3-3B-Instruct-2512 Heretic Adaptive v1](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1).

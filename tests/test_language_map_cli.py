@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from heretic import cli
 from heretic import language_map_cli
+from heretic.supervisor import GpuInfo
 
 
 def _write_cell(path: Path, *, language: str, direction: str) -> None:
@@ -56,7 +58,7 @@ def test_dry_run_validates_without_loading_model(
     def fail_if_loaded(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("dry-run must not load a model")
 
-    monkeypatch.setattr(language_map_cli, "_capture", fail_if_loaded)
+    monkeypatch.setattr(language_map_cli, "_capture_parallel", fail_if_loaded)
     result = language_map_cli.main(
         [
             "run",
@@ -172,3 +174,54 @@ def test_corpus_root_can_select_test_split(tmp_path: Path) -> None:
 
     assert result["status"] == "PASS"
     assert result["rows"] == 8
+
+
+def test_run_rejects_single_and_multi_device_flags_together(tmp_path: Path) -> None:
+    for language in ("en", "ru"):
+        for direction in ("safe", "unsafe"):
+            _write_cell(
+                tmp_path / f"direction_{language}_{direction}_train.jsonl",
+                language=language,
+                direction=direction,
+            )
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        language_map_cli.main(
+            [
+                "run",
+                "--dry-run",
+                "--languages",
+                "en,ru",
+                "--rows-per-cell",
+                "2",
+                "--corpus-root",
+                str(tmp_path),
+                "--device",
+                "0",
+                "--devices",
+                "0,1",
+            ]
+        )
+
+
+def test_device_selection_defaults_to_all_eligible_and_preserves_explicit_order() -> None:
+    available = [
+        GpuInfo("0", "fast", 24576, 22000, 5),
+        GpuInfo("1", "slow", 24576, 18000, 10),
+    ]
+    common = {
+        "device": None,
+        "max_workers": None,
+        "min_free_gib": 4.0,
+        "min_free_fraction": 0.35,
+    }
+
+    automatic = language_map_cli._resolve_devices(
+        SimpleNamespace(devices=None, **common), available
+    )
+    explicit = language_map_cli._resolve_devices(
+        SimpleNamespace(devices="1,0", **common), available
+    )
+
+    assert [device.index for device in automatic] == ["0", "1"]
+    assert [device.index for device in explicit] == ["1", "0"]

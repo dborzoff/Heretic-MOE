@@ -11,8 +11,32 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .language_map_analysis import analyze_geometry, write_geometry_reports
-from .language_map_cache import capture_residual_cache, load_residual_cache
+from .language_map_cache import (
+    _capture_fingerprint,
+    load_residual_cache,
+)
+from .language_map_controller import (
+    GeometryWorkerSpec,
+    build_worker_command,
+    run_worker_processes,
+    worker_environment,
+)
 from .language_map_data import GeometryRow, LanguageFile, load_aligned_corpus
+from .language_map_parallel import finalize_range_cache
+from .range_work_queue import RangeWorkQueue
+
+
+def _resolve_devices(args: argparse.Namespace, available):
+    from .supervisor import select_devices
+
+    specification = args.devices or args.device or "auto"
+    return select_devices(
+        available,
+        specification,
+        min_free_fraction=args.min_free_fraction,
+        min_free_gib=args.min_free_gib,
+        max_workers=args.max_workers,
+    )
 
 
 def _language_path(value: str) -> tuple[str, Path]:
@@ -110,7 +134,19 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         help="After full validation, capture only the first N aligned rows per cell.",
     )
-    run.add_argument("--device", default="0", help="CUDA device identifier.")
+    run.add_argument(
+        "--device",
+        help="Single CUDA device identifier (legacy shorthand for --devices).",
+    )
+    run.add_argument(
+        "--devices",
+        help="CUDA devices: auto or a comma-separated ordered list.",
+    )
+    run.add_argument("--max-workers", type=int)
+    run.add_argument("--min-free-gib", type=float, default=4.0)
+    run.add_argument("--min-free-fraction", type=float, default=0.35)
+    run.add_argument("--task-rows", type=int, default=32)
+    run.add_argument("--cpu-threads-per-worker", type=int, default=6)
     run.add_argument("--dtype", default="bfloat16")
     run.add_argument("--seed", type=int, default=42)
     run.add_argument("--system-prompt", default="You are a helpful assistant.")
@@ -125,7 +161,40 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _capture(
+def _capture_metadata(
+    args: argparse.Namespace, files: list[LanguageFile]
+) -> dict[str, object]:
+    from .utils import get_file_sha256
+
+    return {
+        "model": args.model,
+        "seed": args.seed,
+        "languages": list(args.languages),
+        "source_rows_per_cell": args.rows_per_cell,
+        "rows_per_cell": args.effective_rows_per_cell,
+        "split": args.split,
+        "source_files": [
+            {
+                "language": specification.language,
+                "group": "A" if specification.direction == "safe" else "B",
+                "name": Path(specification.path).name,
+                "sha256": get_file_sha256(specification.path),
+            }
+            for specification in files
+        ],
+    }
+
+
+def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+    temporary = path.with_name(f"{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _capture_parallel(
     rows: list[GeometryRow],
     args: argparse.Namespace,
     files: list[LanguageFile],
@@ -135,55 +204,114 @@ def _capture(
     if args.batch_size <= 0:
         raise ValueError("--batch-size must be positive")
 
-    # Device visibility must be set before the first CUDA operation. Importing
-    # the heavyweight model wrapper is deliberately delayed until this point.
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
-    from .config import QuantizationMethod, Settings
-    from .model import Model
-    from .utils import get_file_sha256
+    cache_dir = args.output_dir / "cache"
+    if (cache_dir / "manifest.json").is_file():
+        _, _, manifest = load_residual_cache(cache_dir)
+        print("Geometry cache already complete; verified without model reload.", flush=True)
+        return manifest
 
-    settings = Settings(
-        model=args.model,
-        dtypes=[args.dtype],
-        quantization=QuantizationMethod.NONE,
-        device_map="auto",
-        batch_size=args.batch_size,
-        residual_batch_size=args.batch_size,
-        offload_outputs_to_cpu=True,
-        seed=args.seed,
-        system_prompt=args.system_prompt,
-    )
-    model = Model(settings)
-    source_files = [
-        {
-            "language": specification.language,
-            "group": "A" if specification.direction == "safe" else "B",
-            "name": Path(specification.path).name,
-            "sha256": get_file_sha256(specification.path),
-        }
-        for specification in files
-    ]
+    from .supervisor import detect_nvidia_gpus
 
-    def progress(completed: int, total: int) -> None:
-        print(f"Geometry capture: {completed}/{total}", flush=True)
+    selected = _resolve_devices(args, detect_nvidia_gpus())
+    print(f"Selected {len(selected)} resident GPU worker(s):", flush=True)
+    for device in selected:
+        print(
+            f"  GPU {device.index}: {device.name} | "
+            f"free {device.free_mib / 1024:.2f}/{device.total_mib / 1024:.2f} GiB | "
+            f"utilization {device.utilization}%",
+            flush=True,
+        )
 
-    return capture_residual_cache(
-        model,
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    metadata = _capture_metadata(args, files)
+    fingerprint = _capture_fingerprint(
         rows,
         args.batch_size,
-        args.output_dir / "cache",
-        system_prompt=args.system_prompt,
-        metadata={
-            "model": args.model,
-            "seed": args.seed,
-            "languages": list(args.languages),
-            "source_rows_per_cell": args.rows_per_cell,
-            "rows_per_cell": args.effective_rows_per_cell,
-            "split": args.split,
-            "source_files": source_files,
-        },
-        progress=progress,
+        args.system_prompt,
+        metadata,
     )
+    queue = RangeWorkQueue(args.output_dir / "capture_queue.sqlite3")
+    queue.initialize(
+        row_count=len(rows),
+        rows_per_task=args.task_rows,
+        fingerprint=fingerprint,
+    )
+    parts_dir = args.output_dir / "capture_parts"
+    parts_dir.mkdir(exist_ok=True)
+    invalid = queue.requeue_invalid_parts(parts_dir)
+    recovered = queue.recover_incomplete()
+    if invalid or recovered:
+        print(
+            f"Geometry resume: invalid={invalid}, recovered={recovered}, "
+            f"complete={queue.stats().complete_rows}/{len(rows)}",
+            flush=True,
+        )
+
+    job_path = args.output_dir / "capture_job.json"
+    job = {
+        "schema_version": 1,
+        "fingerprint": fingerprint,
+        "languages": list(args.languages),
+        "rows_per_cell": args.rows_per_cell,
+        "limit_per_cell": args.limit_per_cell,
+        "files": [
+            {
+                "language": specification.language,
+                "direction": specification.direction,
+                "path": str(Path(specification.path).resolve()),
+            }
+            for specification in files
+        ],
+        "model": args.model,
+        "dtype": args.dtype,
+        "batch_size": args.batch_size,
+        "system_prompt": args.system_prompt,
+        "seed": args.seed,
+        "metadata": metadata,
+        "queue_path": str(queue.path),
+        "parts_dir": str(parts_dir.resolve()),
+        "cpu_threads": args.cpu_threads_per_worker,
+    }
+    _write_json_atomic(job_path, job)
+    specifications = [
+        GeometryWorkerSpec(
+            device=device.index,
+            worker_id=f"gpu-{device.index}",
+            command=build_worker_command(
+                job_path.resolve(), device.index, f"gpu-{device.index}"
+            ),
+            environment=worker_environment(
+                os.environ,
+                device=device.index,
+                cpu_threads=args.cpu_threads_per_worker,
+            ),
+        )
+        for device in selected
+    ]
+    exits = run_worker_processes(specifications)
+    failed = {
+        worker_id: exit_code
+        for worker_id, exit_code in exits.items()
+        if exit_code != 0
+    }
+    if failed:
+        for worker_id in failed:
+            queue.release_worker(worker_id)
+        raise RuntimeError(f"Geometry worker failure(s): {failed}")
+    stats = queue.stats()
+    if stats.complete_rows != len(rows) or stats.complete != stats.total_tasks:
+        raise RuntimeError(
+            f"Geometry queue incomplete: {stats.complete_rows}/{len(rows)} rows"
+        )
+    manifest = finalize_range_cache(
+        rows,
+        queue,
+        parts_dir,
+        cache_dir,
+        metadata=metadata,
+    )
+    job_path.unlink(missing_ok=True)
+    return manifest
 
 
 def _analyze(cache_dir: Path, output_dir: Path, seed: int) -> dict[str, Any]:
@@ -207,6 +335,15 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         result = _analyze(args.cache_dir, args.output_dir, args.seed)
         print(json.dumps(result, sort_keys=True))
         return result
+
+    if args.device is not None and args.devices is not None:
+        raise ValueError("--device cannot be combined with --devices")
+    if args.max_workers is not None and args.max_workers <= 0:
+        raise ValueError("--max-workers must be positive")
+    if args.task_rows <= 0:
+        raise ValueError("--task-rows must be positive")
+    if args.cpu_threads_per_worker <= 0:
+        raise ValueError("--cpu-threads-per-worker must be positive")
 
     files = _input_files(args)
     rows = load_aligned_corpus(files, args.languages, args.rows_per_cell)
@@ -236,7 +373,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         print(json.dumps(result, sort_keys=True))
         return result
 
-    _capture(rows, args, files)
+    _capture_parallel(rows, args, files)
     result = _analyze(args.output_dir / "cache", args.output_dir / "analysis", args.seed)
     result["mode"] = "run"
     print(json.dumps(result, sort_keys=True))
