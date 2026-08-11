@@ -85,8 +85,12 @@ def _public_parameter(value: object) -> bool | float | int | str:
         return value
     if isinstance(value, float):
         return _finite_float(value)
-    if isinstance(value, str) and len(value) <= 64 and value.replace("_", "").isalnum():
-        return value
+    if isinstance(value, str) and len(value) <= 64:
+        allowed = set(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-. "
+        )
+        if value and all(character in allowed for character in value):
+            return value
     raise ValueError("unsupported or unsafe public trial parameter")
 
 

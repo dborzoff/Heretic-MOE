@@ -81,6 +81,24 @@ def test_journal_timeline_is_ordered_filtered_and_marks_missing_coordinates(
     assert "constraints" in payload
 
 
+def test_journal_timeline_accepts_builtin_per_layer_scope(tmp_path: Path) -> None:
+    path = tmp_path / "per-layer.log"
+    storage = JournalStorage(
+        JournalFileBackend(str(path), lock_obj=JournalFileOpenLock(str(path)))
+    )
+    study = optuna.create_study(storage=storage, study_name="per-layer", direction="minimize")
+    study.enqueue_trial({"direction_scope": "per layer"})
+
+    def objective(trial: optuna.Trial) -> float:
+        trial.suggest_categorical("direction_scope", ("global", "per layer"))
+        return 0.0
+
+    study.optimize(objective, n_trials=1)
+
+    records = load_text_free_trial_timeline(path)
+    assert records[0].parameters["direction_scope"] == "per layer"
+
+
 def test_anchor_selection_is_deterministic_and_balances_groups_and_languages() -> None:
     first = select_stratified_anchors(_index(), count=12, seed=41)
     second = select_stratified_anchors(_index(), count=12, seed=41)
