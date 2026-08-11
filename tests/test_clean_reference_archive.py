@@ -6,7 +6,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from heretic.clean_reference_archive import build_clean_reference_archive
+from heretic.clean_reference_archive import (
+    build_clean_reference_archive,
+    load_clean_reference_archive,
+)
 from heretic.language_map_data import GeometryRow
 
 
@@ -113,6 +116,32 @@ def test_archive_is_private_resumable_hashed_and_public_manifest_is_text_free(
     assert resumed == manifest
     assert model.generation_calls == 2
     assert model.nll_calls == 1
+
+    loaded_manifest, loaded_records = load_clean_reference_archive(output)
+    assert loaded_manifest == manifest
+    assert [record["row_id"] for record in loaded_records] == [
+        row.row_id for row in _rows(tmp_path)
+    ]
+
+
+def test_archive_loader_rejects_private_record_hash_drift(tmp_path: Path) -> None:
+    output = tmp_path / "archive"
+    build_clean_reference_archive(
+        model=_FakeModel(),
+        rows=_rows(tmp_path),
+        refusal_direction=torch.tensor([[1.0, 0.0], [0.0, 1.0]]),
+        output_dir=output,
+        dataset_contract_sha256="a" * 64,
+        direction_sha256="b" * 64,
+        model_fingerprint="fake-model-v1",
+        max_response_length=512,
+        batch_size=2,
+    )
+    with (output / "private" / "records.jsonl").open("ab") as stream:
+        stream.write(b"{}\n")
+
+    with pytest.raises(ValueError, match="hash mismatch"):
+        load_clean_reference_archive(output)
 
 
 def test_archive_rejects_direction_shape_mismatch(tmp_path: Path) -> None:

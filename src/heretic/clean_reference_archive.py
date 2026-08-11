@@ -258,3 +258,45 @@ def build_clean_reference_archive(
     _assert_public_text_free(manifest)
     _write_json(destination / "manifest.json", manifest)
     return manifest
+
+
+def load_clean_reference_archive(
+    input_dir: str | Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Load private clean references only after verifying the frozen contract."""
+
+    source = Path(input_dir).resolve()
+    manifest_path = source / "manifest.json"
+    records_path = source / "private" / "records.jsonl"
+    if not manifest_path.is_file() or not records_path.is_file():
+        raise FileNotFoundError("clean reference archive is incomplete")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("status") != "PASS":
+        raise ValueError("clean reference archive manifest is not PASS")
+    if manifest.get("private_records_sha256") != _sha256(records_path):
+        raise ValueError("clean reference archive hash mismatch")
+    contract = {
+        key: manifest[key]
+        for key in (
+            "schema_version",
+            "dataset_contract_sha256",
+            "direction_sha256",
+            "model_fingerprint",
+            "max_response_length",
+            "batch_size",
+            "row_id_order_sha256",
+        )
+    }
+    if manifest.get("archive_contract_sha256") != _canonical_sha256(contract):
+        raise ValueError("clean reference archive contract hash mismatch")
+    records = _read_private_records(records_path)
+    if len(records) != int(manifest.get("rows", -1)):
+        raise ValueError("clean reference archive row count mismatch")
+    row_ids = [record.get("row_id") for record in records]
+    if (
+        any(not isinstance(row_id, str) or not row_id for row_id in row_ids)
+        or len(set(row_ids)) != len(row_ids)
+        or _canonical_sha256(row_ids) != manifest.get("row_id_order_sha256")
+    ):
+        raise ValueError("clean reference archive row ID order mismatch")
+    return manifest, records

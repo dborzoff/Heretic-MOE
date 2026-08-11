@@ -160,7 +160,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--models", nargs="+", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--prototypes", required=True, type=Path)
-    parser.add_argument("--prompts", required=True, type=Path)
+    parser.add_argument("--prompts", nargs="+", required=True, type=Path)
+    parser.add_argument(
+        "--validate-prompt-alignment",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Validate prototype prompt IDs against the evaluation file. By default "
+            "this is enabled for one prompt file and disabled for multilingual sets."
+        ),
+    )
     parser.add_argument("--devices", default="0", type=_devices)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--max-response-length", type=int, default=128)
@@ -172,20 +181,76 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _materialize_prompt_set(
+    sources: Sequence[Path], output: Path
+) -> tuple[Path, int, list[dict[str, object]]]:
+    resolved = [path.resolve() for path in sources]
+    if not resolved or any(not path.is_file() for path in resolved):
+        missing = next((path for path in resolved if not path.is_file()), None)
+        raise FileNotFoundError(f"evaluation prompt set not found: {missing}")
+    source_records = [
+        {"path": str(path), "bytes": path.stat().st_size, "sha256": _sha256(path)}
+        for path in resolved
+    ]
+    if len(resolved) == 1:
+        rows = sum(
+            bool(line.strip())
+            for line in resolved[0].read_text(encoding="utf-8").splitlines()
+        )
+        return resolved[0], rows, source_records
+
+    payload_lines: list[bytes] = []
+    row_ids: set[str] = set()
+    rows = 0
+    for path in resolved:
+        for raw_line in path.read_bytes().splitlines():
+            if not raw_line.strip():
+                continue
+            value = json.loads(raw_line.decode("utf-8"))
+            row_id = value.get("row_id")
+            prompt = value.get("prompt")
+            if (
+                not isinstance(row_id, str)
+                or not row_id
+                or row_id in row_ids
+                or not isinstance(prompt, str)
+                or not prompt.strip()
+            ):
+                raise ValueError("multilingual SRG prompts have invalid or duplicate rows")
+            row_ids.add(row_id)
+            payload_lines.append(raw_line + b"\n")
+            rows += 1
+    combined = output / "private" / "evaluation_prompts.jsonl"
+    combined.parent.mkdir(parents=True, exist_ok=True)
+    payload = b"".join(payload_lines)
+    if combined.is_file() and combined.read_bytes() != payload:
+        raise ValueError("existing multilingual SRG prompt set has different content")
+    if not combined.is_file():
+        temporary = combined.with_suffix(combined.suffix + ".tmp")
+        temporary.write_bytes(payload)
+        temporary.replace(combined)
+    return combined, rows, source_records
+
+
 def _prepare_manifest(args: argparse.Namespace) -> dict[str, Any]:
     prototypes = args.prototypes.resolve()
-    prompts = args.prompts.resolve()
     if not prototypes.is_file():
         raise FileNotFoundError(f"prototype bank not found: {prototypes}")
-    if not prompts.is_file():
-        raise FileNotFoundError(f"evaluation prompt set not found: {prompts}")
     if args.max_response_length < 1:
         raise ValueError("max response length must be positive")
     if args.batch_size < 1:
         raise ValueError("batch size must be positive")
 
     output = args.output.resolve()
+    prompts, prompt_rows, prompt_sources = _materialize_prompt_set(
+        args.prompts, output
+    )
     jobs = build_jobs(args.models, output / "results")
+    validate_prompt_alignment = (
+        len(args.prompts) == 1
+        if args.validate_prompt_alignment is None
+        else bool(args.validate_prompt_alignment)
+    )
     return {
         "schema_version": 1,
         "status": "READY",
@@ -195,6 +260,9 @@ def _prepare_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "prototype_sha256": _sha256(prototypes),
         "prompt_path": str(prompts),
         "prompt_sha256": _sha256(prompts),
+        "prompt_rows": prompt_rows,
+        "prompt_sources": prompt_sources,
+        "validate_prompt_alignment": validate_prompt_alignment,
         "dtype": args.dtype,
         "max_response_length": args.max_response_length,
         "batch_size": args.batch_size,
@@ -213,6 +281,39 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def build_calibration_profile_artifact(
+    results: Sequence[dict[str, Any]],
+    prompt_path: str | Path,
+    output_path: str | Path,
+) -> dict[str, Any]:
+    """Build a group-transfer SRG profile without persisting prompt text."""
+
+    from .srg_calibration import build_profile
+
+    prompts = Path(prompt_path).resolve()
+    if not prompts.is_file():
+        raise FileNotFoundError(prompts)
+    actual_hash = _sha256(prompts)
+    if any(str(result.get("prompt_sha256")) != actual_hash for result in results):
+        raise ValueError("SRG result prompt SHA-256 does not match calibration rows")
+    metadata: list[dict[str, str]] = []
+    with prompts.open(encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            row = {
+                field: value.get(field)
+                for field in ("row_id", "language", "category_id")
+            }
+            if any(not isinstance(item, str) or not item.strip() for item in row.values()):
+                raise ValueError("SRG calibration rows are missing group metadata")
+            metadata.append({key: str(item) for key, item in row.items()})
+    profile = build_profile(results, row_metadata=metadata)
+    _write_json(Path(output_path).resolve(), profile)
+    return profile
 
 
 def _score_model(job: dict[str, object], manifest: dict[str, Any]) -> dict[str, Any]:
@@ -250,7 +351,7 @@ def _score_model(job: dict[str, object], manifest: dict[str, Any]) -> dict[str, 
         ),
         top_k=int(manifest["top_k"]),
         min_df=int(manifest["min_df"]),
-        validate_prompt_alignment=True,
+        validate_prompt_alignment=bool(manifest["validate_prompt_alignment"]),
     )
     scorer = SparseRefusalGeometry(
         heretic_settings=settings,
@@ -374,14 +475,24 @@ def _run_benchmark(manifest: dict[str, Any], output: Path) -> dict[str, Any]:
         for job in manifest["jobs"]
     ]
     report = summarize_results(results)
+    profile = build_calibration_profile_artifact(
+        results,
+        Path(str(manifest["prompt_path"])),
+        output / "calibration_profile.json",
+    )
+    report["calibration_profile"] = {
+        "path": str((output / "calibration_profile.json").resolve()),
+        "sha256": _sha256(output / "calibration_profile.json"),
+        "schema_version": profile["schema_version"],
+    }
     _write_json(output / "report.json", report)
     return report
 
 
 def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     args = _parser().parse_args(list(argv) if argv is not None else None)
-    manifest = _prepare_manifest(args)
     args.output.mkdir(parents=True, exist_ok=True)
+    manifest = _prepare_manifest(args)
     _write_json(args.output / "manifest.json", manifest)
     if args.dry_run:
         print(json.dumps({"status": "PASS", "mode": "dry-run", "models": len(manifest["jobs"])}, sort_keys=True))

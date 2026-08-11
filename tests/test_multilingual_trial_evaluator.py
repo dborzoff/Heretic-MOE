@@ -8,7 +8,10 @@ import pytest
 import torch
 
 from heretic.language_map_data import GeometryRow
-from heretic.multilingual_trial_evaluator import evaluate_multilingual_trial
+from heretic.multilingual_trial_evaluator import (
+    FrozenMultilingualTrialEvaluator,
+    evaluate_multilingual_trial,
+)
 
 
 def _rows(tmp_path: Path) -> list[GeometryRow]:
@@ -183,3 +186,30 @@ def test_trial_rejects_language_imbalance_even_when_direction_counts_match(
             expected_per_direction=4,
             expected_languages=("en", "ru"),
         )
+
+
+def test_frozen_evaluator_resolves_global_trial_schedule(tmp_path: Path) -> None:
+    rows = _rows(tmp_path)
+    model = _FakeModel(rows)
+    evaluator = FrozenMultilingualTrialEvaluator(
+        model=model,
+        trial_rows=rows,
+        schedule_records=[
+            {"trial_number": 17, "row_ids": [row.row_id for row in rows]}
+        ],
+        clean_records=_clean_records(rows),
+        refusal_direction=torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
+        layer_reliability=torch.ones(2),
+        srg_scorer=_FakeSRG(),
+        srg_profile=_profile(),
+        private_output_dir=tmp_path / "trials",
+        expected_per_direction=4,
+        expected_languages=("en", "ru"),
+    )
+
+    measurement = evaluator.evaluate(17)
+
+    assert measurement.trial_number == 17
+    assert (tmp_path / "trials" / "trial-000017.jsonl").is_file()
+    with pytest.raises(KeyError, match="18"):
+        evaluator.evaluate(18)

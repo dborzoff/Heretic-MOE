@@ -16,7 +16,7 @@ from typing import Any, Sequence
 
 import torch
 import torch.nn.functional as F
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from torch import Tensor
 
 
@@ -455,3 +455,77 @@ def write_direction_map_package(
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
+
+
+def load_direction_map_package(
+    input_dir: str | Path,
+) -> tuple[DirectionMapProfile, dict[str, Any]]:
+    """Load a frozen direction package after verifying all public hashes."""
+
+    source = Path(input_dir).resolve()
+    manifest_path = source / "manifest.json"
+    tensor_path = source / "directions.safetensors"
+    if not manifest_path.is_file() or not tensor_path.is_file():
+        raise FileNotFoundError("direction package is incomplete")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != 1 or manifest.get("status") != "PASS":
+        raise ValueError("direction package manifest is not PASS schema version 1")
+    tensor_record = (manifest.get("files") or {}).get("directions.safetensors")
+    if not isinstance(tensor_record, dict) or tensor_record.get("sha256") != _sha256(
+        tensor_path
+    ):
+        raise ValueError("direction package tensor SHA-256 mismatch")
+    package_payload = {
+        "tensor_sha256": tensor_record["sha256"],
+        "category_ids": tuple(manifest.get("category_ids") or ()),
+        "recommended_layer_bounds": tuple(
+            manifest.get("recommended_layer_bounds") or ()
+        ),
+        "diagnostics": manifest.get("diagnostics"),
+    }
+    package_sha = hashlib.sha256(
+        json.dumps(
+            package_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if manifest.get("package_sha256") != package_sha:
+        raise ValueError("direction package manifest SHA-256 mismatch")
+    tensors = load_file(str(tensor_path), device="cpu")
+    required = {
+        "consensus_refusal_direction",
+        "per_layer_direction",
+        "language_subspace",
+        "language_ranks",
+        "language_explained_variance",
+        "category_branch_directions",
+        "layer_reliability",
+    }
+    if set(tensors) != required:
+        raise ValueError("direction package tensor set mismatch")
+    consensus = tensors["consensus_refusal_direction"]
+    if (
+        consensus.ndim != 2
+        or consensus.shape
+        != (int(manifest["layers"]), int(manifest["hidden_size"]))
+        or tensors["layer_reliability"].shape != (consensus.shape[0],)
+        or not all(bool(torch.isfinite(value).all()) for value in tensors.values())
+    ):
+        raise ValueError("direction package tensor shape or finiteness mismatch")
+    bounds = tuple(int(value) for value in manifest["recommended_layer_bounds"])
+    if len(bounds) != 2:
+        raise ValueError("direction package layer bounds are invalid")
+    profile = DirectionMapProfile(
+        consensus_refusal_direction=consensus,
+        per_layer_direction=tensors["per_layer_direction"],
+        language_subspace=tensors["language_subspace"],
+        language_ranks=tensors["language_ranks"],
+        language_explained_variance=tensors["language_explained_variance"],
+        category_branch_directions=tensors["category_branch_directions"],
+        category_ids=tuple(str(value) for value in manifest["category_ids"]),
+        layer_reliability=tensors["layer_reliability"],
+        recommended_layer_bounds=(bounds[0], bounds[1]),
+        diagnostics=dict(manifest["diagnostics"]),
+    )
+    return profile, manifest

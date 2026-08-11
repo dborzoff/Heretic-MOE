@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import json
 import os
 import subprocess
@@ -13,7 +14,12 @@ import pytest
 
 from heretic.scorer import Score
 from heretic.scorers.sparse_refusal_geometry import SparseRefusalGeometry
-from heretic.srg_benchmark import build_jobs, result_payload, summarize_results
+from heretic.srg_benchmark import (
+    build_calibration_profile_artifact,
+    build_jobs,
+    result_payload,
+    summarize_results,
+)
 from heretic.utils import Prompt
 
 
@@ -144,6 +150,71 @@ def test_cli_dry_run_writes_a_text_free_pinned_manifest(tmp_path: Path) -> None:
     assert not ({"prompt", "response", "answer", "text"} & set(manifest))
 
 
+def test_cli_combines_aligned_multilingual_prompt_files_without_text_in_manifest(
+    tmp_path: Path,
+) -> None:
+    models = [tmp_path / "model-a", tmp_path / "model-b"]
+    for model in models:
+        model.mkdir()
+    prototypes = tmp_path / "prototypes.jsonl"
+    prototypes.write_bytes(b"prototype-bank\n")
+    prompt_files = []
+    for language in ("en", "ru"):
+        path = tmp_path / f"search_unsafe_{language}.jsonl"
+        path.write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "base_id": f"Q{index:04d}",
+                        "row_id": f"{language.upper()}-Q{index:04d}",
+                        "language": language,
+                        "category_id": "C01",
+                        "prompt": f"private-{language}-{index}",
+                    }
+                )
+                + "\n"
+                for index in (1, 2)
+            ),
+            encoding="utf-8",
+        )
+        prompt_files.append(path)
+    output = tmp_path / "output"
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "heretic.srg_benchmark",
+            "--models",
+            *(str(model) for model in models),
+            "--output",
+            str(output),
+            "--prototypes",
+            str(prototypes),
+            "--prompts",
+            *(str(path) for path in prompt_files),
+            "--dry-run",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["prompt_rows"] == 4
+    assert len(manifest["prompt_sources"]) == 2
+    assert all(len(record["sha256"]) == 64 for record in manifest["prompt_sources"])
+    combined = output / "private" / "evaluation_prompts.jsonl"
+    assert combined.is_file()
+    assert len(combined.read_text(encoding="utf-8").splitlines()) == 4
+    serialized = json.dumps(manifest, sort_keys=True)
+    assert "private-en" not in serialized
+    assert "private-ru" not in serialized
+
+
 def test_result_payload_keeps_numeric_diagnostics_and_rejects_text() -> None:
     job = {
         "model_index": 0,
@@ -188,6 +259,54 @@ def test_result_payload_keeps_numeric_diagnostics_and_rejects_text() -> None:
             prompt_sha256="b" * 64,
             elapsed_seconds=12.5,
         )
+
+
+def test_benchmark_results_build_group_transfer_profile(tmp_path: Path) -> None:
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "row_id": row_id,
+                    "language": language,
+                    "category_id": category,
+                    "prompt": "private",
+                }
+            ) + "\n"
+            for row_id, language, category in (
+                ("EN-Q1", "en", "C01"),
+                ("RU-Q1", "ru", "C01"),
+            )
+        ),
+        encoding="utf-8",
+    )
+    prompt_sha256 = hashlib.sha256(prompts.read_bytes()).hexdigest()
+    results = [
+        {
+            "status": "PASS",
+            "model_id": "a",
+            "prototype_sha256": "a" * 64,
+            "prompt_sha256": prompt_sha256,
+            "diagnostics": {"margins": [0.1, 0.2]},
+        },
+        {
+            "status": "PASS",
+            "model_id": "b",
+            "prototype_sha256": "a" * 64,
+            "prompt_sha256": prompt_sha256,
+            "diagnostics": {"margins": [0.2, 0.4]},
+        },
+    ]
+    output = tmp_path / "calibration_profile.json"
+
+    profile = build_calibration_profile_artifact(results, prompts, output)
+
+    assert profile["status"] == "PASS"
+    assert profile["schema_version"] == 2
+    assert set(profile["group_scale"]) == {"en\x1fC01", "ru\x1fC01"}
+    assert output.is_file()
+    serialized = output.read_text(encoding="utf-8")
+    assert "private" not in serialized
 
 
 def test_cli_rejects_zero_batch_instead_of_reaching_model_batchify(

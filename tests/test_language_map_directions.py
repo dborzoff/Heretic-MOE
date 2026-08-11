@@ -2,10 +2,12 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
 import torch
 
 from heretic.language_map_directions import (
     build_direction_map_profile,
+    load_direction_map_package,
     write_direction_map_package,
 )
 
@@ -86,3 +88,26 @@ def test_direction_package_is_atomic_hashed_and_text_free(tmp_path: Path) -> Non
     assert hashlib.sha256(tensor_path.read_bytes()).hexdigest() == manifest["files"][
         "directions.safetensors"
     ]["sha256"]
+
+    loaded, loaded_manifest = load_direction_map_package(tmp_path / "directions")
+
+    assert loaded_manifest == manifest
+    assert torch.equal(
+        loaded.consensus_refusal_direction,
+        profile.consensus_refusal_direction,
+    )
+    assert torch.equal(loaded.layer_reliability, profile.layer_reliability)
+
+
+def test_direction_package_loader_rejects_tensor_hash_drift(tmp_path: Path) -> None:
+    index, residuals = _synthetic_map()
+    write_direction_map_package(
+        build_direction_map_profile(index, residuals, languages=LANGUAGES),
+        tmp_path / "directions",
+    )
+    tensor_path = tmp_path / "directions" / "directions.safetensors"
+    with tensor_path.open("ab") as stream:
+        stream.write(b"drift")
+
+    with pytest.raises(ValueError, match="SHA-256"):
+        load_direction_map_package(tmp_path / "directions")

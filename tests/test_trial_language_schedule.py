@@ -1,9 +1,15 @@
 from collections import Counter
+import json
+from pathlib import Path
 
 import pytest
 
 from heretic.language_map_analysis import virtual_policy_indices
-from heretic.trial_language_schedule import trial_language_indices
+from heretic.trial_language_schedule import (
+    load_trial_language_schedule,
+    materialize_trial_language_schedule,
+    trial_language_indices,
+)
 
 
 LANGUAGES = ("en", "ru", "zh", "es", "fr")
@@ -181,3 +187,50 @@ def test_cached_geometry_accepts_the_scheduled_trial_policy() -> None:
     assert Counter(str(row["language"]) for row in chosen) == Counter(
         {language: 160 for language in LANGUAGES}
     )
+
+
+def test_schedule_is_materialized_text_free_and_resume_safe(tmp_path: Path) -> None:
+    index = _aligned_index(rows_per_direction=10)
+    output = tmp_path / "schedule"
+
+    manifest = materialize_trial_language_schedule(
+        index,
+        output_dir=output,
+        languages=LANGUAGES,
+        seed=123,
+        total_trials=10,
+        expected_per_direction=10,
+    )
+
+    assert manifest["status"] == "PASS"
+    assert manifest["trials"] == 10
+    assert manifest["rows_per_trial"] == 20
+    lines = [
+        json.loads(line)
+        for line in (output / "schedule.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["trial_number"] for row in lines] == list(range(10))
+    assert all(len(row["row_ids"]) == 20 for row in lines)
+    serialized = json.dumps(manifest, sort_keys=True)
+    assert "prompt" not in serialized
+    loaded_manifest, loaded_rows = load_trial_language_schedule(output)
+    assert loaded_manifest == manifest
+    assert [row["trial_number"] for row in loaded_rows] == list(range(10))
+    assert materialize_trial_language_schedule(
+        index,
+        output_dir=output,
+        languages=LANGUAGES,
+        seed=123,
+        total_trials=10,
+        expected_per_direction=10,
+    ) == manifest
+
+    with pytest.raises(ValueError, match="contract"):
+        materialize_trial_language_schedule(
+            index,
+            output_dir=output,
+            languages=LANGUAGES,
+            seed=124,
+            total_trials=10,
+            expected_per_direction=10,
+        )

@@ -49,6 +49,73 @@ class TrialMeasurement:
         }
 
 
+class FrozenMultilingualTrialEvaluator:
+    """Resolve immutable global trial IDs and delegate one-pass measurement."""
+
+    def __init__(
+        self,
+        *,
+        model: Any,
+        trial_rows: Sequence[GeometryRow],
+        schedule_records: Sequence[Mapping[str, object]],
+        clean_records: Sequence[Mapping[str, object]],
+        refusal_direction: Tensor,
+        layer_reliability: Tensor,
+        srg_scorer: Any,
+        srg_profile: Mapping[str, object],
+        private_output_dir: str | Path,
+        expected_per_direction: int = 400,
+        expected_languages: tuple[str, ...] = ("en", "ru", "zh", "es", "fr"),
+    ) -> None:
+        self.model = model
+        self._rows = {row.row_id: row for row in trial_rows}
+        if len(self._rows) != len(trial_rows):
+            raise ValueError("frozen trial rows have duplicate row IDs")
+        self._schedule: dict[int, tuple[str, ...]] = {}
+        for record in schedule_records:
+            trial_number = record.get("trial_number")
+            row_ids = record.get("row_ids")
+            if (
+                not isinstance(trial_number, int)
+                or trial_number < 0
+                or trial_number in self._schedule
+                or not isinstance(row_ids, list)
+                or any(row_id not in self._rows for row_id in row_ids)
+            ):
+                raise ValueError("frozen trial schedule is invalid")
+            self._schedule[trial_number] = tuple(str(row_id) for row_id in row_ids)
+        if not self._schedule:
+            raise ValueError("frozen trial schedule is empty")
+        self.clean_records = tuple(clean_records)
+        self.refusal_direction = refusal_direction
+        self.layer_reliability = layer_reliability
+        self.srg_scorer = srg_scorer
+        self.srg_profile = dict(srg_profile)
+        self.private_output_dir = Path(private_output_dir).resolve()
+        self.expected_per_direction = expected_per_direction
+        self.expected_languages = expected_languages
+
+    def evaluate(self, trial_number: int) -> TrialMeasurement:
+        if trial_number not in self._schedule:
+            raise KeyError(f"trial {trial_number} is not present in frozen schedule")
+        rows = [self._rows[row_id] for row_id in self._schedule[trial_number]]
+        return evaluate_multilingual_trial(
+            trial_number=trial_number,
+            model=self.model,
+            rows=rows,
+            clean_records=self.clean_records,
+            refusal_direction=self.refusal_direction,
+            layer_reliability=self.layer_reliability,
+            srg_scorer=self.srg_scorer,
+            srg_profile=self.srg_profile,
+            private_records_path=(
+                self.private_output_dir / f"trial-{trial_number:06d}.jsonl"
+            ),
+            expected_per_direction=self.expected_per_direction,
+            expected_languages=self.expected_languages,
+        )
+
+
 def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
