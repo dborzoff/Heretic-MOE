@@ -215,6 +215,95 @@ report.html
 Console output contains only progress, counts, memory, hashes, and paths. HTML
 contains plots and aggregate statistics but no prompt or response text.
 
+## Frozen 3D trajectory package
+
+The verified original-model cache is also the immutable coordinate reference
+for an interactive three-dimensional search map. For every model layer, fit a
+three-component PCA basis on the original cache only. Record the center,
+components, explained variance, and basis hash. All later trial and finalist
+measurements are projected with this frozen basis; adding a candidate must
+never move the original points or refit axes.
+
+The base map contains every measured original point. Public groups are neutral:
+
+- group A: blue;
+- group B: red;
+- externally verified successful candidate outcome: green;
+- unverified, missing-verdict, or borderline candidate outcome: yellow/grey.
+
+Green is never inferred from the search proxy, keywords, SRG, or a journal
+rank. It requires a row-ID-keyed external verdict. The search proxy remains a
+separate numeric overlay.
+
+The report provides independent filters for layer, language, group, category,
+trial number/range, search phase, finalist, verdict state, and arrow type. Each
+language and each search pass can be hidden completely. The view supports
+mouse rotation, pan/zoom, point-size and opacity controls, animation through
+trials, and an Original-only reset. It defaults to centroid arrows plus the
+largest individual movements so the plot remains readable; all individual
+arrows are an explicit opt-in.
+
+Every candidate edit is applied to the original model, so the causal-looking
+measurement shown by a solid arrow is strictly `Original -> Trial N`. A dashed
+`Trial N -> Trial N+1` line is only an optimizer-search path between independent
+edits and must be labelled as such. It is not presented as cumulative model
+training.
+
+The calibration package uses all original rows. Per-trial capture uses a frozen
+stratified anchor panel (default 32 canonical rows, balanced across public
+groups, languages, and categories). TOP-6 recheck uses a larger frozen panel
+(default 200); Balanced and Max may use the complete operative test panel.
+Anchors are selected by row metadata and seed. Their private prompt file is
+separate from the publishable geometry package.
+
+Store only projected float32 coordinates and full-space displacement summaries
+for ordinary trials. Retain original full residuals for the anchor panel so the
+report can publish PCA retained-shift ratios and warn when the three-dimensional
+view hides material movement. Full per-trial residual tensors are not retained.
+
+The package is append-only and text-free:
+
+```text
+geometry_3d/
+  manifest.json
+  projection_basis.safetensors
+  base_points.f32
+  base_index.json
+  anchor_index.json
+  anchor_reference.safetensors
+  journal_trials.jsonl
+  trial_points.f32
+  trial_index.jsonl
+  finalists/
+    balanced.f32
+    max.f32
+  verdicts.jsonl
+  report.html
+private/
+  anchors.jsonl
+```
+
+`journal_trials.jsonl` contains only trial numbers, phase, parameters, numeric
+objectives, constraints, state, and hashes. An existing journal can therefore
+populate the complete search timeline immediately. It cannot supply model-space
+coordinates by itself. Old trials without captured residuals are explicitly
+marked `not_captured`; their real points require deterministic replay of the
+saved edit followed by an anchor residual pass. Coordinates are never invented
+from objective values or response text.
+
+New searches first capture the decision-position residuals of the same prompts
+already used by normal trial evaluation. The model generation path exposes the
+first generated-token hidden states to an optional sink, avoiding a second full
+generation or a second large evaluation panel. A small frozen anchor panel is
+still measured after scoring and before reset so different trials, scorer
+versions, and search panels have an exactly comparable control trajectory.
+Both hooks are disabled unless a frozen trajectory package is supplied. Capture
+failure fails the trial artifact but does not silently publish a partial
+coordinate record.
+
+The self-contained HTML embeds typed binary coordinates and metadata without a
+network dependency. It contains no prompts, answers, excerpts, or archive text.
+
 ## Hard gates
 
 - exact aligned canonical coverage and matching metadata;

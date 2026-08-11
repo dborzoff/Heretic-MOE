@@ -507,3 +507,190 @@ hashes, canonical merge, and cache-only re-analysis.
 git add src/heretic/language_map_cli.py tests/test_language_map_cli.py README.md
 git commit -m "feat: run geometry capture across available GPUs"
 ```
+
+---
+
+### Task 9: Frozen three-dimensional basis and base-point package
+
+**Files:**
+- Create: `src/heretic/language_map_projection.py`
+- Create: `tests/test_language_map_projection.py`
+
+**Interfaces:**
+- Produces `fit_frozen_projection(residuals, seed=42) -> ProjectionBasis`.
+- Produces `project_residuals(residuals, basis) -> ndarray[float32]`.
+- Produces `write_base_projection(cache_dir, output_dir, seed=42)`.
+
+- [ ] **Step 1: Write failing deterministic projection tests**
+
+Test exact output shapes, finite coordinates, byte-identical basis and points on
+repeat, stable component signs, projection without refitting, text-free indexes,
+and a retained-shift ratio computed against the full-space displacement.
+
+- [ ] **Step 2: Run tests and verify RED**
+
+Run: `pytest tests/test_language_map_projection.py -q`
+
+- [ ] **Step 3: Implement frozen per-layer PCA and atomic artifacts**
+
+Use deterministic full SVD for small inputs and deterministic randomized PCA for
+operative caches. Fix component signs by forcing the largest absolute loading
+positive. Record per-layer centers, components, explained variance, algorithm,
+seed, input hash, and basis hash in safetensors metadata/manifest. Write base
+coordinates as contiguous float32 binary plus a text-free row index.
+
+- [ ] **Step 4: Run focused tests and verify GREEN**
+
+Run: `pytest tests/test_language_map_projection.py -q`
+
+- [ ] **Step 5: Commit**
+
+```powershell
+git add src/heretic/language_map_projection.py tests/test_language_map_projection.py
+git commit -m "feat: freeze 3d geometry projection"
+```
+
+---
+
+### Task 10: Journal timeline and append-only trial coordinates
+
+**Files:**
+- Create: `src/heretic/language_map_trajectory.py`
+- Create: `tests/test_language_map_trajectory.py`
+
+**Interfaces:**
+- Produces `load_text_free_trial_timeline(journal) -> list[TrialRecord]`.
+- Produces `select_stratified_anchors(index, count, seed) -> list[int]`.
+- Produces `initialize_trajectory_package(cache_dir, journal, output_dir, ...)`.
+- Produces `append_trial_projection(package_dir, trial_record, residuals)`.
+
+- [ ] **Step 1: Write failing journal/package tests**
+
+Create a synthetic Optuna journal and assert canonical trial order, numeric-only
+metadata, explicit `not_captured` state, deterministic balanced anchors,
+append-only duplicate rejection, atomic writes, verdict isolation, and source
+trial hashes.
+
+- [ ] **Step 2: Run tests and verify RED**
+
+Run: `pytest tests/test_language_map_trajectory.py -q`
+
+- [ ] **Step 3: Implement timeline and package writer**
+
+Read Optuna through its public journal storage API. Copy only state, number,
+phase, parameters, numeric values, constraints, and selected numeric user attrs.
+Do not copy settings, prompt paths, response archives, or arbitrary strings.
+Append projected trial blocks under a lock and publish their index only after
+shape/hash/finite checks pass.
+
+- [ ] **Step 4: Run focused tests and verify GREEN**
+
+Run: `pytest tests/test_language_map_trajectory.py -q`
+
+- [ ] **Step 5: Commit**
+
+```powershell
+git add src/heretic/language_map_trajectory.py tests/test_language_map_trajectory.py
+git commit -m "feat: track geometry across search trials"
+```
+
+---
+
+### Task 11: Self-contained filterable 3D HTML
+
+**Files:**
+- Create: `src/heretic/language_map_report.py`
+- Create: `tests/test_language_map_report.py`
+- Modify: `src/heretic/language_map_analysis.py`
+
+**Interfaces:**
+- Produces `write_interactive_geometry_report(package_dir, output_path)`.
+
+- [ ] **Step 1: Write failing report contract tests**
+
+Assert offline HTML with embedded typed arrays, no external URLs, controls for
+layer/language/group/category/trial/phase/finalist/verdict/arrows, animation,
+Original reset, solid Original-to-trial and dashed optimizer-path legends, and
+a forbidden-key/text scan.
+
+- [ ] **Step 2: Run tests and verify RED**
+
+Run: `pytest tests/test_language_map_report.py -q`
+
+- [ ] **Step 3: Implement the offline 3D renderer**
+
+Use a dependency-free canvas renderer with deterministic camera math, mouse
+rotation, pan/zoom, depth sorting, filters, sliders, animation, centroid arrows,
+and optional individual arrows. Embed base64 float32 arrays and safe metadata;
+do not use a CDN or `file://` fetch.
+
+- [ ] **Step 4: Run focused tests and verify GREEN**
+
+Run: `pytest tests/test_language_map_report.py -q`
+
+- [ ] **Step 5: Commit**
+
+```powershell
+git add src/heretic/language_map_report.py src/heretic/language_map_analysis.py tests/test_language_map_report.py
+git commit -m "feat: render interactive 3d search geometry"
+```
+
+---
+
+### Task 12: Geometry trajectory CLI and live trial hook
+
+**Files:**
+- Modify: `src/heretic/language_map_cli.py`
+- Modify: `src/heretic/config.py`
+- Modify: `src/heretic/main.py`
+- Modify: `tests/test_language_map_cli.py`
+- Create: `tests/test_trial_geometry_capture.py`
+- Modify: `README.md`
+
+**Interfaces:**
+- Adds `hereticMOE geometry-map project --cache-dir ... --journal ...`.
+- Adds `hereticMOE geometry-map render --package-dir ...`.
+- Adds an opt-in live trial capture hook using a frozen private anchor file.
+
+- [ ] **Step 1: Write failing CLI and hook tests**
+
+Assert journal-only initialization, no invented coordinates, optional capture
+of first-token residuals from the normal evaluation generation, anchor capture
+after scoring/before reset, exact source-trial identity, no duplicate answer
+generation, and fail-closed artifact publication.
+
+- [ ] **Step 2: Run tests and verify RED**
+
+Run: `pytest tests/test_language_map_cli.py tests/test_trial_geometry_capture.py -q`
+
+- [ ] **Step 3: Implement CLI and opt-in live hook**
+
+The `project` command builds the base map, private anchor input, text-free
+timeline, and HTML. The live hook records first-token residuals from the normal
+evaluation generation, then measures the small anchor control on the already
+edited model, projects both with the frozen basis, appends the trial, and leaves
+scores unchanged. Existing journals remain immutable and missing coordinates
+remain `not_captured` until replayed.
+
+- [ ] **Step 4: Run targeted and full verification**
+
+Run:
+
+```powershell
+pytest tests/test_language_map_projection.py tests/test_language_map_trajectory.py tests/test_language_map_report.py tests/test_language_map_cli.py tests/test_trial_geometry_capture.py -q
+pytest tests -q
+```
+
+- [ ] **Step 5: Build the Gemma base package from the verified cache**
+
+Run `geometry-map project` against the 12,000-row Gemma cache. Mechanically
+verify counts, hashes, offline HTML, all filter controls, and zero sensitive
+keys/text in public artifacts. Do not start a model replay without a separate
+visible-run decision.
+
+- [ ] **Step 6: Commit**
+
+```powershell
+git add src/heretic/language_map_cli.py src/heretic/config.py src/heretic/main.py tests/test_language_map_cli.py tests/test_trial_geometry_capture.py README.md docs/superpowers
+git commit -m "feat: capture search trajectory geometry"
+```
