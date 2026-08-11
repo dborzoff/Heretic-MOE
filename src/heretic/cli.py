@@ -14,6 +14,11 @@ def main() -> None:
 
         language_map_main(sys.argv[2:])
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "srg-benchmark":
+        from .srg_benchmark import main as srg_benchmark_main
+
+        srg_benchmark_main(sys.argv[2:])
+        return
 
     if os.environ.get("HERETIC_MOE_INTERNAL") == "1":
         from .main import main as worker_main

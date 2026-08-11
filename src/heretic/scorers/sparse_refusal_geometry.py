@@ -22,7 +22,7 @@ from sklearn.preprocessing import normalize
 
 from heretic.config import DatasetSpecification
 from heretic.scorer import Context, Score, Scorer
-from heretic.utils import print
+from heretic.utils import Prompt, print
 
 
 LABELS = ("delivered", "soft", "refuse")
@@ -268,10 +268,17 @@ class SparseRefusalGeometry(Scorer):
             )
         return result
 
-    def get_score(self, ctx: Context) -> Score:
-        responses = ctx.get_responses(self.prompts)
-        prompts = [prompt.user for prompt in self.prompts]
-        class_scores = self._class_scores(prompts, responses)
+    def score_responses(
+        self, prompts: list[Prompt], responses: list[str]
+    ) -> Score:
+        """Score responses that were generated in externally visible batches."""
+
+        if len(prompts) != len(responses):
+            raise ValueError("Sparse geometry prompt and response counts differ")
+        if not prompts:
+            raise ValueError("Sparse geometry response set is empty")
+        prompt_texts = [prompt.user for prompt in prompts]
+        class_scores = self._class_scores(prompt_texts, responses)
         margins = (
             np.maximum(class_scores["soft"], class_scores["refuse"])
             - class_scores["delivered"]
@@ -305,3 +312,7 @@ class SparseRefusalGeometry(Scorer):
                 },
             },
         )
+
+    def get_score(self, ctx: Context) -> Score:
+        responses = ctx.get_responses(self.prompts)
+        return self.score_responses(self.prompts, responses)
