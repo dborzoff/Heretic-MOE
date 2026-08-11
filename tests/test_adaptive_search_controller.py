@@ -5,7 +5,7 @@ import io
 import sys
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -55,6 +55,126 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
         self.assertFalse(args.recheck_only)
         self.assertEqual(args.finalist_top_n, 6)
         self.assertEqual(args.keyword_near_gate_extra, 1)
+
+    def test_multilingual_v3_config_does_not_require_legacy_cost_scorers(self) -> None:
+        controller.validate_adaptive_cost_contract(
+            {
+                "model": "example/model",
+                "selection_policy": "feasible_diverse",
+                "multilingual_search": {
+                    "enabled": True,
+                    "dataset_root": "F:/dataset",
+                },
+            },
+            source=Path("multilingual-v3.toml"),
+        )
+
+    def test_multilingual_data_root_points_at_frozen_dataset_layout(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            split = root / "operative_split_1000_400_v1"
+            split.mkdir()
+            (root / "manifest.json").write_text("{}\n", encoding="utf-8")
+            (split / "manifest.json").write_text("{}\n", encoding="utf-8")
+            config = controller.apply_data_root(
+                {
+                    "model": "example/model",
+                    "multilingual_search": {
+                        "enabled": True,
+                        "dataset_root": "old",
+                    },
+                },
+                root,
+            )
+
+        self.assertEqual(
+            config["multilingual_search"]["dataset_root"], root.as_posix()
+        )
+        self.assertEqual(
+            config["multilingual_search"]["split_root"], split.as_posix()
+        )
+
+    def test_multilingual_preparation_commands_use_all_devices_and_frozen_pools(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            split = root / "dataset" / "operative_split_1000_400_v1"
+            split.mkdir(parents=True)
+            config = {
+                "model": "F:/models/qwen",
+                "batch_size": 8,
+                "dtypes": ["bfloat16"],
+                "seed": 19,
+                "multilingual_search": {
+                    "enabled": True,
+                    "dataset_root": (root / "dataset").as_posix(),
+                    "split_root": split.as_posix(),
+                    "languages": ["en", "ru", "zh", "es", "fr"],
+                    "direction_rows_per_cell": 1000,
+                },
+            }
+            geometry = controller.multilingual_geometry_command(
+                config,
+                executable=Path("hereticMOE.exe"),
+                run_root=root / "run",
+                devices=["0", "1", "3"],
+            )
+            prepare = controller.multilingual_runtime_prepare_command(
+                config,
+                executable=Path("hereticMOE.exe"),
+                base_config=Path("config.toml"),
+                run_root=root / "run",
+                devices=["0", "1", "3"],
+                srg_source=Path("srg"),
+            )
+
+        self.assertIn("0,1,3", geometry)
+        self.assertEqual(geometry.count("--group-a"), 5)
+        self.assertEqual(geometry.count("--group-b"), 5)
+        self.assertIn("prepare-multilingual", prepare)
+        self.assertEqual(prepare[prepare.index("--device") + 1], "0")
+        self.assertEqual(
+            Path(prepare[prepare.index("--runtime-root") + 1]),
+            root / "run" / "runtime",
+        )
+
+    def test_multilingual_runtime_preparation_dry_run_prints_both_stages(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            split = root / "dataset" / "operative_split_1000_400_v1"
+            split.mkdir(parents=True)
+            config_path = root / "config.toml"
+            config_path.write_text('model = "F:/models/qwen"\n', encoding="utf-8")
+            config = {
+                "model": "F:/models/qwen",
+                "batch_size": 8,
+                "dtypes": ["bfloat16"],
+                "seed": 19,
+                "multilingual_search": {
+                    "enabled": True,
+                    "dataset_root": (root / "dataset").as_posix(),
+                    "split_root": split.as_posix(),
+                    "languages": ["en", "ru", "zh", "es", "fr"],
+                    "direction_rows_per_cell": 1000,
+                },
+            }
+            output = io.StringIO()
+            with redirect_stdout(output), patch.object(
+                controller.subprocess, "run"
+            ) as run:
+                result = controller.prepare_multilingual_run_runtime(
+                    config,
+                    executable=Path("hereticMOE.exe"),
+                    base_config=config_path,
+                    run_root=root / "run",
+                    devices=["0", "1"],
+                    srg_source=root / "srg",
+                    dry_run=True,
+                )
+
+        self.assertEqual(result["status"], "DRY_RUN")
+        self.assertIn("multilingual_geometry_prepare", output.getvalue())
+        self.assertIn("multilingual_runtime_prepare", output.getvalue())
+        run.assert_not_called()
 
     def test_recheck_only_is_distinct_from_search_only_and_export(self) -> None:
         args = self.parse_args("--recheck-only")
@@ -380,6 +500,33 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
         self.assertEqual(config["n_startup_trials"], 60)
         self.assertEqual(config["trial_response_number_offset"], 0)
         self.assertEqual(config["trial_response_number_stride"], 2)
+
+    def test_stage_config_pins_multilingual_runtime_below_run_root(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = controller.stage_config(
+                {
+                    "model": "example/model",
+                    "multilingual_search": {
+                        "enabled": True,
+                        "dataset_root": "F:/dataset",
+                    },
+                },
+                checkpoint_dir=root / "checkpoints",
+                n_trials=600,
+                n_startup_trials=0,
+                startup_design="random",
+                response_archive=root / "trial-responses.sqlite3",
+                response_number_offset=0,
+                response_number_stride=1,
+                parallel_workers=2,
+                runtime_root=root / "runtime",
+            )
+
+        self.assertEqual(
+            config["multilingual_search"]["runtime_root"],
+            (root / "runtime").as_posix(),
+        )
 
 
 if __name__ == "__main__":

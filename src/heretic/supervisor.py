@@ -220,6 +220,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument("--base-config", type=Path)
     parser.add_argument("--data-root", type=Path)
+    parser.add_argument("--srg-calibration-source", type=Path)
     parser.add_argument("--devices", default="auto")
     parser.add_argument("--max-workers", type=int)
     parser.add_argument("--min-free-fraction", type=float, default=0.70)
@@ -263,7 +264,7 @@ def main(argv: list[str] | None = None) -> None:
         / "research"
         / "configs"
         / "adaptive_search"
-        / "gemma2_sparse_geometry.toml"
+        / "multilingual_v3.toml"
     )
     worker_executable = executable_path(args.worker_executable)
     available = detect_nvidia_gpus()
@@ -315,6 +316,13 @@ def main(argv: list[str] | None = None) -> None:
     ]
     if args.data_root:
         command.extend(("--data-root", str(args.data_root.resolve())))
+    if args.srg_calibration_source:
+        command.extend(
+            (
+                "--srg-calibration-source",
+                str(args.srg_calibration_source.resolve()),
+            )
+        )
     if args.continue_shared_only:
         command.append("--continue-shared-only")
     command.append("--finalize" if args.finalize else "--no-finalize")

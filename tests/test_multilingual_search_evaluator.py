@@ -98,3 +98,9 @@ def test_adapter_requires_an_integer_global_trial_number() -> None:
         assert "global trial number" in str(error)
     else:
         raise AssertionError("non-integer archive IDs must be rejected")
+
+
+@pytest.mark.parametrize("invalid", [float("inf"), float("nan")])
+def test_constraint_contract_rejects_non_finite_limits(invalid: float) -> None:
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        MultilingualConstraintContract(max_safe_ppl_drift=invalid)

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
@@ -26,7 +27,11 @@ class MultilingualConstraintContract:
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():
-            if not isinstance(value, (int, float)) or not 0.0 <= float(value):
+            if (
+                not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not 0.0 <= float(value)
+            ):
                 raise ValueError(f"{name} must be finite and nonnegative")
 
 

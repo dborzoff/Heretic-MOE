@@ -71,6 +71,14 @@ def parse_args() -> argparse.Namespace:
             "direction_unsafe.jsonl, search_unsafe.jsonl, and prototypes.jsonl."
         ),
     )
+    parser.add_argument(
+        "--srg-calibration-source",
+        type=Path,
+        help=(
+            "Completed clean-model 660-row SRG calibration package used only "
+            "to freeze the multilingual runtime."
+        ),
+    )
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument(
         "--heretic",
@@ -336,6 +344,19 @@ def validate_adaptive_cost_contract(
 ) -> None:
     """Fail before GPU work when an adaptive profile cannot use calibrated Cost."""
 
+    multilingual = config.get("multilingual_search")
+    if isinstance(multilingual, dict) and multilingual.get("enabled"):
+        if not str(multilingual.get("dataset_root", "")).strip():
+            raise ValueError(f"Multilingual config has no dataset_root: {source}")
+        if config.get("selection_score_targets") or config.get(
+            "selection_score_weights"
+        ):
+            raise ValueError(
+                "Multilingual v3 must not contain legacy score targets or weights: "
+                f"{source}"
+            )
+        return
+
     if config.get("selection_policy") != "feasible_cost":
         raise ValueError(
             f"Adaptive config must use selection_policy='feasible_cost': {source}"
@@ -391,6 +412,21 @@ def apply_data_root(base: dict[str, Any], data_root: Path) -> dict[str, Any]:
     """Point the known adaptive scorers at one portable local data bundle."""
 
     root = data_root.resolve()
+    multilingual = base.get("multilingual_search")
+    if isinstance(multilingual, dict) and multilingual.get("enabled"):
+        split = root / "operative_split_1000_400_v1"
+        required = (root / "manifest.json", split / "manifest.json")
+        missing = [str(path) for path in required if not path.is_file()]
+        if missing:
+            raise FileNotFoundError(
+                "Multilingual data bundle is incomplete: " + ", ".join(missing)
+            )
+        config = copy.deepcopy(base)
+        contract = config["multilingual_search"]
+        contract["dataset_root"] = root.as_posix()
+        contract["split_root"] = split.as_posix()
+        return config
+
     paths = {
         "direction_safe": root / "direction_safe.jsonl",
         "direction_unsafe": root / "direction_unsafe.jsonl",
@@ -415,6 +451,249 @@ def apply_data_root(base: dict[str, Any], data_root: Path) -> dict[str, Any]:
     return config
 
 
+def multilingual_geometry_command(
+    config: dict[str, Any],
+    *,
+    executable: Path,
+    run_root: Path,
+    devices: list[str],
+) -> list[str]:
+    """Build the N-GPU prompt-only direction-map command for v3."""
+
+    contract = config.get("multilingual_search")
+    if not isinstance(contract, dict) or not contract.get("enabled"):
+        raise ValueError("multilingual search v3 is not enabled")
+    languages = [str(value).lower() for value in contract.get("languages", [])]
+    if not languages or len(set(languages)) != len(languages):
+        raise ValueError("multilingual languages are missing or duplicated")
+    split_root = Path(str(contract.get("split_root") or ""))
+    if not str(split_root):
+        split_root = Path(str(contract["dataset_root"])) / "operative_split_1000_400_v1"
+    rows = int(contract.get("direction_rows_per_cell", 1000))
+    command = [
+        str(executable),
+        "geometry-map",
+        "run",
+        "--model",
+        str(config["model"]),
+        "--output-dir",
+        str((run_root / "runtime_sources" / "direction_map").resolve()),
+        "--languages",
+        ",".join(languages),
+        "--rows-per-cell",
+        str(rows),
+        "--devices",
+        ",".join(devices),
+        "--max-workers",
+        str(len(devices)),
+        "--batch-size",
+        str(int(config.get("batch_size", 4))),
+        "--dtype",
+        str((config.get("dtypes") or ["bfloat16"])[0]),
+        "--seed",
+        str(int(config.get("seed", 20260811))),
+    ]
+    for language in languages:
+        command.extend(
+            (
+                "--group-a",
+                f"{language}={split_root / f'direction_{language}_safe_{rows}.jsonl'}",
+            )
+        )
+    for language in languages:
+        command.extend(
+            (
+                "--group-b",
+                f"{language}={split_root / f'direction_{language}_unsafe_{rows}.jsonl'}",
+            )
+        )
+    return command
+
+
+def multilingual_runtime_prepare_command(
+    config: dict[str, Any],
+    *,
+    executable: Path,
+    base_config: Path,
+    run_root: Path,
+    devices: list[str],
+    srg_source: Path,
+) -> list[str]:
+    """Build the single-GPU clean-reference preparation command."""
+
+    if not devices:
+        raise ValueError("multilingual runtime preparation needs one GPU")
+    return [
+        str(executable),
+        "prepare-multilingual",
+        "--config",
+        str(base_config.resolve()),
+        "--model",
+        str(config["model"]),
+        "--runtime-root",
+        str((run_root / "runtime").resolve()),
+        "--direction-source",
+        str(
+            (
+                run_root
+                / "runtime_sources"
+                / "direction_map"
+                / "analysis"
+            ).resolve()
+        ),
+        "--srg-source",
+        str(srg_source.resolve()),
+        "--device",
+        devices[0],
+        "--batch-size",
+        str(int(config.get("batch_size", 4))),
+    ]
+
+
+def verify_prepared_multilingual_runtime(runtime_root: Path) -> dict[str, Any]:
+    """Mechanically verify a completed runtime without loading model weights."""
+
+    from heretic.clean_reference_archive import load_clean_reference_archive
+    from heretic.language_map_directions import load_direction_map_package
+    from heretic.multilingual_runtime import resolve_srg_runtime_contract
+    from heretic.trial_language_schedule import load_trial_language_schedule
+
+    root = runtime_root.resolve()
+    manifest_path = root / "manifest.json"
+    model_manifest_path = root / "model" / "manifest.json"
+    static_manifest_path = root / "static_manifest.json"
+    if not all(
+        path.is_file()
+        for path in (manifest_path, model_manifest_path, static_manifest_path)
+    ):
+        raise FileNotFoundError("multilingual runtime is incomplete")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    model_manifest = json.loads(model_manifest_path.read_text(encoding="utf-8"))
+    static_manifest = json.loads(static_manifest_path.read_text(encoding="utf-8"))
+    if any(
+        value.get("status") != "PASS"
+        for value in (manifest, model_manifest, static_manifest)
+    ):
+        raise ValueError("multilingual runtime contains a non-PASS manifest")
+    _, direction = load_direction_map_package(root / "clean_map" / "directions")
+    resolve_srg_runtime_contract(root / "srg_calibration")
+    clean, _ = load_clean_reference_archive(root / "clean_trial_reference")
+    schedule, _ = load_trial_language_schedule(root / "study" / "schedule")
+    expected = {
+        "dataset_contract_sha256": static_manifest["dataset_contract_sha256"],
+        "model_fingerprint": model_manifest["model_fingerprint"],
+        "static_runtime_sha256": static_manifest["static_runtime_sha256"],
+        "clean_reference_contract_sha256": clean["archive_contract_sha256"],
+    }
+    mismatches = {
+        key: (manifest.get(key), value)
+        for key, value in expected.items()
+        if manifest.get(key) != value
+    }
+    if mismatches:
+        raise ValueError(f"multilingual runtime contract mismatch: {mismatches}")
+    if (
+        static_manifest.get("direction_package_sha256")
+        != direction.get("package_sha256")
+        or static_manifest.get("schedule_contract_sha256")
+        != schedule.get("schedule_contract_sha256")
+    ):
+        raise ValueError("multilingual static component hash mismatch")
+    return manifest
+
+
+def prepare_multilingual_run_runtime(
+    config: dict[str, Any],
+    *,
+    executable: Path,
+    base_config: Path,
+    run_root: Path,
+    devices: list[str],
+    srg_source: Path | None,
+    dry_run: bool,
+) -> dict[str, Any] | None:
+    """Prepare map, calibration, schedule and clean references before search."""
+
+    contract = config.get("multilingual_search")
+    if not isinstance(contract, dict) or not contract.get("enabled"):
+        return None
+    runtime_root = run_root.resolve() / "runtime"
+    if not dry_run and (runtime_root / "manifest.json").is_file():
+        manifest = verify_prepared_multilingual_runtime(runtime_root)
+        print(
+            json.dumps(
+                {
+                    "event": "multilingual_runtime_resume",
+                    "status": "PASS",
+                    "rows_per_trial": manifest["rows_per_trial"],
+                    "schedule_trials": manifest["schedule_trials"],
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return manifest
+
+    configured_source = contract.get("srg_calibration_source")
+    resolved_srg = (
+        srg_source.resolve()
+        if srg_source is not None
+        else Path(str(configured_source)).resolve()
+        if configured_source
+        else None
+    )
+    if resolved_srg is None:
+        raise ValueError(
+            "multilingual v3 requires --srg-calibration-source or "
+            "multilingual_search.srg_calibration_source"
+        )
+    geometry_command = multilingual_geometry_command(
+        config,
+        executable=executable,
+        run_root=run_root,
+        devices=devices,
+    )
+    prepare_command = multilingual_runtime_prepare_command(
+        config,
+        executable=executable,
+        base_config=base_config,
+        run_root=run_root,
+        devices=devices,
+        srg_source=resolved_srg,
+    )
+    direction_package = (
+        run_root.resolve()
+        / "runtime_sources"
+        / "direction_map"
+        / "analysis"
+    )
+    if dry_run or not (direction_package / "manifest.json").is_file():
+        print(
+            json.dumps(
+                {"event": "multilingual_geometry_prepare", "command": geometry_command},
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        if not dry_run:
+            subprocess.run(geometry_command, check=True, cwd=Path(__file__).parents[2])
+    if not dry_run:
+        from heretic.language_map_directions import load_direction_map_package
+
+        load_direction_map_package(direction_package)
+    print(
+        json.dumps(
+            {"event": "multilingual_runtime_prepare", "command": prepare_command},
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    if dry_run:
+        return {"status": "DRY_RUN"}
+    subprocess.run(prepare_command, check=True, cwd=Path(__file__).parents[2])
+    return verify_prepared_multilingual_runtime(runtime_root)
+
+
 def stage_config(
     base: dict[str, Any],
     *,
@@ -426,8 +705,14 @@ def stage_config(
     response_number_offset: int,
     response_number_stride: int,
     parallel_workers: int,
+    runtime_root: Path | None = None,
 ) -> dict[str, Any]:
-    config = dict(base)
+    config = copy.deepcopy(base)
+    multilingual = config.get("multilingual_search")
+    if isinstance(multilingual, dict) and multilingual.get("enabled"):
+        if runtime_root is None:
+            raise ValueError("runtime_root is required for multilingual stages")
+        multilingual["runtime_root"] = runtime_root.resolve().as_posix()
     config.update(
         {
             "device_map": "cuda:0",
@@ -510,6 +795,7 @@ def build_stage(
         response_number_offset=response_number_offset,
         response_number_stride=response_number_stride,
         parallel_workers=parallel_workers,
+        runtime_root=root / "runtime",
     )
     if preserve_existing_config:
         if not config_path.is_file():
@@ -2816,6 +3102,15 @@ def main() -> None:
     shared_worker_count = len(devices)
     random_device = devices[0]
     sobol_device = devices[1] if len(devices) > 1 else devices[0]
+    prepare_multilingual_run_runtime(
+        base,
+        executable=executable,
+        base_config=base_config,
+        run_root=root,
+        devices=devices,
+        srg_source=args.srg_calibration_source,
+        dry_run=args.dry_run,
+    )
     response_archive = root / "trial-responses.sqlite3"
     scorer_updates = (
         frozenset({"scorer"})

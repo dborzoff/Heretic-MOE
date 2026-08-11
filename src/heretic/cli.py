@@ -19,6 +19,11 @@ def main() -> None:
 
         srg_benchmark_main(sys.argv[2:])
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "prepare-multilingual":
+        from .multilingual_prepare_cli import main as multilingual_prepare_main
+
+        multilingual_prepare_main(sys.argv[2:])
+        return
 
     if os.environ.get("HERETIC_MOE_INTERNAL") == "1":
         from .main import main as worker_main

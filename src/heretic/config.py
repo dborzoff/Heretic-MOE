@@ -222,6 +222,13 @@ class MultilingualSearchSettings(BaseModel):
         default=None,
         description="Frozen map/reference/SRG/schedule artifact root for workers.",
     )
+    srg_calibration_source: str | None = Field(
+        default=None,
+        description=(
+            "Completed 660-row clean-model calibration package used only by "
+            "the supervisor while freezing a new runtime."
+        ),
+    )
     languages: list[str] = Field(
         default_factory=lambda: ["en", "ru", "zh", "es", "fr"]
     )
