@@ -1068,13 +1068,18 @@ class Model:
         return residuals
 
     def get_residuals_batched(self, prompts: list[Prompt]) -> Tensor:
-        residuals = []
         batch_size = self.settings.residual_batch_size or self.settings.batch_size
+        return torch.cat(list(self.iter_residual_batches(prompts, batch_size)), dim=0)
 
+    def iter_residual_batches(
+        self, prompts: list[Prompt], batch_size: int
+    ):
+        """Yield residual tensors without materializing the complete corpus."""
+
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
         for batch in batchify(prompts, batch_size):
-            residuals.append(self.get_residuals(batch))
-
-        return torch.cat(residuals, dim=0)
+            yield self.get_residuals(batch)
 
     def get_residuals_mean(self, prompts: list[Prompt]) -> Tensor:
         if not prompts:
