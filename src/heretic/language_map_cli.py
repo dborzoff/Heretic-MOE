@@ -22,6 +22,10 @@ from .language_map_controller import (
     worker_environment,
 )
 from .language_map_data import GeometryRow, LanguageFile, load_aligned_corpus
+from .language_map_directions import (
+    build_direction_map_profile,
+    write_direction_map_package,
+)
 from .language_map_parallel import finalize_range_cache
 from .language_map_projection import write_projection_package
 from .language_map_report import write_interactive_geometry_report
@@ -338,6 +342,15 @@ def _capture_parallel(
 
 def _analyze(cache_dir: Path, output_dir: Path, seed: int) -> dict[str, Any]:
     index, residuals, manifest = load_residual_cache(cache_dir)
+    languages = tuple(
+        dict.fromkeys(str(row["language"]).lower() for row in index)
+    )
+    profile = build_direction_map_profile(
+        index,
+        residuals,
+        languages=languages,
+    )
+    direction_manifest = write_direction_map_package(profile, output_dir)
     report = analyze_geometry(index, residuals, seed=seed)
     write_geometry_reports(report, output_dir)
     return {
@@ -347,6 +360,7 @@ def _analyze(cache_dir: Path, output_dir: Path, seed: int) -> dict[str, Any]:
         "layers": report["layers"],
         "hidden_size": report["hidden_size"],
         "cache_status": manifest["status"],
+        "directions_sha256": direction_manifest["package_sha256"],
         "output_dir": str(output_dir.resolve()),
     }
 
