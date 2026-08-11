@@ -117,3 +117,24 @@ def test_stale_attempt_cannot_complete_a_reclaimed_range(tmp_path: Path) -> None
             shape=(4, 2, 3),
         )
 
+
+def test_resume_recovers_claimed_and_failed_but_preserves_complete(
+    tmp_path: Path,
+) -> None:
+    queue = _queue(tmp_path, rows=12)
+    complete = queue.claim("gpu-0")
+    claimed = queue.claim("gpu-1")
+    failed = queue.claim("gpu-2")
+    assert complete is not None and claimed is not None and failed is not None
+    queue.complete(
+        complete,
+        part_file="complete.safetensors",
+        sha256="e" * 64,
+        shape=(4, 2, 3),
+    )
+    queue.fail(failed, "RuntimeError")
+
+    assert queue.recover_incomplete() == 2
+
+    states = [record.state for record in queue.records()]
+    assert states == ["complete", "pending", "pending"]

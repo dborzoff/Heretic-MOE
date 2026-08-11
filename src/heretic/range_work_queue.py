@@ -278,6 +278,24 @@ class RangeWorkQueue:
             connection.commit()
             return int(changed)
 
+    def recover_incomplete(self) -> int:
+        """Return orphaned claims and explicit failures to the pending pool."""
+
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                """
+                UPDATE tasks
+                SET state = 'pending', worker_id = NULL, claimed_at = NULL,
+                    finished_at = NULL, part_file = NULL, sha256 = NULL,
+                    shape_rows = NULL, shape_layers = NULL, shape_hidden = NULL,
+                    error_type = 'resume_recovered'
+                WHERE state IN ('claimed', 'failed')
+                """
+            ).rowcount
+            connection.commit()
+            return int(changed)
+
     def requeue_invalid_parts(self, parts_dir: str | Path) -> int:
         parts_dir = Path(parts_dir)
         invalid: list[int] = []
