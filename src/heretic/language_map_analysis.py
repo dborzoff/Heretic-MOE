@@ -16,6 +16,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from .trial_language_schedule import trial_language_indices
+
 
 _SENSITIVE_KEYS = {"prompt", "response", "answer", "text"}
 
@@ -58,6 +60,20 @@ def virtual_policy_indices(
         return list(range(len(index)))
     if policy == "en_only":
         return [i for i, row in enumerate(index) if str(row["language"]).lower() == "en"]
+    if policy.startswith("scheduled_languages:"):
+        raw_trial_number = policy.split(":", 1)[1]
+        try:
+            trial_number = int(raw_trial_number)
+        except ValueError as error:
+            raise ValueError("scheduled language policy requires an integer trial") from error
+        ordered_languages = tuple(dict.fromkeys(_metadata(index, "language")))
+        return trial_language_indices(
+            index,
+            mode="scheduled",
+            languages=ordered_languages,
+            trial_number=trial_number,
+            seed=seed,
+        )
     if policy.startswith("leave_out:"):
         excluded = policy.split(":", 1)[1].lower()
         if excluded not in languages:
@@ -613,6 +629,10 @@ def analyze_geometry(
         }
 
     policy_names = ["full", "cycle_languages"]
+    policy_names.extend(
+        f"scheduled_languages:{trial_number}"
+        for trial_number in range(len(unique_languages))
+    )
     if "en" in unique_languages:
         policy_names.append("en_only")
     policy_names.extend(f"leave_out:{language}" for language in unique_languages)

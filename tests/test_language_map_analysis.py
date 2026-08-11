@@ -90,6 +90,13 @@ def test_nonduplicated_policy_uses_one_language_per_canonical_id():
     assert {row["language"] for row in selected_rows} == {"en", "ru"}
 
 
+def test_report_compares_every_scheduled_language_panel():
+    report = analyze_geometry(aligned_index(), redundant_residuals())
+    policies = {entry["policy"] for entry in report["subset_candidates"]}
+
+    assert {"scheduled_languages:0", "scheduled_languages:1"} <= policies
+
+
 def test_weighted_and_fractional_policies_are_cached_only_and_deterministic():
     index = []
     for direction in ("safe", "unsafe"):
