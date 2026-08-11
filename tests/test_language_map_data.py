@@ -120,3 +120,44 @@ def test_rejects_blank_prompt_without_echoing_it(tmp_path: Path):
             expected_per_cell=2,
         )
     assert "private" not in str(error.value)
+
+
+def test_translation_may_omit_redundant_direction_metadata(tmp_path: Path):
+    files = balanced_files(tmp_path)
+    for name in ("ru_safe.jsonl", "ru_unsafe.jsonl"):
+        path = tmp_path / name
+        values = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        for value in values:
+            value.pop("direction_class")
+        path.write_text(
+            "".join(json.dumps(value, ensure_ascii=False) + "\n" for value in values),
+            encoding="utf-8",
+        )
+
+    rows = load_aligned_corpus(
+        files,
+        expected_languages=("en", "ru"),
+        expected_per_cell=2,
+    )
+
+    assert len(rows) == 8
+
+
+def test_rejects_optional_direction_metadata_when_it_conflicts(tmp_path: Path):
+    files = balanced_files(tmp_path)
+    ru_safe = tmp_path / "ru_safe.jsonl"
+    values = [
+        json.loads(line) for line in ru_safe.read_text(encoding="utf-8").splitlines()
+    ]
+    values[0]["direction_class"] = "unsafe"
+    ru_safe.write_text(
+        "".join(json.dumps(value, ensure_ascii=False) + "\n" for value in values),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="direction metadata drift"):
+        load_aligned_corpus(
+            files,
+            expected_languages=("en", "ru"),
+            expected_per_cell=2,
+        )

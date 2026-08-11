@@ -58,9 +58,13 @@ def _read_file(specification: LanguageFile) -> list[GeometryRow]:
             if not isinstance(value, dict):
                 raise ValueError(f"{path.name}:{line_number} must be a JSON object")
             language = _required_string(value, "language", path, line_number).lower()
-            direction = _required_string(
-                value, "direction_class", path, line_number
-            ).lower()
+            direction = (
+                specification.direction
+                if "direction_class" not in value
+                else _required_string(
+                    value, "direction_class", path, line_number
+                ).lower()
+            )
             if language != specification.language:
                 raise ValueError(
                     f"{path.name}:{line_number} language metadata drift"
