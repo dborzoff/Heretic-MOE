@@ -332,12 +332,12 @@ git commit -m "feat: add language geometry diagnostic command"
 - Consumes the CLI from Task 4 and frozen dataset files.
 - Produces the first verified cache/report directory; no model export.
 
-- [ ] **Step 1: Run text-free EN/RU/ES dry-run validation**
+- [x] **Step 1: Run text-free five-language dry-run validation**
 
-Run `hereticMOE geometry-map run --dry-run` with the six complete train files
-and `--expected-languages en,ru,es --expected-per-cell 1200`.
+Run `hereticMOE geometry-map run --dry-run` from the frozen corpus root with
+EN/RU/ZH/ES/FR and 1,200 rows per cell.
 
-Expected: PASS, 7,200 rows, exact coverage, no GPU allocation.
+Evidence (2026-08-11): PASS, 12,000 rows, exact coverage, no GPU allocation.
 
 - [x] **Step 2: Run a 20-row-per-cell Gemma smoke**
 
@@ -349,13 +349,13 @@ Evidence (2026-08-11): EN/RU, 20 rows per cell, 80/80 rows, 43 layers,
 hidden size 2560, cache SHA-256 `25d2c2c70aa173820abb204360cf3fd6807ccc09a1a14291e782860d01de0a03`.
 The cache-only replay used 0 MiB on GPU 1 and produced five byte-identical reports.
 
-- [ ] **Step 3: Gate the 12,000-row run**
+- [x] **Step 3: Gate the 12,000-row run**
 
 Re-check live GPU use and require all ten final five-language train files at
 1,200 rows each. If FR/ZH are incomplete, stop at READY and do not infer a
 language policy from EN/RU/ES.
 
-- [ ] **Step 4: Run full Gemma capture once when the gate passes**
+- [ ] **Step 4: Run full Gemma capture once when the gate passes** *(running)*
 
 Launch in a visible UTF-8 PowerShell window. Verify advancing row counters and
 final cache/report hashes. Re-run `geometry-map analyze` from cache and confirm
