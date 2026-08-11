@@ -1015,6 +1015,97 @@ class Model:
 
         return responses
 
+    def get_responses_with_prefill_residuals(
+        self,
+        prompts: list[Prompt],
+        skip_special_tokens: bool = False,
+    ) -> tuple[list[str], Tensor]:
+        """Generate once and capture the prefill residual at every language layer.
+
+        Forward hooks retain only the first invocation, which is the prompt prefill.
+        Token-by-token decode activations are neither stored nor returned. The compact
+        ``[prompt, embedding+layers, hidden]`` tensor is always float32 on CPU so the
+        hooks do not hold GPU storage after generation.
+        """
+
+        if not prompts:
+            raise ValueError("prompts must not be empty")
+        modules: list[Module] = [self.model.get_input_embeddings(), *self.get_layers()]
+        captured: list[Tensor | None] = [None] * len(modules)
+        handles = []
+
+        def capture(index: int):
+            def hook(_module: Module, _inputs: Any, output: Any) -> None:
+                if captured[index] is not None:
+                    return
+                value = output[0] if isinstance(output, (tuple, list)) else output
+                if not isinstance(value, Tensor) or value.ndim != 3:
+                    raise ValueError(
+                        f"prefill hook {index} did not receive [batch,sequence,hidden]"
+                    )
+                captured[index] = (
+                    value[:, -1, :].detach().to(torch.float32).cpu().contiguous()
+                )
+
+            return hook
+
+        for index, module in enumerate(modules):
+            handles.append(module.register_forward_hook(capture(index)))
+        try:
+            inputs, outputs = self.generate(
+                prompts,
+                max_new_tokens=self.settings.max_response_length,
+            )
+        finally:
+            for handle in handles:
+                handle.remove()
+
+        missing = [index for index, value in enumerate(captured) if value is None]
+        if missing:
+            raise RuntimeError(f"prefill residual hooks did not fire: {missing}")
+        residuals = torch.stack(
+            [cast(Tensor, value) for value in captured],
+            dim=1,
+        )
+        if 0 <= self.settings.winsorization_quantile < 1:
+            thresholds = torch.quantile(
+                torch.abs(residuals),
+                self.settings.winsorization_quantile,
+                dim=2,
+                keepdim=True,
+            )
+            residuals = torch.clamp(residuals, -thresholds, thresholds)
+
+        sequences = outputs.sequences if hasattr(outputs, "sequences") else outputs
+        sequences = cast(Tensor, sequences)
+        responses = self.tokenizer.batch_decode(
+            sequences[:, cast(Tensor, inputs["input_ids"]).shape[1] :],
+            skip_special_tokens=skip_special_tokens,
+        )
+        return responses, residuals
+
+    def get_responses_with_prefill_residuals_batched(
+        self,
+        prompts: list[Prompt],
+        skip_special_tokens: bool = False,
+    ) -> tuple[list[str], Tensor]:
+        """Batched form of :meth:`get_responses_with_prefill_residuals`."""
+
+        if not prompts:
+            raise ValueError("prompts must not be empty")
+        responses: list[str] = []
+        residuals: list[Tensor] = []
+        for batch in batchify(prompts, self.settings.batch_size):
+            batch_responses, batch_residuals = (
+                self.get_responses_with_prefill_residuals(
+                    batch,
+                    skip_special_tokens=skip_special_tokens,
+                )
+            )
+            responses.extend(batch_responses)
+            residuals.append(batch_residuals)
+        return responses, torch.cat(residuals, dim=0)
+
     def get_residuals(self, prompts: list[Prompt]) -> Tensor:
         # We only generate one token, and we return the residual vectors
         # at that token position, for each prompt and layer.
