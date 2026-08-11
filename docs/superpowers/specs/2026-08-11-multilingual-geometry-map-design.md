@@ -101,11 +101,15 @@ For every layer the report estimates the main and interaction components:
 ```text
 direction + language + category
 + direction:language
-+ direction:category
-+ language:category
-+ direction:language:category
++ category(direction)
++ language:category(direction)
 + residual
 ```
+
+`category` is nested within direction because the SAFE and UNSAFE category
+taxonomies are not matched factor levels. Treating them as a crossed
+`direction x category` design would incorrectly attribute topic differences to
+refusal geometry.
 
 The corresponding fuzzy regions include:
 
