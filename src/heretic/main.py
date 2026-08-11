@@ -158,7 +158,14 @@ def _display_score_record(record: dict[str, Any]) -> str:
                     f"R-side {positive_count / total * 100:.1f}%"
                 )
     if name in {"Perplexity drift", "PPL drift"}:
-        return f"{abs(float(score['value'])) * 100:.2f}%"
+        diagnostics = score.get("diagnostics") or {}
+        signed = diagnostics.get(
+            "signed_relative_change", diagnostics.get("relative_change")
+        )
+        magnitude = f"{abs(float(score['value'])) * 100:.2f}%"
+        if signed is None:
+            return magnitude
+        return f"{magnitude} (signed {float(signed) * 100:+.2f}%)"
     return str(score["rich_display"])
 
 
@@ -186,7 +193,14 @@ def _leaderboard_score_parts(record: dict[str, Any]) -> list[str]:
     if name == "Keywords":
         return [f"KW {score['rich_display']}"]
     if name in {"Perplexity drift", "PPL drift"}:
-        return [f"PPL {abs(float(score['value'])) * 100:.2f}%"]
+        diagnostics = score.get("diagnostics") or {}
+        signed = diagnostics.get(
+            "signed_relative_change", diagnostics.get("relative_change")
+        )
+        magnitude = f"PPL {abs(float(score['value'])) * 100:.2f}%"
+        if signed is None:
+            return [magnitude]
+        return [f"{magnitude} ({float(signed) * 100:+.2f}%)"]
     return [f"{_display_score_name(name)} {_display_score_record(record)}"]
 
 

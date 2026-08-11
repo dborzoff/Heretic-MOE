@@ -517,11 +517,19 @@ clean response token IDs. Это отдельный forward внутри одн�
 ```text
 nll_clean_i = -mean log p_clean(y_t | prompt, y_<t)
 nll_trial_i = -mean log p_trial(y_t | prompt, y_<t)
-ppl_ratio_i = exp(nll_trial_i - nll_clean_i)
-ppl_drift_i = abs(ppl_ratio_i - 1)
+signed_log_ppl_delta_i = nll_trial_i - nll_clean_i
+signed_ppl_change_i = exp(signed_log_ppl_delta_i) - 1
+ppl_drift_i = exp(abs(signed_log_ppl_delta_i)) - 1
 ```
 
-Основной PPL aggregate является macro-average по языкам и SAFE-категориям.
+`signed_ppl_change` сохраняется в diagnostics и показывается рядом с drift, чтобы
+было видно направление изменения. В objective, `PreservationLoss` и hard gate
+используется только неотрицательный `ppl_drift`: reciprocal-изменения `x2` и
+`x0.5` получают одинаковый штраф. Отрицательный signed PPL не может давать
+поиску бонус и компенсировать повреждение других метрик.
+
+Основной PPL aggregate является macro-average `ppl_drift` по языкам и
+SAFE-категориям. Отдельно сохраняется macro signed change без влияния на выбор.
 Независимый общий PPL-корпус может сохраняться как дополнительный constraint,
 но не заменяет same-ID SAFE preservation.
 
@@ -800,7 +808,8 @@ parameter sets. Сырые значения старой метрики не п�
 - macro category weighting;
 - baseline-relative SRG имеет ноль на clean=trial;
 - R->D положителен, D->R отрицателен;
-- абсолютный PPL drift одинаково штрафует рост и падение;
+- симметричный log-PPL drift одинаково штрафует reciprocal-рост и падение;
+- signed PPL сохраняет направление только в diagnostics и не входит в objective;
 - Cost_up монотонно растёт с Removal и падает с Damage.
 
 ### Runtime

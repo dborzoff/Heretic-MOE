@@ -5,10 +5,31 @@ from heretic.config import DatasetSpecification
 from heretic.scorers.perplexity import (
     load_perplexity_text,
     paired_relative_perplexity_interval,
+    symmetric_perplexity_change,
 )
 
 
 class PerplexityUncertaintyTests(unittest.TestCase):
+    def test_symmetric_drift_treats_reciprocal_changes_equally(self):
+        doubled = symmetric_perplexity_change(160.0, 80.0)
+        halved = symmetric_perplexity_change(40.0, 80.0)
+
+        self.assertEqual(doubled["signed_relative_change"], 1.0)
+        self.assertEqual(halved["signed_relative_change"], -0.5)
+        self.assertAlmostEqual(doubled["symmetric_drift"], 1.0)
+        self.assertAlmostEqual(halved["symmetric_drift"], 1.0)
+
+    def test_symmetric_drift_is_zero_at_the_clean_baseline(self):
+        result = symmetric_perplexity_change(80.0, 80.0)
+
+        self.assertEqual(result["signed_log_delta"], 0.0)
+        self.assertEqual(result["signed_relative_change"], 0.0)
+        self.assertEqual(result["symmetric_drift"], 0.0)
+
+    def test_symmetric_drift_rejects_non_positive_perplexity(self):
+        with self.assertRaises(ValueError):
+            symmetric_perplexity_change(0.0, 80.0)
+
     def test_identical_windows_are_not_distinguishable(self):
         result = paired_relative_perplexity_interval(
             [2.0, 2.1, 1.9], [2.0, 2.1, 1.9]

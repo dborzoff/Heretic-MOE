@@ -21,10 +21,11 @@ A full CPU pass takes fourteen minutes, too long for the search loop. The same
 data takes seconds on a GPU, so the proxy is no longer needed.
 
 This scorer averages negative log-likelihood over fixed text windows and
-returns the absolute relative drift from the baseline model:
+returns a symmetric multiplicative drift from the baseline model:
 
-    signed_change = perplexity / perplexity_baseline - 1
-    value = abs(signed_change)
+    signed_log_delta = log(perplexity / perplexity_baseline)
+    signed_change = exp(signed_log_delta) - 1
+    value = exp(abs(signed_log_delta)) - 1
 
 Zero means the model predicts the text as well as before. A value of 0.03 means
 that perplexity moved three percent in either direction. This is a preservation
@@ -42,7 +43,7 @@ Enable it in the scorer configuration:
 """
 import hashlib
 from importlib import resources
-from math import expm1, sqrt
+from math import expm1, isfinite, log, sqrt
 from pathlib import Path
 from statistics import fmean, stdev
 
@@ -60,6 +61,27 @@ BUILTIN_PERPLEXITY_CORPORA = {
         "1d6f25ca80bd49255212d67d7eff96763ab01abbd472c04b916ec62318857a9d",
     ),
 }
+
+
+def symmetric_perplexity_change(
+    perplexity: float,
+    baseline_perplexity: float,
+) -> dict[str, float]:
+    """Return signed direction and reciprocal-symmetric preservation drift."""
+
+    if (
+        not isfinite(perplexity)
+        or not isfinite(baseline_perplexity)
+        or perplexity <= 0.0
+        or baseline_perplexity <= 0.0
+    ):
+        raise ValueError("Perplexity values must be finite and positive")
+    signed_log_delta = log(perplexity / baseline_perplexity)
+    return {
+        "signed_log_delta": signed_log_delta,
+        "signed_relative_change": expm1(signed_log_delta),
+        "symmetric_drift": expm1(abs(signed_log_delta)),
+    }
 
 
 def paired_relative_perplexity_interval(
@@ -238,8 +260,9 @@ class Perplexity(Scorer):
 
     def get_score(self, ctx: Context) -> Score:
         ppl, window_nll, token_count = self._perplexity(ctx)
-        rel = ppl / self._baseline - 1.0
-        drift = abs(rel)
+        change = symmetric_perplexity_change(ppl, self._baseline)
+        rel = change["signed_relative_change"]
+        drift = change["symmetric_drift"]
         uncertainty = paired_relative_perplexity_interval(
             window_nll, self._baseline_window_nll
         )
@@ -247,13 +270,18 @@ class Perplexity(Scorer):
         # Markup would appear verbatim, as in "[bold]51.71[/]".
         return Score(
             value=drift,
-            rich_display=f"{drift * 100:.2f}%",
-            md_display=f"{drift * 100:.2f}%",
+            rich_display=(
+                f"{drift * 100:.2f}% (signed {rel * 100:+.2f}%)"
+            ),
+            md_display=f"{drift * 100:.2f}% (signed {rel * 100:+.2f}%)",
             diagnostics={
                 "perplexity": ppl,
                 "baseline_perplexity": self._baseline,
                 "relative_change": rel,
+                "signed_relative_change": rel,
+                "signed_log_delta": change["signed_log_delta"],
                 "absolute_relative_change": drift,
+                "symmetric_drift": drift,
                 "token_count": token_count,
                 "window_nll": window_nll,
                 "baseline_window_nll": self._baseline_window_nll,

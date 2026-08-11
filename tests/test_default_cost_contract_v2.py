@@ -51,6 +51,22 @@ def test_cost_display_marks_the_higher_is_better_contract() -> None:
     assert formatter(0.25) == "Cost↑ 0.800"
 
 
+def test_ppl_console_display_keeps_magnitude_and_signed_direction() -> None:
+    record = {
+        "name": "Perplexity drift",
+        "score": {
+            "value": 0.0752688172,
+            "rich_display": "unused",
+            "diagnostics": {"signed_relative_change": -0.07},
+        },
+    }
+
+    assert heretic_main._display_score_record(record) == "7.53% (signed -7.00%)"
+    assert heretic_main._leaderboard_score_parts(record) == [
+        "PPL 7.53% (-7.00%)"
+    ]
+
+
 def test_all_adaptive_profiles_use_calibrated_cost() -> None:
     config_root = (
         Path(__file__).parents[1] / "research" / "configs" / "adaptive_search"
