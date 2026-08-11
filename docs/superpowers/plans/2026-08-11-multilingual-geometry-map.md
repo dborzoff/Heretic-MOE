@@ -6,6 +6,11 @@
 
 **Architecture:** A strict JSONL loader creates a text-free aligned row index. A capture module calls the existing Heretic first-generated-token residual path in bounded batches and writes an immutable tensor cache. A separate analyzer operates only on that cache to calculate fuzzy language/category/direction maps and virtual-corpus reconstruction error. The CLI dispatches before the normal multi-GPU search supervisor, so no Optuna study or export can start accidentally.
 
+Multi-GPU capture uses one resident model process per selected GPU and a durable
+SQLite queue of global row ranges. Workers produce independent atomic parts;
+the controller verifies and merges them in canonical order. Dynamic claiming
+lets faster GPUs complete more ranges without reloading either model.
+
 **Tech Stack:** Python 3.12, PyTorch, safetensors, NumPy, Pydantic/Heretic Settings, pytest.
 
 ## Global Constraints
@@ -366,3 +371,139 @@ that the model is not loaded.
 Proceed with the unchanged manifest only if Gemma cache verification and
 synthetic-math tests pass. Any change to row selection, position, or analysis
 settings requires a new versioned cache rather than overwriting Gemma output.
+
+---
+
+### Task 6: Durable global range queue
+
+**Files:**
+- Create: `src/heretic/range_work_queue.py`
+- Create: `tests/test_range_work_queue.py`
+
+**Interfaces:**
+- Produces `RangeWorkQueue(path).initialize(row_count, rows_per_task, fingerprint)`.
+- Produces `claim(worker_id) -> RangeWorkItem | None`.
+- Produces `complete(item, part_file, sha256, shape)` and `fail(item, error_type)`.
+- Produces `verify_parts(parts_dir)`, `release_worker(worker_id)`, and `stats()`.
+
+- [ ] **Step 1: Write failing queue tests**
+
+Test exact range coverage, dynamic claiming by a faster worker, release after a
+worker failure, contract mismatch rejection, and requeue of a missing or
+hash-mismatched part.
+
+- [ ] **Step 2: Run tests and verify RED**
+
+Run: `pytest tests/test_range_work_queue.py -q`
+
+Expected: import failure because `heretic.range_work_queue` does not exist.
+
+- [ ] **Step 3: Implement the minimal SQLite queue**
+
+Use `BEGIN IMMEDIATE`, WAL, `synchronous=FULL`, attempt-scoped claims, and atomic
+state transitions. Store only numeric ranges, hashes, shapes, and worker IDs;
+never store prompts.
+
+- [ ] **Step 4: Run tests and verify GREEN**
+
+Run: `pytest tests/test_range_work_queue.py -q`
+
+- [ ] **Step 5: Commit**
+
+```powershell
+git add src/heretic/range_work_queue.py tests/test_range_work_queue.py
+git commit -m "feat: queue geometry capture ranges"
+```
+
+---
+
+### Task 7: Resident GPU workers and canonical merge
+
+**Files:**
+- Modify: `src/heretic/language_map_cache.py`
+- Create: `src/heretic/language_map_parallel.py`
+- Create: `tests/test_language_map_parallel.py`
+
+**Interfaces:**
+- Produces `capture_claimed_ranges(model, rows, queue, parts_dir, worker_id, batch_size)`.
+- Produces `finalize_range_cache(rows, queue, parts_dir, output_dir, metadata)`.
+
+- [ ] **Step 1: Write failing worker and merge tests**
+
+Use two fake resident workers of different speed. Assert that the faster worker
+claims more tasks, every row is measured once, output returns to canonical
+order, an interrupted restart measures only missing ranges, and a tampered part
+is rejected before finalization.
+
+- [ ] **Step 2: Run tests and verify RED**
+
+Run: `pytest tests/test_language_map_parallel.py -q`
+
+- [ ] **Step 3: Implement range capture and finalization**
+
+Each claimed range may contain multiple model batches. Concatenate only that
+range, validate finite `[rows,layers,hidden]` values, write one atomic part, and
+record its hash. Finalization loads verified parts by global start row and
+publishes the existing cache contract with the manifest last.
+
+- [ ] **Step 4: Run tests and verify GREEN**
+
+Run: `pytest tests/test_language_map_parallel.py tests/test_language_map_cache.py -q`
+
+- [ ] **Step 5: Commit**
+
+```powershell
+git add src/heretic/language_map_cache.py src/heretic/language_map_parallel.py tests/test_language_map_parallel.py
+git commit -m "feat: capture geometry on resident GPU workers"
+```
+
+---
+
+### Task 8: One-window multi-GPU CLI
+
+**Files:**
+- Modify: `src/heretic/language_map_cli.py`
+- Modify: `tests/test_language_map_cli.py`
+- Modify: `README.md`
+
+**Interfaces:**
+- Adds `--devices auto|0,1,...`, `--task-rows`, and `--cpu-threads-per-worker`.
+- Keeps `--device N` as a parse-time error when combined with `--devices`.
+- Adds an internal worker entry point that is not exposed as a public workflow.
+
+- [ ] **Step 1: Write failing CLI/controller tests**
+
+Assert device discovery, one child per selected GPU, GPU-prefixed progress in
+one controller stream, nonzero worker exit propagation, and rejection of an
+already-busy explicit device unless the user overrides the gate.
+
+- [ ] **Step 2: Run tests and verify RED**
+
+Run: `pytest tests/test_language_map_cli.py -q`
+
+- [ ] **Step 3: Implement controller and internal workers**
+
+Set `CUDA_VISIBLE_DEVICES` independently before each worker imports the model.
+Keep workers resident, stream prefixed stdout/stderr to the controller, poll
+queue counts, release failed claims, and finalize only when all ranges verify.
+
+- [ ] **Step 4: Run targeted regression tests**
+
+Run:
+
+```powershell
+pytest tests/test_range_work_queue.py tests/test_language_map_parallel.py tests/test_language_map_cache.py tests/test_language_map_cli.py -q
+```
+
+- [ ] **Step 5: Run a visible two-GPU smoke when both GPUs are free**
+
+Use a new output directory and a complete aligned slice. Verify one public
+controller, two resident workers, dynamic unequal task counts, exact coverage,
+hashes, canonical merge, and cache-only re-analysis.
+
+- [ ] **Step 6: Commit**
+
+```powershell
+git add src/heretic/language_map_cli.py tests/test_language_map_cli.py README.md
+git commit -m "feat: run geometry capture across available GPUs"
+```

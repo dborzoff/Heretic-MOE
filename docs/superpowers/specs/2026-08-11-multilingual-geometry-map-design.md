@@ -70,6 +70,33 @@ meaning of the initial cache.
 There is no per-trial regeneration. All subset, language-mixture, leave-one-out,
 and temperature calculations operate on the immutable cache.
 
+## Resident multi-GPU capture
+
+`hereticMOE geometry-map run` accepts `--devices auto` or an explicit ordered
+list such as `--devices 0,1`. The public command remains one controller in one
+visible console. It starts one long-lived worker process per selected GPU; each
+worker loads exactly one model copy and keeps it resident until the shared
+capture finishes.
+
+The controller creates a durable SQLite queue of global, non-overlapping row
+ranges. A worker claims the next range only after finishing its current range,
+so a faster GPU naturally processes more rows and heterogeneous 2-, 6-, or
+8-GPU hosts do not wait on equal static shards. Each range is written atomically
+as a separately hashed safetensors part. Global row numbers, rather than worker
+identity, determine final order.
+
+On restart, the controller verifies every completed part against its recorded
+range, shape, and SHA-256. Missing, truncated, non-finite, or hash-mismatched
+parts return to the queue; valid ranges are never recomputed. A worker failure
+releases only that worker's claimed range. The final cache manifest is published
+only after exact one-time coverage and canonical-order merge pass.
+
+Each worker uses a bounded CPU thread pool and coarse queue ranges containing
+multiple model batches. The implementation records rows/s, peak VRAM, claimed
+ranges, and completed rows by GPU. Batch-size tuning and optional length buckets
+may change execution order, but the final row index and residual tensor remain
+in canonical order and byte-stable for the same measured values.
+
 ## Continuous heat map
 
 For direction `d`, language `l`, category `c`, canonical item `i`, and layer
