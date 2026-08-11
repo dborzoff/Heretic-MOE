@@ -144,3 +144,31 @@ def test_dry_run_discovers_frozen_layout_from_corpus_root(tmp_path: Path) -> Non
 
     assert result["status"] == "PASS"
     assert result["rows"] == 8
+
+
+def test_corpus_root_can_select_test_split(tmp_path: Path) -> None:
+    for language in ("en", "ru"):
+        for direction in ("safe", "unsafe"):
+            _write_cell(
+                tmp_path / f"direction_{language}_{direction}_test.jsonl",
+                language=language,
+                direction=direction,
+            )
+
+    result = language_map_cli.main(
+        [
+            "run",
+            "--dry-run",
+            "--languages",
+            "en,ru",
+            "--rows-per-cell",
+            "2",
+            "--corpus-root",
+            str(tmp_path),
+            "--split",
+            "test",
+        ]
+    )
+
+    assert result["status"] == "PASS"
+    assert result["rows"] == 8

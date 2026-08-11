@@ -38,7 +38,7 @@ def _input_files(args: argparse.Namespace) -> list[LanguageFile]:
             LanguageFile(
                 language,
                 direction,
-                root / f"direction_{language}_{direction}_train.jsonl",
+                root / f"direction_{language}_{direction}_{args.split}.jsonl",
             )
             for direction in ("safe", "unsafe")
             for language in args.languages
@@ -56,6 +56,12 @@ def _add_input_arguments(parser: argparse.ArgumentParser) -> None:
         "--corpus-root",
         type=Path,
         help="Root of the frozen aligned train layout.",
+    )
+    parser.add_argument(
+        "--split",
+        choices=("train", "test"),
+        default="train",
+        help="Frozen corpus split to discover below --corpus-root.",
     )
     parser.add_argument(
         "--languages",
@@ -173,6 +179,7 @@ def _capture(
             "languages": list(args.languages),
             "source_rows_per_cell": args.rows_per_cell,
             "rows_per_cell": args.effective_rows_per_cell,
+            "split": args.split,
             "source_files": source_files,
         },
         progress=progress,
