@@ -17,20 +17,23 @@ or after the experiment to interpret already-frozen regions.
 
 ## First diagnostic corpus
 
-The first operative run uses the frozen aligned EN/RU training split:
+The first operative map uses the frozen aligned five-language training split:
 
-- 1,200 SAFE canonical prompts in EN and RU;
-- 1,200 UNSAFE canonical prompts in EN and RU;
-- 4,800 measured rows total;
+- 1,200 SAFE canonical prompts in EN, RU, ZH, ES, and FR;
+- 1,200 UNSAFE canonical prompts in EN, RU, ZH, ES, and FR;
+- 12,000 measured rows total (`1,200 x 2 directions x 5 languages`);
 - exact canonical-ID, direction, category, and order alignment is mandatory.
 
-The 200 SAFE plus 200 UNSAFE canonical holdout remains outside map fitting. Its
-aligned language variants are used once to validate the selected composition,
-not to tune thresholds or language weights.
+The 200 SAFE plus 200 UNSAFE canonical holdout remains outside map fitting. The
+map selects the language assignment for this 400-row operative test panel. Its
+available aligned variants remain frozen and may be measured once as an audit
+reference, but they do not turn the operative panel into `400 x 5` rows and are
+not used to tune thresholds or language weights.
 
-When ES, FR, and ZH pass translation-integrity gates, the same schema extends to
-five languages without changing the mathematics. The ISO language code is
-`zh`, not `ch`.
+The operative run starts only when every language passes translation-integrity
+gates. Development and loader smoke tests may use a complete EN/RU subset, but
+cannot produce the final language policy. The ISO language code is `zh`, not
+`ch`.
 
 ## Models and order
 
@@ -194,8 +197,8 @@ contains plots and aggregate statistics but no prompt or response text.
 
 ## Initial success criterion
 
-The Gemma run is successful when the 4,800-row cache verifies, the analyzer can
-reconstruct full, EN-only, EN/RU non-duplicated, and leave-one-language-out maps
-without another model invocation, and produces text-free per-layer language,
-direction, category, and interaction statistics. Only then is the identical
-protocol run on Ministral and Qwen.
+The Gemma run is successful when the 12,000-row cache verifies, the analyzer can
+reconstruct full, EN-only, non-duplicated multilingual, and every
+leave-one-language-out map without another model invocation, and produces
+text-free per-layer language, direction, category, and interaction statistics.
+Only then is the identical protocol run on Ministral and Qwen.
