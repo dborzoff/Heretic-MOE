@@ -118,3 +118,29 @@ def test_dry_run_can_limit_each_validated_cell(tmp_path: Path) -> None:
     assert result["rows"] == 4
     assert result["rows_per_cell"] == 1
     assert result["source_rows_per_cell"] == 2
+
+
+def test_dry_run_discovers_frozen_layout_from_corpus_root(tmp_path: Path) -> None:
+    for language in ("en", "ru"):
+        for direction in ("safe", "unsafe"):
+            _write_cell(
+                tmp_path / f"direction_{language}_{direction}_train.jsonl",
+                language=language,
+                direction=direction,
+            )
+
+    result = language_map_cli.main(
+        [
+            "run",
+            "--dry-run",
+            "--languages",
+            "en,ru",
+            "--rows-per-cell",
+            "2",
+            "--corpus-root",
+            str(tmp_path),
+        ]
+    )
+
+    assert result["status"] == "PASS"
+    assert result["rows"] == 8

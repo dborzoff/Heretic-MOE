@@ -30,6 +30,19 @@ def _languages(value: str) -> tuple[str, ...]:
 
 
 def _input_files(args: argparse.Namespace) -> list[LanguageFile]:
+    if args.corpus_root is not None:
+        if args.group_a or args.group_b:
+            raise ValueError("--corpus-root cannot be combined with explicit groups")
+        root = Path(args.corpus_root)
+        return [
+            LanguageFile(
+                language,
+                direction,
+                root / f"direction_{language}_{direction}_train.jsonl",
+            )
+            for direction in ("safe", "unsafe")
+            for language in args.languages
+        ]
     files: list[LanguageFile] = []
     for language, path in args.group_a:
         files.append(LanguageFile(language, "safe", path))
@@ -39,6 +52,11 @@ def _input_files(args: argparse.Namespace) -> list[LanguageFile]:
 
 
 def _add_input_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--corpus-root",
+        type=Path,
+        help="Root of the frozen aligned train layout.",
+    )
     parser.add_argument(
         "--languages",
         required=True,
