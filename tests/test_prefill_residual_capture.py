@@ -66,13 +66,14 @@ def test_one_generation_captures_prefill_without_retaining_decode_steps() -> Non
     wrapper.generate = MethodType(generate, wrapper)
     prompts = [Prompt(system="", user="one"), Prompt(system="", user="two")]
 
-    responses, residuals = wrapper.get_responses_with_prefill_residuals(
+    responses, token_ids, residuals = wrapper.get_response_artifacts_with_prefill_residuals(
         prompts,
         skip_special_tokens=True,
     )
 
     expected_embedding = fake.embedding(torch.tensor([3, 6]))
     assert responses == ["decoded-7-8-9", "decoded-10-11-12"]
+    assert token_ids == [[7, 8, 9], [10, 11, 12]]
     assert residuals.shape == (2, 3, 3)
     assert residuals.device.type == "cpu"
     assert torch.equal(residuals[:, 0], expected_embedding)

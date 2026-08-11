@@ -5,7 +5,7 @@ import math
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Type, cast
+from typing import Any, Sequence, Type, cast
 
 import bitsandbytes as bnb
 import torch
@@ -34,6 +34,7 @@ from transformers.generation import (
 
 from .config import QuantizationMethod, RowNormalization, Settings
 from .system import empty_cache
+from .teacher_forced import per_row_conditional_nll
 from .utils import Prompt, batchify, format_exception, print
 
 
@@ -924,45 +925,44 @@ class Model:
                 plain.append([{"role": "user", "content": "\n\n".join(parts)}])
             return self.tokenizer.apply_chat_template(plain, **kwargs)
 
+    def _render_chat_prompts(self, prompts: list[Prompt]) -> list[str]:
+        def build(with_system: bool):
+            chats = []
+            for prompt in prompts:
+                if with_system and prompt.system:
+                    chats.append(
+                        [
+                            {"role": "system", "content": prompt.system},
+                            {"role": "user", "content": prompt.user},
+                        ]
+                    )
+                else:
+                    text = (
+                        f"{prompt.system}\n\n{prompt.user}"
+                        if prompt.system
+                        else prompt.user
+                    )
+                    chats.append([{"role": "user", "content": text}])
+            return chats
+
+        rendered = cast(
+            list[str],
+            self._apply_template_safe(
+                build(with_system=not getattr(self, "_no_system_role", False)),
+                add_generation_prompt=True,
+                tokenize=False,
+            ),
+        )
+        if self.settings.response_prefix:
+            rendered = [value + self.settings.response_prefix for value in rendered]
+        return rendered
+
     def generate(
         self,
         prompts: list[Prompt],
         **kwargs: Any,
     ) -> tuple[BatchEncoding, GenerateDecoderOnlyOutput | LongTensor]:
-        def _build(with_system: bool):
-            out = []
-            for prompt in prompts:
-                if with_system and prompt.system:
-                    out.append([
-                        {"role": "system", "content": prompt.system},
-                        {"role": "user", "content": prompt.user},
-                    ])
-                else:
-                    # Templates without a system role receive it in the user message.
-                    text = (f"{prompt.system}\n\n{prompt.user}"
-                            if prompt.system else prompt.user)
-                    out.append([{"role": "user", "content": text}])
-            return out
-
-        chats = _build(with_system=not getattr(self, "_no_system_role", False))
-
-        # This cast is valid because list[str] is the return type
-        # for batched operation with tokenize=False.
-        chat_prompts = cast(
-            list[str],
-            self._apply_template_safe(
-                chats,
-                add_generation_prompt=True,
-                tokenize=False,
-            ),
-        )
-
-        if self.settings.response_prefix:
-            # Append the common response prefix to the prompts so that evaluation happens
-            # at the point where responses start to differ for different prompts.
-            chat_prompts = [
-                prompt + self.settings.response_prefix for prompt in chat_prompts
-            ]
+        chat_prompts = self._render_chat_prompts(prompts)
 
         inputs = self.tokenizer(
             chat_prompts,
@@ -1015,12 +1015,12 @@ class Model:
 
         return responses
 
-    def get_responses_with_prefill_residuals(
+    def get_response_artifacts_with_prefill_residuals(
         self,
         prompts: list[Prompt],
         skip_special_tokens: bool = False,
-    ) -> tuple[list[str], Tensor]:
-        """Generate once and capture the prefill residual at every language layer.
+    ) -> tuple[list[str], list[list[int]], Tensor]:
+        """Generate once and return text, exact generated IDs, and prefill residuals.
 
         Forward hooks retain only the first invocation, which is the prompt prefill.
         Token-by-token decode activations are neither stored nor returned. The compact
@@ -1078,8 +1078,42 @@ class Model:
 
         sequences = outputs.sequences if hasattr(outputs, "sequences") else outputs
         sequences = cast(Tensor, sequences)
+        generated = sequences[:, cast(Tensor, inputs["input_ids"]).shape[1] :]
         responses = self.tokenizer.batch_decode(
-            sequences[:, cast(Tensor, inputs["input_ids"]).shape[1] :],
+            generated,
+            skip_special_tokens=skip_special_tokens,
+        )
+        eos_value = getattr(self.tokenizer, "eos_token_id", None)
+        eos_ids = (
+            {int(value) for value in eos_value}
+            if isinstance(eos_value, (tuple, list, set))
+            else ({int(eos_value)} if eos_value is not None else set())
+        )
+        pad_value = getattr(self.tokenizer, "pad_token_id", None)
+        token_ids: list[list[int]] = []
+        for raw_row in generated.detach().cpu().tolist():
+            row = [int(value) for value in raw_row]
+            stop = next(
+                (index + 1 for index, value in enumerate(row) if value in eos_ids),
+                None,
+            )
+            if stop is not None:
+                row = row[:stop]
+            elif pad_value is not None:
+                while row and row[-1] == int(pad_value):
+                    row.pop()
+            token_ids.append(row)
+        return responses, token_ids, residuals
+
+    def get_responses_with_prefill_residuals(
+        self,
+        prompts: list[Prompt],
+        skip_special_tokens: bool = False,
+    ) -> tuple[list[str], Tensor]:
+        """Compatibility wrapper returning generated text and prefill residuals."""
+
+        responses, _, residuals = self.get_response_artifacts_with_prefill_residuals(
+            prompts,
             skip_special_tokens=skip_special_tokens,
         )
         return responses, residuals
@@ -1105,6 +1139,73 @@ class Model:
             responses.extend(batch_responses)
             residuals.append(batch_residuals)
         return responses, torch.cat(residuals, dim=0)
+
+    def get_conditional_nll(
+        self,
+        prompts: list[Prompt],
+        target_token_ids: Sequence[Sequence[int]],
+    ) -> list[float]:
+        """Score fixed clean targets without autoregressive generation."""
+
+        if not prompts or len(prompts) != len(target_token_ids):
+            raise ValueError("prompts and target token IDs must be non-empty and aligned")
+        rendered = self._render_chat_prompts(prompts)
+        encoded = self.tokenizer(
+            rendered,
+            padding=False,
+            return_token_type_ids=False,
+        )
+        prompt_token_ids = encoded["input_ids"]
+        if isinstance(prompt_token_ids, Tensor):
+            prompt_token_ids = prompt_token_ids.tolist()
+        if len(prompt_token_ids) != len(prompts):
+            raise ValueError("tokenizer returned an unaligned prompt batch")
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = getattr(self.tokenizer, "eos_token_id", None)
+        if pad_token_id is None:
+            raise ValueError("tokenizer has neither pad_token_id nor eos_token_id")
+
+        pairs = list(zip(prompt_token_ids, target_token_ids, strict=True))
+        values: list[float] = []
+        for start in range(0, len(pairs), self.settings.batch_size):
+            batch = pairs[start : start + self.settings.batch_size]
+            sequences: list[list[int]] = []
+            prompt_lengths: list[int] = []
+            for raw_prompt_ids, raw_target_ids in batch:
+                prompt_ids = [int(value) for value in raw_prompt_ids]
+                target_ids = [int(value) for value in raw_target_ids]
+                if not prompt_ids or not target_ids:
+                    raise ValueError("prompt and target token sequences must be non-empty")
+                sequences.append(prompt_ids + target_ids)
+                prompt_lengths.append(len(prompt_ids))
+            maximum = max(len(sequence) for sequence in sequences)
+            input_ids = torch.full(
+                (len(batch), maximum),
+                int(pad_token_id),
+                dtype=torch.long,
+                device=self.model.device,
+            )
+            attention_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+            labels = torch.full_like(input_ids, -100)
+            for row, (sequence, prompt_length) in enumerate(
+                zip(sequences, prompt_lengths, strict=True)
+            ):
+                length = len(sequence)
+                input_ids[row, :length] = torch.tensor(
+                    sequence, dtype=torch.long, device=input_ids.device
+                )
+                attention_mask[row, :length] = True
+                labels[row, prompt_length:length] = input_ids[row, prompt_length:length]
+            with torch.inference_mode():
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    use_cache=False,
+                )
+            batch_values = per_row_conditional_nll(outputs.logits, labels)
+            values.extend(float(value) for value in batch_values)
+        return values
 
     def get_residuals(self, prompts: list[Prompt]) -> Tensor:
         # We only generate one token, and we return the residual vectors
