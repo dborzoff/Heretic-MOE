@@ -125,6 +125,8 @@ def write_interactive_geometry_report(
     _assert_no_sensitive_keys(trial_index)
 
     trial_uris: dict[str, str] = {}
+    evaluation_uris: dict[str, str] = {}
+    evaluation_indexes: dict[str, list[dict[str, object]]] = {}
     for entry in trial_index:
         trial_number = str(int(entry["trial_number"]))
         path = package_dir / str(entry["file"])
@@ -134,6 +136,29 @@ def write_interactive_geometry_report(
         if shape != [len(anchor_rows), layers, 3]:
             raise ValueError(f"trial coordinate shape mismatch: {trial_number}")
         trial_uris[trial_number] = _checked_f32(path, int(np.prod(shape)))
+        if "evaluation_file" in entry:
+            evaluation_path = package_dir / str(entry["evaluation_file"])
+            if _sha256(evaluation_path) != str(entry["evaluation_sha256"]):
+                raise ValueError(
+                    f"evaluation coordinate hash mismatch: {trial_number}"
+                )
+            evaluation_shape = [int(value) for value in entry["evaluation_shape"]]
+            if evaluation_shape[1:] != [layers, 3]:
+                raise ValueError(
+                    f"evaluation coordinate shape mismatch: {trial_number}"
+                )
+            evaluation_uris[trial_number] = _checked_f32(
+                evaluation_path, int(np.prod(evaluation_shape))
+            )
+            evaluation_index_path = package_dir / str(entry["evaluation_index_file"])
+            if _sha256(evaluation_index_path) != str(
+                entry["evaluation_index_sha256"]
+            ):
+                raise ValueError(f"evaluation index hash mismatch: {trial_number}")
+            evaluation_indexes[trial_number] = json.loads(
+                evaluation_index_path.read_text(encoding="utf-8")
+            )
+            _assert_no_sensitive_keys(evaluation_indexes[trial_number])
 
     languages = sorted({str(row["language"]) for row in base_index})
     groups = sorted({str(row["group"]) for row in base_index})
@@ -154,6 +179,7 @@ def write_interactive_geometry_report(
         "timeline": timeline,
         "trial_index": trial_index,
         "verdicts": verdicts,
+        "evaluation_indexes": evaluation_indexes,
         "languages": languages,
         "groups": groups,
         "categories": categories,
@@ -165,6 +191,7 @@ def write_interactive_geometry_report(
         _HTML_TEMPLATE.replace("__METADATA__", _safe_json(metadata))
         .replace("__BASE_URI__", _safe_json(base_uri))
         .replace("__TRIAL_URIS__", _safe_json(trial_uris))
+        .replace("__EVALUATION_URIS__", _safe_json(evaluation_uris))
     )
     temporary = output_path.with_suffix(output_path.suffix + ".tmp")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -195,6 +222,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
 <h2>Search passes</h2><div id="phase-filters" class="filter-grid"></div>
 <h2>Stage</h2><select id="stage-filter"><option value="all">Original + trials</option><option value="original">Original only</option><option value="trials">Trials only</option><option value="finalists">Finalists only</option></select>
 <h2>Trial</h2><input id="trial-filter" type="range" min="0" max="0" value="0"><div id="trial-value" class="small"></div><button id="animate-trials">Animate trials</button>
+<div class="row"><label><input id="show-evaluation" type="checkbox" checked>Evaluation points</label></div>
 <h2>Finalist</h2><select id="finalist-filter"><option value="all">All finalists</option></select>
 <h2>Verdict</h2><select id="verdict-filter"><option value="all">All</option><option value="success">Verified success</option><option value="failure">Failure</option><option value="borderline">Borderline</option><option value="unknown">Unverified</option></select>
 <h2>Arrows</h2><select id="arrow-filter"><option value="centroids">Centroids + largest shifts</option><option value="all">All Original → Trial</option><option value="path">Dashed optimizer path only</option><option value="none">Hidden</option></select>
@@ -204,9 +232,9 @@ _HTML_TEMPLATE = r'''<!doctype html>
 </aside><main><canvas id="scene"></canvas><div id="hud"></div></main>
 <script>
 "use strict";
-const META=__METADATA__,BASE_URI=__BASE_URI__,TRIAL_URIS=__TRIAL_URIS__;
+const META=__METADATA__,BASE_URI=__BASE_URI__,TRIAL_URIS=__TRIAL_URIS__,EVALUATION_URIS=__EVALUATION_URIS__;
 function floats(uri){const raw=atob(uri.slice(uri.indexOf(',')+1)),u=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)u[i]=raw.charCodeAt(i);return new Float32Array(u.buffer)}
-const BASE=floats(BASE_URI),TRIALS={};for(const [k,v] of Object.entries(TRIAL_URIS))TRIALS[k]=floats(v);
+const BASE=floats(BASE_URI),TRIALS={},EVALUATIONS={};for(const [k,v] of Object.entries(TRIAL_URIS))TRIALS[k]=floats(v);for(const [k,v] of Object.entries(EVALUATION_URIS))EVALUATIONS[k]=floats(v);
 const canvas=document.getElementById('scene'),ctx=canvas.getContext('2d'),hud=document.getElementById('hud');let yaw=-.55,pitch=.35,zoom=1,panX=0,panY=0,drag=null,timer=null;
 const byId=id=>document.getElementById(id), layer=byId('layer-filter'),trial=byId('trial-filter');layer.max=Math.max(0,META.layers-1);const captured=META.trial_index.map(x=>x.trial_number).sort((a,b)=>a-b);trial.max=Math.max(0,captured.length-1);
 function addChecks(id,values){const root=byId(id);for(const value of values){const label=document.createElement('label'),box=document.createElement('input');box.type='checkbox';box.checked=true;box.value=value;box.addEventListener('change',render);label.append(box,document.createTextNode(value));root.append(label)}}
@@ -221,10 +249,11 @@ function render(){resize();const w=canvas.clientWidth,h=canvas.clientHeight,l=+l
 let scale=55*zoom,ox=w/2+panX,oy=h/2+panY;const project=p=>{const q=rotate(p);return[ox+q[0]*scale,oy-q[1]*scale,q[2]]};const basePoints=[],trialPoints=[];
 if(stage==='all'||stage==='original')for(let i=0;i<META.rows;i++){const row=META.base_index[i];if(visible(row,langs,groups,cats)){const q=project(coord(BASE,i,l));basePoints.push({q,color:row.group==='A'?'#4d9cff':'#ff5364',row})}}
 const entry=META.trial_index.find(x=>x.trial_number===t),phase=entry?.phase||META.timeline.find(x=>x.trial_number===t)?.phase||'search';if(t!==null&&TRIALS[t]&&phases.has(phase)&&(stage==='all'||stage==='trials')){const arr=TRIALS[t];for(let a=0;a<META.anchor_rows.length;a++){const baseRow=META.anchor_rows[a],row=META.base_index[baseRow];if(!visible(row,langs,groups,cats))continue;const status=verdict(t,row.row_id);if(vfilter!=='all'&&status!==vfilter)continue;const from=project(coord(BASE,baseRow,l)),to=project(coord(arr,a,l));trialPoints.push({from,to,row,status,color:status==='success'?'#35df8d':'#f3c84b'});}}
-ctx.globalAlpha=.45;if(arrows==='all'||arrows==='centroids'){ctx.setLineDash([]);for(const p of trialPoints){ctx.strokeStyle=p.color;ctx.beginPath();ctx.moveTo(p.from[0],p.from[1]);ctx.lineTo(p.to[0],p.to[1]);ctx.stroke()}}
+if(t!==null&&EVALUATIONS[t]&&byId('show-evaluation').checked&&phases.has(phase)&&(stage==='all'||stage==='trials')){const arr=EVALUATIONS[t],rows=META.evaluation_indexes[t]||[];for(let i=0;i<rows.length;i++){const status=verdict(t,rows[i].prompt_sha256);if(vfilter!=='all'&&status!==vfilter)continue;const to=project(coord(arr,i,l));trialPoints.push({from:to,to,row:{row_id:rows[i].prompt_sha256},status,color:status==='success'?'#35df8d':'#f3c84b',evaluation:true})}}
+ctx.globalAlpha=.45;if(arrows==='all'||arrows==='centroids'){ctx.setLineDash([]);for(const p of trialPoints){if(p.evaluation)continue;ctx.strokeStyle=p.color;ctx.beginPath();ctx.moveTo(p.from[0],p.from[1]);ctx.lineTo(p.to[0],p.to[1]);ctx.stroke()}}
 if((arrows==='path'||arrows==='centroids')&&captured.length>1){ctx.setLineDash([6,5]);ctx.strokeStyle='#d8dfef';ctx.beginPath();let first=true;for(const n of captured){const e=META.trial_index.find(x=>x.trial_number===n);if(!phases.has(e?.phase||'search'))continue;const arr=TRIALS[n];let c=[0,0,0];for(let a=0;a<META.anchor_rows.length;a++){const p=coord(arr,a,l);c[0]+=p[0];c[1]+=p[1];c[2]+=p[2]}c=c.map(x=>x/META.anchor_rows.length);const q=project(c);first?(ctx.moveTo(q[0],q[1]),first=false):ctx.lineTo(q[0],q[1])}ctx.stroke();ctx.setLineDash([])}
 ctx.globalAlpha=alpha;const points=[...basePoints,...trialPoints.map(p=>({q:p.to,color:p.color,row:p.row}))].sort((a,b)=>a.q[2]-b.q[2]);for(const p of points){ctx.fillStyle=p.color;ctx.beginPath();ctx.arc(p.q[0],p.q[1],size,0,Math.PI*2);ctx.fill()}ctx.globalAlpha=1;hud.textContent=`Layer ${l+1} · Trial ${t??'Original'} · ${points.length} visible points`;}
-for(const id of ['layer-filter','trial-filter','stage-filter','finalist-filter','verdict-filter','arrow-filter','point-size','opacity'])byId(id).addEventListener('input',render);
+for(const id of ['layer-filter','trial-filter','stage-filter','finalist-filter','verdict-filter','arrow-filter','point-size','opacity','show-evaluation'])byId(id).addEventListener('input',render);
 byId('animate-trials').onclick=()=>{if(timer){clearInterval(timer);timer=null;byId('animate-trials').textContent='Animate trials';return}byId('animate-trials').textContent='Stop animation';timer=setInterval(()=>{trial.value=(+trial.value+1)%Math.max(captured.length,1);render()},700)};
 byId('reset-original').onclick=()=>{byId('stage-filter').value='original';if(timer){clearInterval(timer);timer=null}render()};byId('reset-camera').onclick=()=>{yaw=-.55;pitch=.35;zoom=1;panX=panY=0;render()};
 canvas.onpointerdown=e=>{drag={x:e.clientX,y:e.clientY,button:e.button};canvas.setPointerCapture(e.pointerId)};canvas.onpointermove=e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;drag.x=e.clientX;drag.y=e.clientY;if(drag.button===2){panX+=dx;panY+=dy}else{yaw+=dx*.008;pitch=Math.max(-1.5,Math.min(1.5,pitch+dy*.008))}render()};canvas.onpointerup=()=>drag=null;canvas.oncontextmenu=e=>e.preventDefault();canvas.onwheel=e=>{e.preventDefault();zoom=Math.max(.15,Math.min(12,zoom*Math.exp(-e.deltaY*.001)));render()};window.onresize=render;render();

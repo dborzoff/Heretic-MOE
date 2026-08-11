@@ -320,6 +320,8 @@ def append_trial_projection(
     residuals: Tensor,
     *,
     measurement: str = "anchor_control",
+    evaluation_residuals: Tensor | None = None,
+    evaluation_prompt_hashes: list[str] | None = None,
 ) -> dict[str, object]:
     """Atomically append one real measured trial to the trajectory package."""
 
@@ -347,14 +349,63 @@ def append_trial_projection(
             raise ValueError("trial projection contains non-finite values")
         retained = retained_shift_ratio(reference, residuals, basis).cpu().numpy()
 
+        evaluation_points: np.ndarray | None = None
+        if evaluation_residuals is not None:
+            if evaluation_prompt_hashes is None:
+                raise ValueError("evaluation prompt hashes are required")
+            if evaluation_residuals.ndim != 3:
+                raise ValueError("evaluation residuals must be three-dimensional")
+            if tuple(evaluation_residuals.shape[1:]) != tuple(reference.shape[1:]):
+                raise ValueError("evaluation residual shape does not match anchors")
+            if len(evaluation_prompt_hashes) != int(evaluation_residuals.shape[0]):
+                raise ValueError("evaluation prompt hash count mismatch")
+            if any(
+                len(value) != 64 or any(char not in "0123456789abcdef" for char in value)
+                for value in evaluation_prompt_hashes
+            ):
+                raise ValueError("invalid evaluation prompt hash")
+            evaluation_points = (
+                project_residuals(evaluation_residuals, basis)
+                .cpu()
+                .numpy()
+                .astype("<f4")
+            )
+        elif evaluation_prompt_hashes:
+            raise ValueError("evaluation residuals are required")
+
         relative = Path("trials") / f"trial_{trial.number:06d}.f32"
         destination = package_dir / relative
         if destination.exists():
             raise ValueError(f"trial {trial.number} already captured")
         temporary = destination.with_suffix(".f32.tmp")
+        evaluation_destination = package_dir / "trials" / f"trial_{trial.number:06d}_evaluation.f32"
+        evaluation_temporary = evaluation_destination.with_suffix(".f32.tmp")
+        evaluation_index_destination = (
+            package_dir / "trials" / f"trial_{trial.number:06d}_evaluation_index.json"
+        )
+        evaluation_index_temporary = evaluation_index_destination.with_suffix(
+            ".json.tmp"
+        )
         try:
             points.tofile(temporary)
             os.replace(temporary, destination)
+            if evaluation_points is not None and evaluation_prompt_hashes is not None:
+                evaluation_points.tofile(evaluation_temporary)
+                os.replace(evaluation_temporary, evaluation_destination)
+                evaluation_index_temporary.write_text(
+                    json.dumps(
+                        [
+                            {"index": index, "prompt_sha256": prompt_hash}
+                            for index, prompt_hash in enumerate(evaluation_prompt_hashes)
+                        ],
+                        ensure_ascii=True,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                os.replace(evaluation_index_temporary, evaluation_index_destination)
             entry: dict[str, object] = {
                 "trial_number": trial.number,
                 "phase": trial.phase,
@@ -370,6 +421,23 @@ def append_trial_projection(
                     "minimum": float(np.min(retained)),
                 },
             }
+            if evaluation_points is not None:
+                entry.update(
+                    {
+                        "evaluation_count": int(evaluation_points.shape[0]),
+                        "evaluation_shape": list(evaluation_points.shape),
+                        "evaluation_file": evaluation_destination.relative_to(
+                            package_dir
+                        ).as_posix(),
+                        "evaluation_sha256": _sha256(evaluation_destination),
+                        "evaluation_index_file": evaluation_index_destination.relative_to(
+                            package_dir
+                        ).as_posix(),
+                        "evaluation_index_sha256": _sha256(
+                            evaluation_index_destination
+                        ),
+                    }
+                )
             _write_jsonl_atomic(index_path, [*entries, entry])
             manifest["captured_trials"] = len(entries) + 1
             manifest["files"][index_path.name] = {
@@ -381,4 +449,8 @@ def append_trial_projection(
         except BaseException:
             temporary.unlink(missing_ok=True)
             destination.unlink(missing_ok=True)
+            evaluation_temporary.unlink(missing_ok=True)
+            evaluation_destination.unlink(missing_ok=True)
+            evaluation_index_temporary.unlink(missing_ok=True)
+            evaluation_index_destination.unlink(missing_ok=True)
             raise

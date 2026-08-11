@@ -4,10 +4,16 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import optuna
+from optuna.storages import JournalStorage
+from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 import pytest
+import torch
 
 from heretic import cli
 from heretic import language_map_cli
+from heretic.language_map_cache import capture_residual_cache
+from heretic.language_map_data import LanguageFile, load_aligned_corpus
 from heretic.supervisor import GpuInfo
 
 
@@ -225,3 +231,75 @@ def test_device_selection_defaults_to_all_eligible_and_preserves_explicit_order(
 
     assert [device.index for device in automatic] == ["0", "1"]
     assert [device.index for device in explicit] == ["1", "0"]
+
+
+def test_project_builds_private_anchors_and_offline_report(tmp_path: Path) -> None:
+    files: list[LanguageFile] = []
+    for language in ("en", "ru"):
+        for direction in ("safe", "unsafe"):
+            path = tmp_path / f"{language}-{direction}.jsonl"
+            _write_cell(path, language=language, direction=direction)
+            files.append(LanguageFile(language, direction, path))
+    rows = load_aligned_corpus(files, ("en", "ru"), 2)
+
+    class FakeModel:
+        def iter_residual_batches(self, prompts, batch_size):
+            values = torch.arange(len(prompts) * 2 * 4, dtype=torch.float32)
+            yield values.reshape(len(prompts), 2, 4)
+
+    cache = tmp_path / "cache"
+    capture_residual_cache(
+        FakeModel(), rows, 8, cache, system_prompt="Synthetic system"
+    )
+    journal = tmp_path / "study.log"
+    storage = JournalStorage(
+        JournalFileBackend(
+            str(journal), lock_obj=JournalFileOpenLock(str(journal))
+        )
+    )
+    study = optuna.create_study(storage=storage, study_name="project", direction="minimize")
+    study.optimize(lambda trial: trial.suggest_float("direction_index", 0, 1), n_trials=1)
+
+    package = tmp_path / "geometry_3d"
+    result = language_map_cli.main(
+        [
+            "project",
+            "--cache-dir",
+            str(cache),
+            "--journal",
+            str(journal),
+            "--output-dir",
+            str(package),
+            "--anchor-count",
+            "4",
+            "--languages",
+            "en,ru",
+            "--rows-per-cell",
+            "2",
+            "--group-a",
+            f"en={tmp_path / 'en-safe.jsonl'}",
+            "--group-a",
+            f"ru={tmp_path / 'ru-safe.jsonl'}",
+            "--group-b",
+            f"en={tmp_path / 'en-unsafe.jsonl'}",
+            "--group-b",
+            f"ru={tmp_path / 'ru-unsafe.jsonl'}",
+        ]
+    )
+
+    assert result["status"] == "PASS"
+    assert result["base_rows"] == 8
+    assert result["anchor_count"] == 4
+    assert (package / "report.html").is_file()
+    private_rows = [
+        json.loads(line)
+        for line in (package / "private" / "anchors.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(private_rows) == 4
+    assert all("prompt" in row for row in private_rows)
+
+    rendered = language_map_cli.main(
+        ["render", "--package-dir", str(package)]
+    )
+    assert rendered["status"] == "PASS"
+    assert rendered["captured_trials"] == 0

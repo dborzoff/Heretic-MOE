@@ -11,7 +11,16 @@ import types
 from contextlib import closing
 from pathlib import Path
 from types import ModuleType
-from typing import Annotated, Any, TypeVar, Union, get_args, get_origin, get_type_hints
+from typing import (
+    Annotated,
+    Any,
+    Callable,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 from pydantic import BaseModel
 from torch import Tensor
@@ -165,10 +174,12 @@ class Context:
         settings: HereticSettings,
         model: Model,
         response_archive_id: str | int | None = None,
+        residual_capture: Callable[[list[Prompt], Tensor], None] | None = None,
     ) -> None:
         self._model = model
         self._settings = settings
         self._response_archive_id = response_archive_id
+        self._residual_capture = residual_capture
         self._responses_cache: dict[tuple[tuple[str, str], ...], list[str]] = {}
 
     def _cache_key(self, prompts: list[Prompt]) -> tuple[tuple[str, str], ...]:
@@ -178,6 +189,9 @@ class Context:
         """Get model responses (cached within this context)."""
         key = self._cache_key(prompts)
         if key not in self._responses_cache:
+            if self._residual_capture is not None:
+                residuals = self._model.get_residuals_batched(prompts)
+                self._residual_capture(prompts, residuals)
             self._responses_cache[key] = self._model.get_responses_batched(
                 prompts, skip_special_tokens=True
             )

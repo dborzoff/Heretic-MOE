@@ -23,6 +23,9 @@ from .language_map_controller import (
 )
 from .language_map_data import GeometryRow, LanguageFile, load_aligned_corpus
 from .language_map_parallel import finalize_range_cache
+from .language_map_projection import write_projection_package
+from .language_map_report import write_interactive_geometry_report
+from .language_map_trajectory import initialize_trajectory_package
 from .range_work_queue import RangeWorkQueue
 
 
@@ -158,6 +161,25 @@ def _parser() -> argparse.ArgumentParser:
     analyze.add_argument("--cache-dir", required=True, type=Path)
     analyze.add_argument("--output-dir", required=True, type=Path)
     analyze.add_argument("--seed", type=int, default=42)
+
+    project = subparsers.add_parser(
+        "project",
+        help="Freeze a 3D basis, import a journal, and build the offline report.",
+    )
+    _add_input_arguments(project)
+    project.add_argument("--cache-dir", required=True, type=Path)
+    project.add_argument("--journal", required=True, type=Path)
+    project.add_argument("--output-dir", required=True, type=Path)
+    project.add_argument("--anchor-count", type=int, default=32)
+    project.add_argument("--seed", type=int, default=42)
+    project.add_argument("--projection-device", default="cpu")
+    project.add_argument("--system-prompt", default="You are a helpful assistant.")
+
+    render = subparsers.add_parser(
+        "render", help="Regenerate the offline HTML from a verified 3D package."
+    )
+    render.add_argument("--package-dir", required=True, type=Path)
+    render.add_argument("--output", type=Path)
     return parser
 
 
@@ -329,10 +351,100 @@ def _analyze(cache_dir: Path, output_dir: Path, seed: int) -> dict[str, Any]:
     }
 
 
+def _write_private_anchors(
+    output_dir: Path,
+    rows: list[GeometryRow],
+    anchor_rows: list[int],
+    system_prompt: str,
+) -> Path:
+    private_dir = output_dir / "private"
+    private_dir.mkdir(exist_ok=True)
+    path = private_dir / "anchors.jsonl"
+    temporary = path.with_suffix(".jsonl.tmp")
+    temporary.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "base_index": position,
+                    "canonical_id": rows[position].canonical_id,
+                    "row_id": rows[position].row_id,
+                    "language": rows[position].language,
+                    "group": "A" if rows[position].direction == "safe" else "B",
+                    "category_id": rows[position].category_id,
+                    "system": system_prompt,
+                    "prompt": rows[position].prompt,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+            for position in anchor_rows
+        ),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return path
+
+
+def _project(args: argparse.Namespace) -> dict[str, Any]:
+    if args.anchor_count <= 0:
+        raise ValueError("--anchor-count must be positive")
+    files = _input_files(args)
+    rows = load_aligned_corpus(files, args.languages, args.rows_per_cell)
+    index, residuals, _ = load_residual_cache(args.cache_dir)
+    expected_row_ids = [row.row_id for row in rows]
+    cached_row_ids = [str(row["row_id"]) for row in index]
+    if cached_row_ids != expected_row_ids:
+        raise ValueError("corpus and residual cache row order differ")
+    write_projection_package(
+        index=index,
+        residuals=residuals,
+        output_dir=args.output_dir,
+        seed=args.seed,
+        device=args.projection_device,
+    )
+    trajectory = initialize_trajectory_package(
+        package_dir=args.output_dir,
+        journal=args.journal,
+        reference_residuals=residuals,
+        anchor_count=args.anchor_count,
+        seed=args.seed,
+    )
+    _write_private_anchors(
+        args.output_dir,
+        rows,
+        [int(value) for value in trajectory["anchor_rows"]],
+        args.system_prompt,
+    )
+    rendered = write_interactive_geometry_report(args.output_dir)
+    return {
+        "status": "PASS",
+        "mode": "project",
+        "base_rows": len(rows),
+        "anchor_count": int(trajectory["anchor_count"]),
+        "journal_trials": int(trajectory["trials"]),
+        "captured_trials": int(rendered["captured_trials"]),
+        "output_dir": str(args.output_dir.resolve()),
+        "report_sha256": rendered["sha256"],
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     if args.command == "analyze":
         result = _analyze(args.cache_dir, args.output_dir, args.seed)
+        print(json.dumps(result, sort_keys=True))
+        return result
+    if args.command == "render":
+        result = write_interactive_geometry_report(
+            args.package_dir,
+            args.output or args.package_dir / "report.html",
+        )
+        result["mode"] = "render"
+        print(json.dumps(result, sort_keys=True))
+        return result
+    if args.command == "project":
+        result = _project(args)
         print(json.dumps(result, sort_keys=True))
         return result
 

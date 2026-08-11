@@ -66,6 +66,8 @@ def _package(tmp_path: Path) -> Path:
         package,
         load_text_free_trial_timeline(journal_path)[0],
         candidate,
+        evaluation_residuals=residuals[:2] + 0.1,
+        evaluation_prompt_hashes=["a" * 64, "b" * 64],
     )
     return package
 
@@ -96,10 +98,12 @@ def test_report_is_offline_filterable_and_contains_no_private_corpus_text(
         "arrow-filter",
         "animate-trials",
         "reset-original",
+        "show-evaluation",
     ):
         assert f'id="{control}"' in document
     assert "Original → Trial" in document
     assert "optimizer path" in document
+    assert "Evaluation points" in document
     assert "data:application/octet-stream;base64," in document
 
 

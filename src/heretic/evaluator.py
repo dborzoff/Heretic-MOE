@@ -2,16 +2,17 @@
 # Copyright (C) 2025-2026  Philipp Emanuel Weidmann <pew@worldwidemann.com> + contributors
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from optuna.study import StudyDirection
 from pydantic import BaseModel
+from torch import Tensor
 
 from .config import DatasetSpecification, ScorerConfig, Settings
 from .model import Model
 from .plugin import get_plugin_namespace, is_builtin_plugin, load_plugin
 from .scorer import Context, Score, Scorer
-from .utils import deep_merge_dicts, parse_study_direction, print
+from .utils import Prompt, deep_merge_dicts, parse_study_direction, print
 
 
 @dataclass
@@ -181,7 +182,9 @@ class Evaluator:
         )
 
     def get_scores(
-        self, response_archive_id: str | int | None = None
+        self,
+        response_archive_id: str | int | None = None,
+        residual_capture: Callable[[list[Prompt], Tensor], None] | None = None,
     ) -> list[tuple[str, Score]]:
         """
         Run all scorers and return their scores and names
@@ -193,6 +196,7 @@ class Evaluator:
             settings=self.settings,
             model=self.model,
             response_archive_id=response_archive_id,
+            residual_capture=residual_capture,
         )
         return [
             (entry.name, entry.scorer.get_score(ctx)) for entry in self._scorer_entries

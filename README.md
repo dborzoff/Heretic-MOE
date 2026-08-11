@@ -112,6 +112,42 @@ hereticMOE geometry-map analyze `
   --output-dir F:/results/model-geometry/analysis-v2
 ```
 
+Freeze a three-dimensional basis on the original cache, import every numeric
+trial from an existing Optuna journal, select a private stratified control
+panel, and build a self-contained offline report with:
+
+```powershell
+hereticMOE geometry-map project `
+  --cache-dir F:/results/model-geometry/cache `
+  --journal F:/runs/checkpoints/model.jsonl `
+  --output-dir F:/results/model-geometry/geometry_3d `
+  --corpus-root F:/data/heretic_moe_5lang_v1 `
+  --split train `
+  --languages en,ru,zh,es,fr `
+  --rows-per-cell 1200 `
+  --anchor-count 32 `
+  --projection-device cuda:0
+```
+
+The HTML can independently hide languages, groups, categories, search phases,
+trials, layers, evaluation points, verdict states, finalists, and arrows. Solid
+arrows mean `Original -> Trial`; dashed lines are only the optimizer path
+between independent edits. Existing journal rows without a residual capture are
+shown as `not_captured`, never as inferred coordinates. Regenerate the report
+without a model invocation using:
+
+```powershell
+hereticMOE geometry-map render `
+  --package-dir F:/results/model-geometry/geometry_3d
+```
+
+To capture real coordinates during a new search, set
+`geometry_trajectory_package` to that package in the run configuration. Heretic
+then records a one-token residual pass for each unique normal evaluation panel
+and the frozen control anchors while the edited model is still resident. It
+does not generate the answers twice. Set `geometry_capture_evaluation=false`
+to retain only the directly comparable control anchors.
+
 The current reference study completed 600 trials on Ministral-3-3B. The two
 selected BF16 models are published together as
 [Ministral-3-3B-Instruct-2512 Heretic Adaptive v1](https://huggingface.co/DmitryDB/Ministral-3-3B-Instruct-2512-Heretic-Adaptive-v1).

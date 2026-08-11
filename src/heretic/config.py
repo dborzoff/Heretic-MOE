@@ -734,6 +734,24 @@ class Settings(BaseSettings):
         exclude=True,
     )
 
+    geometry_trajectory_package: str | None = Field(
+        default=None,
+        description=(
+            "Optional frozen geometry_3d package. When set, each edited trial "
+            "captures its control anchors before the model is reset."
+        ),
+        exclude=True,
+    )
+
+    geometry_capture_evaluation: bool = Field(
+        default=True,
+        description=(
+            "Capture one-token residuals for the prompts already used by normal "
+            "trial evaluation when geometry_trajectory_package is configured."
+        ),
+        exclude=True,
+    )
+
     benchmarks: list[BenchmarkSpecification] = Field(
         default=[
             BenchmarkSpecification(

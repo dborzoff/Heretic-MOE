@@ -92,6 +92,8 @@ from .reproduce import (
 from .search import OptimizationRunner, record_trial_constraints
 from .study_diagnostics import make_parameter_importance_callbacks
 from .system import empty_cache, get_accelerator_info
+from .trial_geometry_capture import TrialGeometrySession
+from .language_map_trajectory import TrialRecord
 from .trial_selection import (
     candidate_trials,
     selection_cost_value,
@@ -1066,8 +1068,24 @@ def run():
         print("* Abliterating...")
         model.abliterate(residual_directions, direction_index, parameters)
         edit_telemetry = model.get_last_edit_telemetry()
+        geometry_session = (
+            TrialGeometrySession(
+                Path(settings.geometry_trajectory_package),
+                trial_number=trial.number,
+            )
+            if settings.geometry_trajectory_package is not None
+            else None
+        )
         print("* Evaluating...")
-        scores = evaluator.get_scores(response_archive_id=trial.number)
+        scores = evaluator.get_scores(
+            response_archive_id=trial.number,
+            residual_capture=(
+                geometry_session.capture_evaluation
+                if geometry_session is not None
+                and settings.geometry_capture_evaluation
+                else None
+            ),
+        )
         objective_values = evaluator.get_objective_values(scores)
         constraint_values = evaluator.get_constraint_values(scores)
         record_trial_constraints(trial, constraint_values)
@@ -1133,6 +1151,40 @@ def run():
             },
         )
         print_memory_usage()
+
+        if geometry_session is not None:
+            geometry_entry = geometry_session.finalize(
+                model,
+                TrialRecord(
+                    number=trial.number,
+                    state="complete",
+                    phase=(
+                        "recheck"
+                        if "recheck_source_trial_index" in trial.user_attrs
+                        else os.environ.get("HERETIC_GEOMETRY_PHASE", "search")
+                    ),
+                    parameters={str(key): value for key, value in trial.params.items()},
+                    values=tuple(float(value) for value in objective_values),
+                    constraints=tuple(float(value) for value in constraint_values),
+                    feasible=all(value <= 0 for value in constraint_values),
+                ),
+            )
+            trial.set_user_attr(
+                "geometry_capture",
+                {
+                    "coordinate_status": geometry_entry["coordinate_status"],
+                    "sha256": geometry_entry["sha256"],
+                    "evaluation_count": geometry_entry.get("evaluation_count", 0),
+                    "retained_shift_ratio": geometry_entry[
+                        "retained_shift_ratio"
+                    ],
+                },
+            )
+            print(
+                "* Geometry trajectory: "
+                f"[bold]{geometry_entry['shape'][0]}[/] anchors, "
+                f"[bold]{geometry_entry.get('evaluation_count', 0)}[/] evaluation points"
+            )
 
         return objective_values
 
