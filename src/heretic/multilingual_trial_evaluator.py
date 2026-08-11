@@ -11,7 +11,7 @@ import tempfile
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import torch
 from torch import Tensor
@@ -95,7 +95,12 @@ class FrozenMultilingualTrialEvaluator:
         self.expected_per_direction = expected_per_direction
         self.expected_languages = expected_languages
 
-    def evaluate(self, trial_number: int) -> TrialMeasurement:
+    def evaluate(
+        self,
+        trial_number: int,
+        *,
+        residual_capture: Callable[[list[Prompt], Tensor], None] | None = None,
+    ) -> TrialMeasurement:
         if trial_number not in self._schedule:
             raise KeyError(f"trial {trial_number} is not present in frozen schedule")
         rows = [self._rows[row_id] for row_id in self._schedule[trial_number]]
@@ -113,6 +118,7 @@ class FrozenMultilingualTrialEvaluator:
             ),
             expected_per_direction=self.expected_per_direction,
             expected_languages=self.expected_languages,
+            residual_capture=residual_capture,
         )
 
 
@@ -145,9 +151,9 @@ def _clean_by_row_id(
             raise ValueError("clean reference rows must have unique row IDs")
         records[row_id] = record
     expected = {row.row_id for row in rows}
-    if set(records) != expected:
+    if not expected.issubset(records):
         raise ValueError("clean reference coverage does not match trial rows")
-    return records
+    return {row_id: records[row_id] for row_id in expected}
 
 
 def _margins(score: object, expected: int) -> list[float]:
@@ -174,6 +180,7 @@ def evaluate_multilingual_trial(
     private_records_path: str | Path,
     expected_per_direction: int = 400,
     expected_languages: tuple[str, ...] = ("en", "ru", "zh", "es", "fr"),
+    residual_capture: Callable[[list[Prompt], Tensor], None] | None = None,
 ) -> TrialMeasurement:
     """Evaluate one scheduled trial without a second autoregressive pass."""
 
@@ -223,6 +230,8 @@ def evaluate_multilingual_trial(
         or residuals.shape != (len(ordered), *direction.shape)
     ):
         raise ValueError("trial generation artifacts are not aligned")
+    if residual_capture is not None:
+        residual_capture(prompts, residuals)
     candidate_projection = torch.einsum(
         "blh,lh->bl", residuals.to(torch.float32).cpu(), direction
     )

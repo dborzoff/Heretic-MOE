@@ -83,6 +83,11 @@ from .analyzer import Analyzer
 from .config import ExportStrategy, QuantizationMethod, SelectionPolicy
 from .evaluator import Evaluator
 from .model import AbliterationParameters, Model, get_model_class
+from .multilingual_runtime import (
+    apply_multilingual_search_mode,
+    load_multilingual_worker_runtime,
+    recommended_model_layer_bounds,
+)
 from .promotion import load_seed_parameters
 from .reproduce import (
     check_environment,
@@ -599,19 +604,49 @@ def run():
             backend = JournalFileBackend(study_checkpoint_file, lock_obj=lock_obj)
             storage = JournalStorage(backend)
 
+    apply_multilingual_search_mode(settings)
     model = Model(settings)
     print()
     print_memory_usage()
 
-    print()
-    print(f"Loading good prompts from [bold]{settings.good_prompts.dataset}[/]...")
-    good_prompts = load_prompts(settings, settings.good_prompts)
-    print(f"* [bold]{len(good_prompts)}[/] prompts loaded")
+    multilingual_worker_runtime = None
+    if settings.multilingual_search.enabled:
+        print()
+        print("Loading frozen multilingual v3 runtime...")
+        multilingual_worker_runtime = load_multilingual_worker_runtime(
+            settings,
+            model,
+        )
+        good_prompts = [
+            Prompt(system="", user=row.prompt)
+            for row in multilingual_worker_runtime.bundle.direction_rows
+            if row.direction == "safe"
+        ]
+        bad_prompts = [
+            Prompt(system="", user=row.prompt)
+            for row in multilingual_worker_runtime.bundle.direction_rows
+            if row.direction == "unsafe"
+        ]
+        print(
+            "* Frozen rows: "
+            f"map [bold]{len(multilingual_worker_runtime.bundle.direction_rows)}[/], "
+            f"trial [bold]{len(multilingual_worker_runtime.bundle.trial_rows)}[/], "
+            "SRG calibration [bold]660[/], final holdout [bold]660[/]"
+        )
+        print(
+            "* Runtime contract: "
+            f"[bold]{multilingual_worker_runtime.manifest['runtime_contract_sha256']}[/]"
+        )
+    else:
+        print()
+        print(f"Loading good prompts from [bold]{settings.good_prompts.dataset}[/]...")
+        good_prompts = load_prompts(settings, settings.good_prompts)
+        print(f"* [bold]{len(good_prompts)}[/] prompts loaded")
 
-    print()
-    print(f"Loading bad prompts from [bold]{settings.bad_prompts.dataset}[/]...")
-    bad_prompts = load_prompts(settings, settings.bad_prompts)
-    print(f"* [bold]{len(bad_prompts)}[/] prompts loaded")
+        print()
+        print(f"Loading bad prompts from [bold]{settings.bad_prompts.dataset}[/]...")
+        bad_prompts = load_prompts(settings, settings.bad_prompts)
+        print(f"* [bold]{len(bad_prompts)}[/] prompts loaded")
 
     if settings.batch_size == 0:
         print()
@@ -779,13 +814,17 @@ def run():
         and not reproduction_mode
     )
 
-    evaluator = None
+    evaluator: Any | None = None
     if direct_trial_save:
         print()
         print(
             "Direct trial export: skipping scorer initialization and baseline "
             "evaluation."
         )
+    elif multilingual_worker_runtime is not None:
+        evaluator = multilingual_worker_runtime.evaluator
+        print()
+        print("Using frozen multilingual objectives: Removal and Preservation loss.")
     else:
         evaluator = Evaluator(settings, model)
 
@@ -820,50 +859,75 @@ def run():
         return
 
     print()
-    print("Calculating per-layer residual directions...")
-
-    needs_full_residuals = settings.print_residual_geometry or settings.plot_residuals
-
-    if needs_full_residuals:
-        print("* Obtaining residuals for good prompts...")
-        good_residuals = model.get_residuals_batched(good_prompts)
-        print("* Obtaining residuals for bad prompts...")
-        bad_residuals = model.get_residuals_batched(bad_prompts)
-
-        good_means = good_residuals.mean(dim=0)
-        bad_means = bad_residuals.mean(dim=0)
-
-        analyzer = Analyzer(settings, model, good_residuals, bad_residuals)
-
-        if settings.print_residual_geometry:
-            analyzer.print_residual_geometry()
-
-        if settings.plot_residuals:
-            analyzer.plot_residuals()
-
-        # We don't need the full residuals after computing their means and analyzing geometry.
-        del good_residuals, bad_residuals, analyzer
-    else:
-        print("* Obtaining residual mean for good prompts...")
-        good_means = model.get_residuals_mean(good_prompts)
-        print("* Obtaining residual mean for bad prompts...")
-        bad_means = model.get_residuals_mean(bad_prompts)
-
-    residual_directions = F.normalize(bad_means - good_means, p=2, dim=1)
-
-    if settings.orthogonalize_direction:
-        # Implements https://huggingface.co/blog/grimjim/projected-abliteration
-        # Adjust the residual directions so that only the component that is
-        # orthogonal to the good direction is subtracted during abliteration.
-        good_directions = F.normalize(good_means, p=2, dim=1)
-        projection_vector = torch.sum(residual_directions * good_directions, dim=1)
+    if multilingual_worker_runtime is not None:
+        print("Loading frozen multilingual search directions...")
         residual_directions = (
-            residual_directions - projection_vector.unsqueeze(1) * good_directions
+            multilingual_worker_runtime.direction_profile.per_layer_direction
         )
-        residual_directions = F.normalize(residual_directions, p=2, dim=1)
-        del good_directions, projection_vector
+        expected_direction_rows = len(model.get_layers()) + 1
+        if residual_directions.shape[0] != expected_direction_rows:
+            raise ValueError(
+                "frozen multilingual direction layers do not match the model: "
+                f"{residual_directions.shape[0]} != {expected_direction_rows}"
+            )
+        direction_search_bounds = recommended_model_layer_bounds(
+            multilingual_worker_runtime.direction_profile,
+            len(model.get_layers()),
+        )
+        print(
+            "* Frozen model-layer search bounds: "
+            f"[bold]{direction_search_bounds[0]:.0f}..{direction_search_bounds[1]:.0f}[/]"
+        )
+    else:
+        print("Calculating per-layer residual directions...")
 
-    del good_means, bad_means
+        needs_full_residuals = settings.print_residual_geometry or settings.plot_residuals
+
+        if needs_full_residuals:
+            print("* Obtaining residuals for good prompts...")
+            good_residuals = model.get_residuals_batched(good_prompts)
+            print("* Obtaining residuals for bad prompts...")
+            bad_residuals = model.get_residuals_batched(bad_prompts)
+
+            good_means = good_residuals.mean(dim=0)
+            bad_means = bad_residuals.mean(dim=0)
+
+            analyzer = Analyzer(settings, model, good_residuals, bad_residuals)
+
+            if settings.print_residual_geometry:
+                analyzer.print_residual_geometry()
+
+            if settings.plot_residuals:
+                analyzer.plot_residuals()
+
+            # We don't need the full residuals after computing their means and analyzing geometry.
+            del good_residuals, bad_residuals, analyzer
+        else:
+            print("* Obtaining residual mean for good prompts...")
+            good_means = model.get_residuals_mean(good_prompts)
+            print("* Obtaining residual mean for bad prompts...")
+            bad_means = model.get_residuals_mean(bad_prompts)
+
+        residual_directions = F.normalize(bad_means - good_means, p=2, dim=1)
+
+        if settings.orthogonalize_direction:
+            # Implements https://huggingface.co/blog/grimjim/projected-abliteration
+            # Adjust the residual directions so that only the component that is
+            # orthogonal to the good direction is subtracted during abliteration.
+            good_directions = F.normalize(good_means, p=2, dim=1)
+            projection_vector = torch.sum(residual_directions * good_directions, dim=1)
+            residual_directions = (
+                residual_directions - projection_vector.unsqueeze(1) * good_directions
+            )
+            residual_directions = F.normalize(residual_directions, p=2, dim=1)
+            del good_directions, projection_vector
+
+        del good_means, bad_means
+        last_layer_index = len(model.get_layers()) - 1
+        direction_search_bounds = (
+            0.4 * last_layer_index,
+            0.9 * last_layer_index,
+        )
 
     # Clear cache before starting the optimization study.
     # This should free up memory from the objects released with the del statements above.
@@ -977,8 +1041,8 @@ def run():
         # work with conditional or variable-range parameters.
         direction_index = trial.suggest_float(
             "direction_index",
-            0.4 * last_layer_index,
-            0.9 * last_layer_index,
+            direction_search_bounds[0],
+            direction_search_bounds[1],
         )
 
         if direction_scope == "per layer":

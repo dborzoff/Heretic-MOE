@@ -90,6 +90,10 @@ class SearchSettingsTests(unittest.TestCase):
         self.assertEqual(contract.calibration_rows_per_language, 132)
         self.assertEqual(contract.ordinary_max_new_tokens, 512)
         self.assertEqual(contract.final_max_new_tokens, 1024)
+        self.assertEqual(contract.schedule_capacity, 1000)
+        self.assertIsNone(contract.runtime_root)
+        self.assertEqual(contract.max_safe_ppl_drift, 0.005)
+        self.assertEqual(contract.max_safe_geometry_damage, 1.0)
 
     def test_enabled_multilingual_search_requires_dataset_root(self) -> None:
         with self.assertRaisesRegex(ValidationError, "dataset_root"):

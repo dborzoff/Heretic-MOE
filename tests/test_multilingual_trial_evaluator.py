@@ -103,6 +103,7 @@ def test_one_trial_phase_produces_all_metrics_and_private_records(tmp_path: Path
     model = _FakeModel(rows)
     scorer = _FakeSRG()
     private_path = tmp_path / "private" / "trial-17.jsonl"
+    captured: list[tuple[int, tuple[int, ...]]] = []
 
     measurement = evaluate_multilingual_trial(
         trial_number=17,
@@ -116,11 +117,15 @@ def test_one_trial_phase_produces_all_metrics_and_private_records(tmp_path: Path
         private_records_path=private_path,
         expected_per_direction=4,
         expected_languages=("en", "ru"),
+        residual_capture=lambda prompts, residuals: captured.append(
+            (len(prompts), tuple(residuals.shape))
+        ),
     )
 
     assert model.generation_phases == 1
     assert model.nll_calls == 1
     assert scorer.calls == 2
+    assert captured == [(8, (8, 2, 2))]
     assert measurement.metrics.srg_gain > 0.0
     assert measurement.metrics.r_gain > 0.0
     assert measurement.metrics.unsafe_geometry_gain > 0.0
@@ -191,13 +196,23 @@ def test_trial_rejects_language_imbalance_even_when_direction_counts_match(
 def test_frozen_evaluator_resolves_global_trial_schedule(tmp_path: Path) -> None:
     rows = _rows(tmp_path)
     model = _FakeModel(rows)
+    clean_records = _clean_records(rows)
+    clean_records.append(
+        {
+            "row_id": "fr-S9999",
+            "clean_response": "clean-fr-S9999",
+            "clean_response_token_ids": [9999],
+            "clean_prompt_residual_projection": [1.0, 1.0],
+            "clean_conditional_nll": 1.0,
+        }
+    )
     evaluator = FrozenMultilingualTrialEvaluator(
         model=model,
         trial_rows=rows,
         schedule_records=[
             {"trial_number": 17, "row_ids": [row.row_id for row in rows]}
         ],
-        clean_records=_clean_records(rows),
+        clean_records=clean_records,
         refusal_direction=torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
         layer_reliability=torch.ones(2),
         srg_scorer=_FakeSRG(),

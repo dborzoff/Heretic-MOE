@@ -218,6 +218,10 @@ class MultilingualSearchSettings(BaseModel):
             "subdirectory under dataset_root."
         ),
     )
+    runtime_root: str | None = Field(
+        default=None,
+        description="Frozen map/reference/SRG/schedule artifact root for workers.",
+    )
     languages: list[str] = Field(
         default_factory=lambda: ["en", "ru", "zh", "es", "fr"]
     )
@@ -228,6 +232,11 @@ class MultilingualSearchSettings(BaseModel):
     final_max_new_tokens: PositiveInt = 1024
     schedule_seed: int = 20260811
     schedule_version: PositiveInt = 2
+    schedule_capacity: PositiveInt = 1000
+    max_safe_ppl_drift: NonNegativeFloat = 0.005
+    max_safe_geometry_damage: NonNegativeFloat = 1.0
+    max_language_instability: NonNegativeFloat = 1.0
+    max_category_instability: NonNegativeFloat = 1.0
 
     @field_validator("languages")
     @classmethod
