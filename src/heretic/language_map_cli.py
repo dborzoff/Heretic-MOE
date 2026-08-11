@@ -81,6 +81,11 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--model", help="Hugging Face model directory or repository ID.")
     run.add_argument("--output-dir", type=Path, default=Path("geometry_map_output"))
     run.add_argument("--batch-size", type=int, default=8)
+    run.add_argument(
+        "--limit-per-cell",
+        type=int,
+        help="After full validation, capture only the first N aligned rows per cell.",
+    )
     run.add_argument("--device", default="0", help="CUDA device identifier.")
     run.add_argument("--dtype", default="bfloat16")
     run.add_argument("--seed", type=int, default=42)
@@ -148,7 +153,8 @@ def _capture(
             "model": args.model,
             "seed": args.seed,
             "languages": list(args.languages),
-            "rows_per_cell": args.rows_per_cell,
+            "source_rows_per_cell": args.rows_per_cell,
+            "rows_per_cell": args.effective_rows_per_cell,
             "source_files": source_files,
         },
         progress=progress,
@@ -179,13 +185,28 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
 
     files = _input_files(args)
     rows = load_aligned_corpus(files, args.languages, args.rows_per_cell)
+    args.effective_rows_per_cell = args.rows_per_cell
+    if args.limit_per_cell is not None:
+        if args.limit_per_cell <= 0 or args.limit_per_cell > args.rows_per_cell:
+            raise ValueError("--limit-per-cell must be between 1 and --rows-per-cell")
+        selected: list[GeometryRow] = []
+        counts: dict[tuple[str, str], int] = {}
+        for row in rows:
+            key = (row.direction, row.language)
+            count = counts.get(key, 0)
+            if count < args.limit_per_cell:
+                selected.append(row)
+                counts[key] = count + 1
+        rows = selected
+        args.effective_rows_per_cell = args.limit_per_cell
     if args.dry_run:
         result = {
             "status": "PASS",
             "mode": "dry-run",
             "languages": list(args.languages),
             "rows": len(rows),
-            "rows_per_cell": args.rows_per_cell,
+            "rows_per_cell": args.effective_rows_per_cell,
+            "source_rows_per_cell": args.rows_per_cell,
         }
         print(json.dumps(result, sort_keys=True))
         return result

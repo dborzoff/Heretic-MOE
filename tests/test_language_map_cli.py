@@ -82,4 +82,39 @@ def test_dry_run_validates_without_loading_model(
         "languages": ["en", "ru"],
         "rows": 8,
         "rows_per_cell": 2,
+        "source_rows_per_cell": 2,
     }
+
+
+def test_dry_run_can_limit_each_validated_cell(tmp_path: Path) -> None:
+    files: dict[tuple[str, str], Path] = {}
+    for language in ("en", "ru"):
+        for direction in ("safe", "unsafe"):
+            path = tmp_path / f"{language}-{direction}.jsonl"
+            _write_cell(path, language=language, direction=direction)
+            files[(language, direction)] = path
+
+    result = language_map_cli.main(
+        [
+            "run",
+            "--dry-run",
+            "--languages",
+            "en,ru",
+            "--rows-per-cell",
+            "2",
+            "--limit-per-cell",
+            "1",
+            "--group-a",
+            f"en={files[('en', 'safe')]}",
+            "--group-a",
+            f"ru={files[('ru', 'safe')]}",
+            "--group-b",
+            f"en={files[('en', 'unsafe')]}",
+            "--group-b",
+            f"ru={files[('ru', 'unsafe')]}",
+        ]
+    )
+
+    assert result["rows"] == 4
+    assert result["rows_per_cell"] == 1
+    assert result["source_rows_per_cell"] == 2
