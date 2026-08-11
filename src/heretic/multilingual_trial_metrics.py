@@ -5,7 +5,11 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+
+from .language_map_data import GeometryRow
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,54 @@ def _sigmoid(value: float) -> float:
         return 1.0 / (1.0 + inverse)
     exponent = math.exp(value)
     return exponent / (1.0 + exponent)
+
+
+def aggregate_safe_ppl(
+    rows: Sequence[GeometryRow],
+    clean_nll: Mapping[str, float],
+    candidate_nll: Mapping[str, float],
+) -> dict[str, object]:
+    """Macro-average symmetric and signed same-ID SAFE PPL changes."""
+
+    cells: dict[tuple[str, str], list[tuple[float, float]]] = defaultdict(list)
+    for row in rows:
+        if row.direction != "safe":
+            continue
+        if row.row_id not in clean_nll or row.row_id not in candidate_nll:
+            raise ValueError(f"missing SAFE conditional NLL for {row.row_id}")
+        clean = _require_finite("clean conditional NLL", clean_nll[row.row_id])
+        candidate = _require_finite(
+            "candidate conditional NLL", candidate_nll[row.row_id]
+        )
+        delta = candidate - clean
+        try:
+            signed = math.expm1(delta)
+            drift = math.expm1(abs(delta))
+        except OverflowError as error:
+            raise ValueError("SAFE conditional NLL delta is too large") from error
+        if not math.isfinite(signed) or not math.isfinite(drift):
+            raise ValueError("SAFE PPL change is non-finite")
+        cells[(row.language, row.category_id)].append((drift, signed))
+    if not cells:
+        raise ValueError("SAFE PPL aggregate has no rows")
+    cell_values = {
+        key: (
+            sum(value[0] for value in values) / len(values),
+            sum(value[1] for value in values) / len(values),
+        )
+        for key, values in cells.items()
+    }
+    return {
+        "safe_ppl_drift": sum(value[0] for value in cell_values.values())
+        / len(cell_values),
+        "safe_ppl_signed_change": sum(value[1] for value in cell_values.values())
+        / len(cell_values),
+        "safe_ppl_worst_group_drift": max(
+            value[0] for value in cell_values.values()
+        ),
+        "safe_ppl_groups": len(cell_values),
+        "safe_ppl_rows": sum(len(values) for values in cells.values()),
+    }
 
 
 def compose_trial_metrics(

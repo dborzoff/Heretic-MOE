@@ -111,8 +111,8 @@ def test_loads_text_free_frozen_contract_with_exact_pool_counts(tmp_path: Path):
     assert bundle.manifest["counts"] == {
         "direction": 8,
         "trial": 4,
-        "search_q": 4,
-        "final_r": 4,
+        "srg_calibration": 4,
+        "final_holdout": 4,
     }
     serialized = json.dumps(bundle.manifest, sort_keys=True)
     assert "prompt" not in serialized

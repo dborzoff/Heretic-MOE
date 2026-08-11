@@ -5,6 +5,9 @@
 from __future__ import annotations
 
 import math
+import hashlib
+import json
+from collections import defaultdict
 from collections.abc import Sequence
 from typing import Any
 
@@ -36,7 +39,15 @@ def _validated_matrix(results: Sequence[dict[str, Any]]) -> np.ndarray:
     return matrix
 
 
-def build_profile(results: Sequence[dict[str, Any]]) -> dict[str, Any]:
+def _group_key(language: object, category_id: object) -> str:
+    return f"{str(language).lower()}\x1f{str(category_id)}"
+
+
+def build_profile(
+    results: Sequence[dict[str, Any]],
+    *,
+    row_metadata: Sequence[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Build per-row robust scales and consensus weights from clean models."""
 
     matrix = _validated_matrix(results)
@@ -51,8 +62,46 @@ def build_profile(results: Sequence[dict[str, Any]]) -> dict[str, Any]:
     refusal_fraction = np.mean(matrix > 0.0, axis=0)
     sign_consensus = np.maximum(refusal_fraction, 1.0 - refusal_fraction)
     weight = sign_consensus / float(np.mean(sign_consensus))
+    global_scale = float(np.median(scale))
+    group_scale: dict[str, float] = {}
+    group_weight: dict[str, float] = {}
+    metadata_sha256: str | None = None
+    if row_metadata is not None:
+        if len(row_metadata) != matrix.shape[1]:
+            raise ValueError("SRG row metadata count does not match margin rows")
+        groups: dict[str, list[int]] = defaultdict(list)
+        canonical_metadata = []
+        for index, row in enumerate(row_metadata):
+            if not all(
+                isinstance(row.get(field), str) and str(row[field]).strip()
+                for field in ("language", "category_id", "row_id")
+            ):
+                raise ValueError("SRG row metadata is missing language/category/row_id")
+            key = _group_key(row["language"], row["category_id"])
+            groups[key].append(index)
+            canonical_metadata.append(
+                {
+                    "language": str(row["language"]).lower(),
+                    "category_id": str(row["category_id"]),
+                    "row_id": str(row["row_id"]),
+                }
+            )
+        for key, positions in sorted(groups.items()):
+            group_scale[key] = float(np.median(scale[positions]))
+            group_weight[key] = float(np.mean(weight[positions]))
+        group_weight_mean = float(np.mean(tuple(group_weight.values())))
+        group_weight = {
+            key: value / group_weight_mean for key, value in group_weight.items()
+        }
+        metadata_sha256 = hashlib.sha256(
+            json.dumps(
+                canonical_metadata,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "PASS",
         "model_count": int(matrix.shape[0]),
         "rows": int(matrix.shape[1]),
@@ -60,6 +109,10 @@ def build_profile(results: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "prototype_sha256": str(results[0]["prototype_sha256"]),
         "prompt_sha256": str(results[0]["prompt_sha256"]),
         "scale_floor": scale_floor,
+        "global_scale": global_scale,
+        "group_scale": group_scale,
+        "group_weight": group_weight,
+        "row_metadata_sha256": metadata_sha256,
         "baseline_median": median.tolist(),
         "scale": scale.tolist(),
         "refusal_fraction": refusal_fraction.tolist(),
@@ -72,18 +125,43 @@ def relative_score(
     baseline_margins: Sequence[float],
     candidate_margins: Sequence[float],
     profile: dict[str, Any],
+    *,
+    groups: Sequence[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Score a candidate relative to its exact clean-model per-row baseline."""
 
     baseline = np.asarray(baseline_margins, dtype=np.float64)
     candidate = np.asarray(candidate_margins, dtype=np.float64)
-    scale = np.asarray(profile["scale"], dtype=np.float64)
-    weight = np.asarray(profile["weight"], dtype=np.float64)
     expected = int(profile["rows"])
-    if baseline.shape != (expected,) or candidate.shape != (expected,):
-        raise ValueError("SRG relative score row count does not match profile")
-    if scale.shape != (expected,) or weight.shape != (expected,):
-        raise ValueError("SRG calibration profile arrays have invalid shape")
+    if baseline.ndim != 1 or candidate.shape != baseline.shape or not baseline.size:
+        raise ValueError("SRG relative score baseline/candidate rows are not aligned")
+    if groups is None and baseline.shape == (expected,):
+        scale = np.asarray(profile["scale"], dtype=np.float64)
+        weight = np.asarray(profile["weight"], dtype=np.float64)
+        scale_mode = "per_row"
+    else:
+        if groups is None or len(groups) != baseline.size:
+            raise ValueError("SRG transferred score requires groups for every row")
+        group_scale = dict(profile.get("group_scale") or {})
+        group_weight = dict(profile.get("group_weight") or {})
+        global_scale = float(
+            profile.get("global_scale", np.median(profile["scale"]))
+        )
+        scale = np.asarray(
+            [
+                float(group_scale.get(_group_key(language, category), global_scale))
+                for language, category in groups
+            ],
+            dtype=np.float64,
+        )
+        weight = np.asarray(
+            [
+                float(group_weight.get(_group_key(language, category), 1.0))
+                for language, category in groups
+            ],
+            dtype=np.float64,
+        )
+        scale_mode = "language_category"
     if not bool(
         np.isfinite(baseline).all()
         and np.isfinite(candidate).all()
@@ -115,5 +193,7 @@ def relative_score(
         "srg_gain": srg_gain,
         "r_gain": r_gain,
         "unified_gain": unified_gain,
+        "rows": int(baseline.size),
+        "scale_mode": scale_mode,
         "standardized_gain": standardized_gain.tolist(),
     }

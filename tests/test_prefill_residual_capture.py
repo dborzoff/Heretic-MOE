@@ -100,3 +100,29 @@ def test_batched_prefill_capture_preserves_prompt_order() -> None:
 
     assert responses == ["r-0", "r-1", "r-2", "r-3", "r-4"]
     assert residuals.flatten().tolist() == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+
+def test_batched_artifact_capture_preserves_text_tokens_and_residual_order() -> None:
+    wrapper = object.__new__(Model)
+    wrapper.settings = SimpleNamespace(batch_size=2)
+
+    def capture(self, prompts, skip_special_tokens=False):
+        values = [int(prompt.user) for prompt in prompts]
+        return (
+            [f"r-{value}" for value in values],
+            [[value, value + 10] for value in values],
+            torch.tensor(values, dtype=torch.float32).reshape(-1, 1, 1),
+        )
+
+    wrapper.get_response_artifacts_with_prefill_residuals = MethodType(
+        capture, wrapper
+    )
+    prompts = [Prompt(system="", user=str(index)) for index in range(5)]
+
+    responses, token_ids, residuals = (
+        wrapper.get_response_artifacts_with_prefill_residuals_batched(prompts)
+    )
+
+    assert responses == ["r-0", "r-1", "r-2", "r-3", "r-4"]
+    assert token_ids == [[0, 10], [1, 11], [2, 12], [3, 13], [4, 14]]
+    assert residuals.flatten().tolist() == [0.0, 1.0, 2.0, 3.0, 4.0]

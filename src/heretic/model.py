@@ -1118,6 +1118,30 @@ class Model:
         )
         return responses, residuals
 
+    def get_response_artifacts_with_prefill_residuals_batched(
+        self,
+        prompts: list[Prompt],
+        skip_special_tokens: bool = False,
+    ) -> tuple[list[str], list[list[int]], Tensor]:
+        """Batched text, generated token IDs, and prefill residual capture."""
+
+        if not prompts:
+            raise ValueError("prompts must not be empty")
+        responses: list[str] = []
+        token_ids: list[list[int]] = []
+        residuals: list[Tensor] = []
+        for batch in batchify(prompts, self.settings.batch_size):
+            batch_responses, batch_token_ids, batch_residuals = (
+                self.get_response_artifacts_with_prefill_residuals(
+                    batch,
+                    skip_special_tokens=skip_special_tokens,
+                )
+            )
+            responses.extend(batch_responses)
+            token_ids.extend(batch_token_ids)
+            residuals.append(batch_residuals)
+        return responses, token_ids, torch.cat(residuals, dim=0)
+
     def get_responses_with_prefill_residuals_batched(
         self,
         prompts: list[Prompt],

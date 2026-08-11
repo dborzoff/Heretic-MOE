@@ -4,6 +4,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+from scipy.sparse import csr_matrix
+
 from heretic.config import DatasetSpecification, Settings as HereticSettings
 from heretic.scorers.sparse_refusal_geometry import (
     Settings,
@@ -38,6 +41,22 @@ class _Context:
 
 
 class SparseRefusalGeometryTests(unittest.TestCase):
+    def test_external_queries_do_not_exclude_prototypes_by_row_position(self):
+        scorer = object.__new__(SparseRefusalGeometry)
+        scorer.settings = SimpleNamespace(top_k=1)
+        scorer._prototype_ids = np.asarray([0, 1, 2, 3, 4, 5])
+        scorer._labels = np.asarray(
+            ["delivered", "delivered", "soft", "soft", "refuse", "refuse"]
+        )
+        query = csr_matrix([[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
+        reference = csr_matrix(np.eye(6))
+
+        external = scorer._topk_scores(query, reference, query_ids=None)
+        aligned = scorer._topk_scores(query, reference, query_ids=np.asarray([0]))
+
+        self.assertEqual(external["delivered"].tolist(), [1.0])
+        self.assertEqual(aligned["delivered"].tolist(), [0.0])
+
     def test_score_is_finite_and_empty_response_is_penalized(self):
         prompts = [Prompt(system="", user=f"prompt {index}") for index in range(6)]
         labels = ["delivered", "delivered", "soft", "soft", "refuse", "refuse"]

@@ -226,13 +226,20 @@ class SparseRefusalGeometry(Scorer):
             f"response cap [bold]{cap}[/] tokens"
         )
 
-    def _topk_scores(self, query: Any, reference: Any) -> dict[str, np.ndarray]:
+    def _topk_scores(
+        self,
+        query: Any,
+        reference: Any,
+        *,
+        query_ids: np.ndarray | None,
+    ) -> dict[str, np.ndarray]:
         similarities = (query @ reference.T).toarray()
-        query_ids: np.ndarray[Any, np.dtype[np.int64]] = np.arange(
-            query.shape[0], dtype=np.int64
-        )
-        same_prompt = query_ids[:, None] == self._prototype_ids[None, :]
-        similarities[same_prompt] = -np.inf
+        if query_ids is not None:
+            normalized_ids = np.asarray(query_ids, dtype=np.int64)
+            if normalized_ids.shape != (query.shape[0],):
+                raise ValueError("sparse geometry query IDs are not aligned")
+            same_prompt = normalized_ids[:, None] == self._prototype_ids[None, :]
+            similarities[same_prompt] = -np.inf
         result: dict[str, np.ndarray] = {}
         for label in LABELS:
             block = similarities[:, self._labels == label]
@@ -242,7 +249,11 @@ class SparseRefusalGeometry(Scorer):
         return result
 
     def _class_scores(
-        self, prompts: list[str], responses: list[str]
+        self,
+        prompts: list[str],
+        responses: list[str],
+        *,
+        query_ids: np.ndarray | None = None,
     ) -> dict[str, np.ndarray]:
         query_char = self._char_vectorizer.transform(responses)
         query_word = self._word_vectorizer.transform(responses)
@@ -250,9 +261,15 @@ class SparseRefusalGeometry(Scorer):
         query_answer = self._pair_vectorizer.transform(responses)
         query_delta = normalize(query_answer - query_prompt)
 
-        char_topk = self._topk_scores(query_char, self._prototype_char)
-        word_topk = self._topk_scores(query_word, self._prototype_word)
-        delta_topk = self._topk_scores(query_delta, self._prototype_delta)
+        char_topk = self._topk_scores(
+            query_char, self._prototype_char, query_ids=query_ids
+        )
+        word_topk = self._topk_scores(
+            query_word, self._prototype_word, query_ids=query_ids
+        )
+        delta_topk = self._topk_scores(
+            query_delta, self._prototype_delta, query_ids=query_ids
+        )
         result: dict[str, np.ndarray] = {}
         for label in LABELS:
             centroid = self._char_centroids[label]
@@ -269,7 +286,11 @@ class SparseRefusalGeometry(Scorer):
         return result
 
     def score_responses(
-        self, prompts: list[Prompt], responses: list[str]
+        self,
+        prompts: list[Prompt],
+        responses: list[str],
+        *,
+        prompt_ids: list[int] | None = None,
     ) -> Score:
         """Score responses that were generated in externally visible batches."""
 
@@ -278,7 +299,17 @@ class SparseRefusalGeometry(Scorer):
         if not prompts:
             raise ValueError("Sparse geometry response set is empty")
         prompt_texts = [prompt.user for prompt in prompts]
-        class_scores = self._class_scores(prompt_texts, responses)
+        query_ids = (
+            np.asarray(prompt_ids, dtype=np.int64) if prompt_ids is not None else None
+        )
+        if query_ids is None:
+            class_scores = self._class_scores(prompt_texts, responses)
+        else:
+            class_scores = self._class_scores(
+                prompt_texts,
+                responses,
+                query_ids=query_ids,
+            )
         margins = (
             np.maximum(class_scores["soft"], class_scores["refuse"])
             - class_scores["delivered"]
@@ -315,4 +346,8 @@ class SparseRefusalGeometry(Scorer):
 
     def get_score(self, ctx: Context) -> Score:
         responses = ctx.get_responses(self.prompts)
-        return self.score_responses(self.prompts, responses)
+        return self.score_responses(
+            self.prompts,
+            responses,
+            prompt_ids=list(range(len(self.prompts))),
+        )

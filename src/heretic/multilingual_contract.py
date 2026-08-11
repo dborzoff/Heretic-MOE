@@ -370,8 +370,8 @@ def load_multilingual_dataset_bundle(
         {
             "direction": direction_rows,
             "trial": trial_rows,
-            "search_q": search_rows,
-            "final_r": final_rows,
+            "srg_calibration": search_rows,
+            "final_holdout": final_rows,
         }
     )
 
@@ -398,8 +398,8 @@ def load_multilingual_dataset_bundle(
                 ids=ids,
             )
     for pool, prefix, rows in (
-        ("search_q", "search_unsafe", search_rows),
-        ("final_r", "srg_calibration", final_rows),
+        ("srg_calibration", "search_unsafe", search_rows),
+        ("final_holdout", "srg_calibration", final_rows),
     ):
         for language in normalized_languages:
             path = root / f"{prefix}_{language}.jsonl"
@@ -426,14 +426,14 @@ def load_multilingual_dataset_bundle(
         "counts": {
             "direction": len(direction_rows),
             "trial": len(trial_rows),
-            "search_q": len(search_rows),
-            "final_r": len(final_rows),
+            "srg_calibration": len(search_rows),
+            "final_holdout": len(final_rows),
         },
         "rows_per_cell": {
             "direction": direction_rows_per_cell,
             "trial": trial_rows_per_cell,
-            "search_q": calibration_rows_per_language,
-            "final_r": calibration_rows_per_language,
+            "srg_calibration": calibration_rows_per_language,
+            "final_holdout": calibration_rows_per_language,
         },
         "source_manifests": source_manifests,
         "files": dict(sorted(file_records.items())),

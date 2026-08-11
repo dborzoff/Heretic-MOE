@@ -13,9 +13,9 @@
 - Design source of truth: `docs/superpowers/specs/2026-08-11-heretic-moe-multilingual-search-v3-design-ru.md`.
 - Dataset root: `F:/AI/hf_originals/heretic_out/research/datasets/heretic_moe_5lang_v1`.
 - Languages: `en`, `ru`, `zh`, `es`, `fr`; public reports remain text-free.
-- Direction map: 10,000 prompt-only rows; Trial pool: 4,000 aligned rows; Q/R: 660 rows each.
+- Direction map: 10,000 prompt-only rows; Trial pool: 4,000 aligned rows; SRG calibration/final holdout: 660 rows each.
 - Ordinary trial: exactly 800 responses at 512-token cap and one autoregressive generation phase.
-- Final R recheck: 660 responses at 1024-token cap; independent PPL: `64 x 1024`.
+- Final holdout recheck: 660 responses at 1024-token cap; independent PPL: `64 x 1024`.
 - New metric contract never imports raw values from old 136-row or `-0.0088` studies.
 - Resume requires exact model, dataset, map, SRG, schedule, generation, metric and constraint hashes.
 
@@ -38,11 +38,11 @@
 
 **Produces:** `MultilingualDatasetContract`, `FrozenRunContract`, manifest hashes and row indexes consumed by every later stage.
 
-- [ ] Write tests that reject wrong counts, missing languages, cross-language ID/order drift, overlap between direction/trial/Q/R, prompt leakage into public manifests and SHA mismatch.
-- [ ] Load the operative `1000/400` files plus Q/R files without reading or logging prompt text.
+- [ ] Write tests that reject wrong counts, missing languages, cross-language ID/order drift, overlap between direction/trial/SRG calibration/final holdout, prompt leakage into public manifests and SHA mismatch.
+- [ ] Load the operative `1000/400` files plus SRG calibration/final holdout files without reading or logging prompt text.
 - [ ] Freeze counts, file hashes, canonical coverage, languages, generation caps, schedule version, metric version and constraint contract before GPU work.
 - [ ] Refuse resume when any frozen field differs; never silently fall back to old datasets or scorer targets.
-- [ ] Verify exact totals: direction 10,000; trial 4,000; Q 660; R 660.
+- [ ] Verify exact totals: direction 10,000; trial 4,000; SRG calibration 660; final holdout 660.
 
 ### Task 3: Direction map and search-direction package
 
@@ -68,14 +68,14 @@
 - [ ] Generate all 4,000 clean reference responses once at 512 tokens; store response IDs, token targets, NLL, residual projections and clean metrics privately.
 - [ ] Make resume reuse verified schedule/reference artifacts without regenerating or renumbering them.
 
-### Task 5: SRG Q calibration and relative scoring
+### Task 5: SRG calibration and relative scoring
 
 **Files:** finish `src/heretic/srg_calibration.py`, `src/heretic/srg_benchmark.py`, scorer integration and tests.
 
-**Produces:** versioned `SRGCalibrationProfile` and exact target-model clean Q baseline.
+**Produces:** versioned `SRGCalibrationProfile` and exact target-model clean calibration baseline.
 
 - [ ] Preserve current robust median/MAD/sign-consensus behavior with tests for hash mismatch, non-finite rows and scale floors.
-- [ ] Run Q `132 x 5` only for one-time calibration; keep it outside ordinary trials.
+- [ ] Run the SRG calibration set `132 x 5` only once; keep it outside ordinary trials.
 - [ ] Compute baseline-relative continuous gain, R-to-D, D-to-R and R-side gain with clean=trial exactly zero.
 - [ ] Store global cross-model scales separately from the target model's own clean margins.
 - [ ] Remove old raw `SRG=0`, `R-side=0` and static `-0.0088` assumptions from the new-search path.
@@ -115,8 +115,8 @@
 **Produces:** frozen finalists, full recheck measurements and `winners.json`.
 
 - [ ] Select two maximum-Removal, two maximum-Cost-up and two diverse low-Preservation Pareto candidates with exact parameter de-duplication.
-- [ ] Freeze TOP-6 before opening any R candidate outputs.
-- [ ] Recheck every finalist on all 4,000 Trial rows at 512, R 660 at 1024, same-ID SAFE PPL and independent `64 x 1024` PPL.
+- [ ] Freeze TOP-6 before opening any final-holdout candidate outputs.
+- [ ] Recheck every finalist on all 4,000 Trial rows at 512, final holdout 660 at 1024, same-ID SAFE PPL and independent `64 x 1024` PPL.
 - [ ] Choose Balanced as minimum PreservationLoss after removal/gates and Max as maximum Removal after preservation gates.
 - [ ] If both roles select identical parameters, write two roles pointing to one physical artifact.
 
@@ -147,4 +147,3 @@
 - [ ] Clean candidate produces zero SRG/R/PPL/geometry deltas within numerical tolerance and Cost-up `0.5`.
 - [ ] Public progress shows `GPU N | Tglobal | Cost↑ | Removal | Preservation | PPL drift (signed)` without prompt/answer text.
 - [ ] All tests pass freshly; model loading, trial counters and output artifacts advance during the real smoke.
-

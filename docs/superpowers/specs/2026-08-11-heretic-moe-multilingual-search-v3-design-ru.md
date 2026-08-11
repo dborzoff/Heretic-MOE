@@ -106,10 +106,10 @@ es 7ddb7e00f60bb07a709975a39e33bef4c0cbf2ebfbcea457f5faa5ae07df187c
 fr a59b56b762522a576fca8ad0e3a3ba87ae902d25e348021ae78c92844f86abf0
 ```
 
-Набор Q0001-Q0132 используется для создания и проверки SRG-шкалы. Он не
+Набор `search_unsafe_*` (внутренние base ID Q0001-Q0132) используется для создания и проверки SRG-шкалы. Он не
 участвует в ordinary trials и не является финальным доказательным holdout.
 
-### SRG final calibration
+### Независимый final holdout
 
 ```text
 srg_calibration_en.jsonl  132
@@ -129,7 +129,7 @@ es b9b1ca3e20b6074b64b41d72ed0bd8ffb1d20946577a5ae4e7ae60d00203865f
 fr a94a04c322db10ee2f26fb2133b8fa612f63b7ec6a507599c530acd04dd75179
 ```
 
-Набор R0001-R0132 остаётся независимым от настройки SRG и от Optuna. Он
+Набор `srg_calibration_*` (внутренние base ID R0001-R0132) остаётся независимым от настройки SRG и от Optuna. Он
 открывается для candidate-ответов только после фиксации TOP-6.
 
 ### Целостность split
@@ -161,7 +161,7 @@ SHA-256 eff355d9af38bc4a7949ee47c5d3e05cbf6a5f80df4f1a9b4efa605fe4d5d73e
 Validate inputs
   -> clean Direction residual map (10 000, prompt-only)
   -> clean Trial reference archive (4 000, one answer each)
-  -> one-time SRG Q calibration (660)
+  -> one-time SRG calibration (660)
   -> frozen map, directions, scales and hashes
   -> 120 Random/Sobol exploration
   -> multivariate TPE to target trial count
@@ -398,7 +398,7 @@ refuse
 scorer использует TF-IDF, cosine geometry и class margins без модели-судьи.
 
 Для устойчивой межсемейной шкалы разрешён однократный прогон 5-6 небольших
-чистых моделей по Q. Он нужен не для поиска нуля конкретной модели, а для:
+чистых моделей по набору SRG calibration. Он нужен не для поиска нуля конкретной модели, а для:
 
 - per-row robust scale;
 - sign consensus;
@@ -406,11 +406,11 @@ scorer использует TF-IDF, cosine geometry и class margins без мо
 - reliability weights;
 - проверки отсутствия систематической инверсии языка.
 
-Этот профиль пересчитывается только при изменении Q-файлов, prototype bank,
+Этот профиль пересчитывается только при изменении файлов SRG calibration, prototype bank,
 SRG-формулы или generation contract. Для каждой целевой модели отдельно
 снимается только её clean baseline.
 
-Набор R при настройке Q не читается и не влияет на веса, пороги или формулу.
+Final holdout при настройке SRG calibration не читается и не влияет на веса, пороги или формулу.
 
 ## Этап D. Пяти-trial языковое расписание
 
@@ -664,7 +664,7 @@ TOP-6 фиксируется manifest до открытия набора R.
 `max_new_tokens=512`. Это даёт exact per-language и per-category результат
 одного parameter set, которого нет у ordinary trial.
 
-### Независимый SRG R
+### Независимый SRG final holdout
 
 Для одного finalist генерируются:
 
@@ -672,9 +672,9 @@ TOP-6 фиксируется manifest до открытия набора R.
 132 x 5 x max_new_tokens=1024
 ```
 
-Набор R используется только здесь. Отчёт хранит отдельно:
+Final holdout используется только здесь. Отчёт хранит отдельно:
 
-- R SRG/R-side;
+- final-holdout SRG/R-side;
 - R->D и D->R;
 - языки;
 - 14 категорий;
@@ -715,7 +715,7 @@ TOP-6 фиксируется manifest до открытия набора R.
 Сначала применяются потолки SafePPLDrift и SafeGeometryDamage. Среди оставшихся
 выбирается максимальный Removal. Tie-break:
 
-1. лучший R holdout Removal;
+1. лучший final-holdout Removal;
 2. лучший worst-language;
 3. лучший worst-category;
 4. меньший PreservationLoss;
@@ -825,7 +825,7 @@ parameter sets. Сырые значения старой метрики не п�
 
 ### Финализация
 
-- TOP-6 зафиксирован до открытия R candidate outputs;
+- TOP-6 зафиксирован до открытия final-holdout candidate outputs;
 - все шесть rechecked заново;
 - Balanced/Max выбираются по recheck;
 - winners.json покрывает обе роли;
@@ -835,6 +835,6 @@ parameter sets. Сырые значения старой метрики не п�
 ## Нерешённое до реализации
 
 Текущий план фиксирует `max_new_tokens=512` для ordinary 800-row trial и 1024
-для final R. Перед кодированием пользователь может уменьшить ordinary cap до
+для final holdout. Перед кодированием пользователь может уменьшить ordinary cap до
 128 или 256, не меняя архитектуру. После начала study длина замораживается и не
 может изменяться при resume.

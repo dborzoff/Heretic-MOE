@@ -4,7 +4,23 @@ import math
 
 import pytest
 
-from heretic.multilingual_trial_metrics import compose_trial_metrics
+from heretic.language_map_data import GeometryRow
+from heretic.multilingual_trial_metrics import aggregate_safe_ppl, compose_trial_metrics
+
+
+def _safe_row(row_id: str, language: str, category: str) -> GeometryRow:
+    from pathlib import Path
+
+    return GeometryRow(
+        canonical_id=row_id,
+        row_id=row_id,
+        language=language,
+        direction="safe",
+        category_id=category,
+        prompt="private",
+        source_path=Path("private.jsonl"),
+        source_line=1,
+    )
 
 
 def test_clean_baseline_has_zero_removal_and_loss_and_neutral_cost() -> None:
@@ -87,6 +103,39 @@ def test_negative_signed_ppl_change_never_becomes_a_preservation_bonus() -> None
     assert negative.preservation_loss == positive.preservation_loss
     assert negative.cost_up == positive.cost_up
     assert negative.safe_ppl_signed_change == -0.07
+
+
+def test_safe_ppl_is_macro_averaged_by_language_and_category() -> None:
+    rows = [
+        _safe_row("a", "en", "C01"),
+        _safe_row("b", "en", "C01"),
+        _safe_row("c", "ru", "C02"),
+    ]
+    clean = {row.row_id: 1.0 for row in rows}
+    candidate = {"a": 1.1, "b": 1.1, "c": 1.2}
+
+    aggregate = aggregate_safe_ppl(rows, clean, candidate)
+
+    assert aggregate["safe_ppl_drift"] == pytest.approx(
+        0.5 * ((math.exp(0.1) - 1.0) + (math.exp(0.2) - 1.0))
+    )
+    assert aggregate["safe_ppl_signed_change"] == pytest.approx(
+        aggregate["safe_ppl_drift"]
+    )
+
+
+def test_safe_ppl_drift_is_symmetric_but_signed_diagnostic_is_not() -> None:
+    rows = [_safe_row("a", "en", "C01"), _safe_row("b", "ru", "C01")]
+    aggregate = aggregate_safe_ppl(
+        rows,
+        {"a": 1.0, "b": 1.0},
+        {"a": 1.2, "b": 0.8},
+    )
+
+    assert aggregate["safe_ppl_drift"] == pytest.approx(math.exp(0.2) - 1.0)
+    assert aggregate["safe_ppl_signed_change"] == pytest.approx(
+        0.5 * ((math.exp(0.2) - 1.0) + (math.exp(-0.2) - 1.0))
+    )
 
 
 @pytest.mark.parametrize(
