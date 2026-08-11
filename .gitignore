@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv/
 
+# Local isolated development worktrees
+.worktrees/
+
 # Caches
 /.ruff_cache/
 
