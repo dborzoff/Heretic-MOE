@@ -58,6 +58,23 @@ class FailingResidualModel(FakeResidualModel):
         raise RuntimeError("synthetic interruption")
 
 
+class RecordingResidualModel:
+    def __init__(self, *, fail_after_first: bool = False):
+        self.fail_after_first = fail_after_first
+        self.seen_users: list[str] = []
+
+    def iter_residual_batches(self, prompts, batch_size):
+        for batch_number, start in enumerate(range(0, len(prompts), batch_size)):
+            batch = prompts[start : start + batch_size]
+            self.seen_users.extend(prompt.user for prompt in batch)
+            values = torch.tensor(
+                [float(prompt.user.rsplit(" ", 1)[-1]) for prompt in batch]
+            ).reshape(len(batch), 1, 1)
+            yield values
+            if self.fail_after_first and batch_number == 0:
+                raise RuntimeError("synthetic resumable interruption")
+
+
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -116,6 +133,40 @@ def test_loader_detects_tampered_tensor(tmp_path: Path):
 
     with pytest.raises(ValueError, match="hash mismatch"):
         load_residual_cache(output_dir)
+
+
+def test_interrupted_capture_resumes_without_remeasuring_completed_rows(
+    tmp_path: Path,
+):
+    output_dir = tmp_path / "cache"
+    rows = sample_rows(tmp_path)
+    first = RecordingResidualModel(fail_after_first=True)
+    with pytest.raises(RuntimeError, match="resumable interruption"):
+        capture_residual_cache(
+            first,
+            rows,
+            batch_size=2,
+            output_dir=output_dir,
+            system_prompt="system",
+        )
+
+    assert first.seen_users == [row.prompt for row in rows[:2]]
+    assert (output_dir / "capture_state.json").exists()
+
+    second = RecordingResidualModel()
+    capture_residual_cache(
+        second,
+        rows,
+        batch_size=2,
+        output_dir=output_dir,
+        system_prompt="system",
+    )
+    _, residuals, manifest = load_residual_cache(output_dir)
+
+    assert second.seen_users == [row.prompt for row in rows[2:]]
+    assert residuals[:, 0, 0].tolist() == [0.0, 1.0, 2.0, 3.0]
+    assert manifest["capture"]["resumed_rows"] == 2
+    assert not (output_dir / "capture_state.json").exists()
 
 
 def test_model_residual_iterator_preserves_batch_order():
