@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 from pathlib import Path
 
 import torch
@@ -162,6 +162,30 @@ def test_runtime_loader_verifies_and_wires_all_frozen_packages(tmp_path: Path) -
     serialized = json.dumps(manifest, sort_keys=True)
     assert "private-safe" not in serialized
     assert "private-unsafe" not in serialized
+
+
+def test_runtime_loader_rejects_another_generation_backend(tmp_path: Path) -> None:
+    bundle, runtime_root = _prepare_runtime(tmp_path)
+
+    try:
+        load_multilingual_search_evaluator(
+            bundle=bundle,
+            runtime_root=runtime_root,
+            model=object(),
+            srg_scorer=_UnusedScorer(),
+            constraints=MultilingualConstraintContract(),
+            expected_per_direction=1,
+            expected_languages=("en",),
+            expected_generation_contract={
+                "backend": "compiled_static",
+                "prompt_bucket_multiple": 32,
+                "compile_mode": "default",
+            },
+        )
+    except ValueError as error:
+        assert "generation backend contract mismatch" in str(error)
+    else:
+        raise AssertionError("generation backend mismatch was accepted")
 
 
 def test_runtime_loader_rejects_clean_archive_from_another_dataset(tmp_path: Path) -> None:

@@ -145,6 +145,40 @@ def test_archive_loader_rejects_private_record_hash_drift(tmp_path: Path) -> Non
         load_clean_reference_archive(output)
 
 
+def test_archive_contract_rejects_generation_backend_drift(tmp_path: Path) -> None:
+    output = tmp_path / "archive"
+    common = {
+        "model": _FakeModel(),
+        "rows": _rows(tmp_path),
+        "refusal_direction": torch.tensor([[1.0, 0.0], [0.0, 1.0]]),
+        "output_dir": output,
+        "dataset_contract_sha256": "a" * 64,
+        "direction_sha256": "b" * 64,
+        "model_fingerprint": "fake-model-v1",
+        "max_response_length": 100,
+        "batch_size": 2,
+    }
+    manifest = build_clean_reference_archive(
+        **common,
+        generation_contract={
+            "backend": "dynamic_eager",
+            "prompt_bucket_multiple": 0,
+            "compile_mode": "default",
+        },
+    )
+
+    assert manifest["generation_contract"]["backend"] == "dynamic_eager"
+    with pytest.raises(ValueError, match="different contract"):
+        build_clean_reference_archive(
+            **common,
+            generation_contract={
+                "backend": "compiled_static",
+                "prompt_bucket_multiple": 32,
+                "compile_mode": "default",
+            },
+        )
+
+
 def test_archive_rejects_direction_shape_mismatch(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="direction"):
         build_clean_reference_archive(

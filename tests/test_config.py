@@ -78,6 +78,13 @@ class ScorerConfigTests(unittest.TestCase):
 
 
 class SearchSettingsTests(unittest.TestCase):
+    def test_generation_backend_defaults_are_stable(self) -> None:
+        settings = Settings(model="example/model")
+
+        self.assertEqual(settings.generation_backend.value, "dynamic_eager")
+        self.assertEqual(settings.generation_prompt_bucket_multiple, 32)
+        self.assertEqual(settings.generation_compile_mode, "default")
+
     def test_multilingual_search_contract_defaults_are_frozen(self) -> None:
         contract = MultilingualSearchSettings(
             enabled=True,

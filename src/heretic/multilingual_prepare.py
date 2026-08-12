@@ -7,15 +7,16 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from .clean_reference_archive import build_clean_reference_archive
+from .config import generation_runtime_contract
 from .language_map_directions import load_direction_map_package
 from .multilingual_contract import MultilingualDatasetBundle
 from .multilingual_runtime import resolve_srg_runtime_contract
 from .trial_language_schedule import materialize_trial_language_schedule
-
 
 _FORBIDDEN_PUBLIC_KEYS = {"prompt", "response", "answer", "text"}
 _MODEL_FINGERPRINT_SUFFIXES = {
@@ -328,4 +329,7 @@ def prepare_clean_reference_runtime(
         model_fingerprint=model_fingerprint,
         max_response_length=max_response_length,
         batch_size=batch_size,
+        generation_contract=generation_runtime_contract(
+            getattr(model, "settings", object())
+        ),
     )

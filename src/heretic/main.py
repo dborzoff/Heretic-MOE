@@ -120,6 +120,28 @@ from .utils import (
     upload_reproduce_folder,
 )
 
+_ALWAYS_RUNTIME_FIELDS = (
+    "save_directory",
+    "model_action",
+    "upload_repo_id",
+    "trial_index",
+    "restore_trial_number",
+    "batch_size",
+    "generation_backend",
+    "generation_prompt_bucket_multiple",
+    "generation_compile_mode",
+    "export_strategy",
+    "parallel_workers",
+    "worker_trial_budget",
+    "worker_queue_path",
+    "worker_id",
+    "seed",
+    "save_trial_responses",
+    "trial_responses_file",
+    "trial_response_number_offset",
+    "trial_response_number_stride",
+)
+
 
 def _predict_next_batch_free_bytes(
     *,
@@ -601,24 +623,6 @@ def run():
             # Restoring stored settings discards command-line values. Some fields,
             # including save_directory and upload_repo_id, are excluded from the
             # journal entirely; losing them turns an unattended run interactive.
-            _always_runtime_fields = (
-                "save_directory",
-                "model_action",
-                "upload_repo_id",
-                "trial_index",
-                "restore_trial_number",
-                "batch_size",
-                "export_strategy",
-                "parallel_workers",
-                "worker_trial_budget",
-                "worker_queue_path",
-                "worker_id",
-                "seed",
-                "save_trial_responses",
-                "trial_responses_file",
-                "trial_response_number_offset",
-                "trial_response_number_stride",
-            )
             # These fields are archived in the journal, but an explicitly supplied
             # value is a legitimate continuation control. In particular,
             # ``--n-trials 1000`` must extend a finished 600-trial study instead of
@@ -636,7 +640,7 @@ def run():
                 "selection_score_targets",
                 "selection_score_weights",
             )
-            for _f in _always_runtime_fields + _explicit_resume_fields:
+            for _f in _ALWAYS_RUNTIME_FIELDS + _explicit_resume_fields:
                 _v = getattr(_cli, _f, None)
                 if _f in _explicit_resume_fields and _f not in _cli.model_fields_set:
                     continue
@@ -893,6 +897,28 @@ def run():
         print("Using frozen multilingual objectives: Removal and Preservation loss.")
     else:
         evaluator = Evaluator(settings, model)
+
+    if multilingual_worker_runtime is not None and not direct_trial_save:
+        print()
+        print("Prewarming resident generation backend...")
+        prewarm = model.prewarm_generation_backend(
+            [
+                Prompt(system="", user=row.prompt)
+                for row in multilingual_worker_runtime.bundle.trial_rows
+            ],
+            expected_rows=2 * settings.multilingual_search.trial_rows_per_cell,
+        )
+        if prewarm["status"] == "PASS":
+            shapes = ", ".join(
+                f"{batch}x{width}" for batch, width in prewarm["shapes"]
+            )
+            print(
+                "* Compiled-static ready: "
+                f"batch [bold]{prewarm['batch_size']}[/], "
+                f"shapes [bold]{shapes}[/]"
+            )
+        else:
+            print("* Dynamic eager backend; compile prewarm not required.")
 
     if settings.evaluate_model is not None:
         assert evaluator is not None

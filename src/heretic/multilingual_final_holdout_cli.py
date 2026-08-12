@@ -27,7 +27,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, object]:
         raise FileNotFoundError("final-holdout preparation inputs are incomplete")
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
 
-    from .config import Settings
+    from .config import Settings, generation_runtime_contract
     from .language_map_directions import load_direction_map_package
     from .model import Model
     from .multilingual_contract import load_multilingual_dataset_bundle
@@ -89,6 +89,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, object]:
         model_fingerprint=str(model_fingerprint),
         top_six_contract_sha256=top_six_sha,
         max_response_length=contract.final_max_new_tokens,
+        generation_contract=generation_runtime_contract(settings),
     )
     print(
         json.dumps(

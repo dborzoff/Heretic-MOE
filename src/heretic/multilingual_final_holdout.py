@@ -26,6 +26,30 @@ from .utils import Prompt
 _FORBIDDEN_PUBLIC_KEYS = {"prompt", "response", "answer", "text"}
 
 
+def _generation_contract(
+    value: Mapping[str, object] | None,
+) -> dict[str, str | int]:
+    raw = value or {
+        "backend": "dynamic_eager",
+        "prompt_bucket_multiple": 0,
+        "compile_mode": "default",
+    }
+    backend = str(raw.get("backend", "")).strip()
+    compile_mode = str(raw.get("compile_mode", "")).strip()
+    prompt_bucket_multiple = int(raw.get("prompt_bucket_multiple", -1))
+    if (
+        backend not in {"dynamic_eager", "compiled_static"}
+        or not compile_mode
+        or prompt_bucket_multiple < 0
+    ):
+        raise ValueError("generation contract is invalid")
+    return {
+        "backend": backend,
+        "prompt_bucket_multiple": prompt_bucket_multiple,
+        "compile_mode": compile_mode,
+    }
+
+
 def _canonical_sha256(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -138,6 +162,7 @@ def build_final_holdout_archive(
     model_fingerprint: str,
     top_six_contract_sha256: str,
     max_response_length: int,
+    generation_contract: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     """Generate the clean R reference once, after TOP-6 membership is frozen."""
 
@@ -148,11 +173,12 @@ def build_final_holdout_archive(
     if direction.ndim != 2 or not bool(torch.isfinite(direction).all()):
         raise ValueError("final-holdout refusal direction must be finite")
     contract = {
-        "schema_version": 1,
+        "schema_version": 2,
         "dataset_contract_sha256": dataset_contract_sha256,
         "model_fingerprint": model_fingerprint,
         "top_six_contract_sha256": top_six_contract_sha256,
         "max_response_length": int(max_response_length),
+        "generation_contract": _generation_contract(generation_contract),
         "row_contract_sha256": _canonical_sha256(_row_contract(ordered)),
         "direction_sha256": _tensor_sha256(direction),
     }
@@ -238,8 +264,21 @@ def load_final_holdout_archive(
     if not manifest_path.is_file() or not private_path.is_file():
         raise FileNotFoundError("final-holdout archive is incomplete")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    contract_keys = [
+        "schema_version",
+        "dataset_contract_sha256",
+        "model_fingerprint",
+        "top_six_contract_sha256",
+        "max_response_length",
+        "row_contract_sha256",
+        "direction_sha256",
+    ]
+    if int(manifest.get("schema_version", -1)) >= 2:
+        contract_keys.append("generation_contract")
+    contract = {key: manifest[key] for key in contract_keys}
     if (
         manifest.get("status") != "PASS"
+        or manifest.get("archive_contract_sha256") != _canonical_sha256(contract)
         or manifest.get("private_records_sha256") != _sha256(private_path)
     ):
         raise ValueError("final-holdout archive hash mismatch")

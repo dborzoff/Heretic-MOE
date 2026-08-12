@@ -36,6 +36,24 @@ class QuantizationMethod(str, Enum):
     BNB_4BIT = "bnb_4bit"
 
 
+class GenerationBackend(str, Enum):
+    DYNAMIC_EAGER = "dynamic_eager"
+    COMPILED_STATIC = "compiled_static"
+
+
+def generation_runtime_contract(settings: object) -> dict[str, str | int]:
+    """Return the generation fields that must match clean and edited runs."""
+
+    backend = getattr(settings, "generation_backend", GenerationBackend.DYNAMIC_EAGER)
+    return {
+        "backend": backend.value if isinstance(backend, GenerationBackend) else str(backend),
+        "prompt_bucket_multiple": int(
+            getattr(settings, "generation_prompt_bucket_multiple", 0)
+        ),
+        "compile_mode": str(getattr(settings, "generation_compile_mode", "default")),
+    }
+
+
 class RowNormalization(str, Enum):
     NONE = "none"
     PRE = "pre"
@@ -361,6 +379,29 @@ class Settings(BaseSettings):
     batch_size: NonNegativeInt = Field(
         default=0,  # auto
         description="Number of input sequences to process in parallel (0 = auto).",
+    )
+
+    generation_backend: GenerationBackend = Field(
+        default=GenerationBackend.DYNAMIC_EAGER,
+        description=(
+            "Autoregressive generation backend. compiled_static uses a static "
+            "KV cache and torch.compile for generations longer than one token."
+        ),
+    )
+
+    generation_prompt_bucket_multiple: NonNegativeInt = Field(
+        default=32,
+        description=(
+            "Round padded prompt width up to this token multiple so resident "
+            "workers reuse compiled graph shapes (0 disables bucketing)."
+        ),
+    )
+
+    generation_compile_mode: Literal[
+        "default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"
+    ] = Field(
+        default="default",
+        description="torch.compile mode used by compiled_static generation.",
     )
 
     max_batch_size: PositiveInt = Field(

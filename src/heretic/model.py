@@ -2,10 +2,11 @@
 # Copyright (C) 2025-2026  Philipp Emanuel Weidmann <pew@worldwidemann.com> + contributors
 
 import math
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence, Type, cast
+from typing import Any, cast
 
 import bitsandbytes as bnb
 import torch
@@ -32,7 +33,7 @@ from transformers.generation import (
     GenerateDecoderOnlyOutput,  # ty:ignore[possibly-missing-import]
 )
 
-from .config import QuantizationMethod, RowNormalization, Settings
+from .config import GenerationBackend, QuantizationMethod, RowNormalization, Settings
 from .system import empty_cache
 from .teacher_forced import per_row_conditional_nll
 from .utils import Prompt, batchify, format_exception, print
@@ -40,7 +41,7 @@ from .utils import Prompt, batchify, format_exception, print
 
 def get_model_class(
     model: str,
-) -> Type[AutoModelForImageTextToText] | Type[AutoModelForCausalLM]:
+) -> type[AutoModelForImageTextToText] | type[AutoModelForCausalLM]:
     local_path = Path(model)
     if local_path.is_file():
         raise ValueError(
@@ -1075,6 +1076,11 @@ class Model:
         if pad_token_id is None:
             raise ValueError("tokenizer has neither pad_token_id nor eos_token_id")
         maximum = max(int(row.numel()) for row in rows)
+        bucket_multiple = int(
+            getattr(self.settings, "generation_prompt_bucket_multiple", 0)
+        )
+        if bucket_multiple > 0:
+            maximum = math.ceil(maximum / bucket_multiple) * bucket_multiple
         device = self.model.device
         pin_memory = bool(
             torch.cuda.is_available() and torch.device(device).type == "cuda"
@@ -1112,9 +1118,32 @@ class Model:
 
         # FIXME: The type checker has been disabled here because of the extremely complex
         #        interplay between different generate() signatures and dynamic delegation.
+        generation_kwargs = dict(kwargs)
+        backend = getattr(
+            self.settings,
+            "generation_backend",
+            GenerationBackend.DYNAMIC_EAGER,
+        )
+        max_new_tokens = int(generation_kwargs.get("max_new_tokens", 0) or 0)
+        if (
+            backend == GenerationBackend.COMPILED_STATIC
+            or backend == GenerationBackend.COMPILED_STATIC.value
+        ) and max_new_tokens > 1:
+            from transformers.generation.configuration_utils import CompileConfig
+
+            mode = str(
+                getattr(self.settings, "generation_compile_mode", "default")
+            )
+            compile_config = getattr(self, "_generation_compile_config", None)
+            if compile_config is None or compile_config.mode != mode:
+                compile_config = CompileConfig(mode=mode)
+                self._generation_compile_config = compile_config
+            generation_kwargs.setdefault("cache_implementation", "static")
+            generation_kwargs.setdefault("compile_config", compile_config)
+
         outputs = self.model.generate(
             **inputs,
-            **kwargs,
+            **generation_kwargs,
             pad_token_id=self.tokenizer.pad_token_id,
             do_sample=False,  # Use greedy decoding to ensure deterministic outputs.
         )  # ty:ignore[call-non-callable]
@@ -1263,6 +1292,7 @@ class Model:
         self,
         prompts: list[Prompt],
         skip_special_tokens: bool = False,
+        progress: Callable[[int, int, int], None] | None = None,
     ) -> tuple[list[str], list[list[int]], Tensor]:
         """Batched text, generated token IDs, and prefill residual capture."""
 
@@ -1315,6 +1345,8 @@ class Model:
                 token_ids[original] = batch_token_ids[local]
                 residuals[original] = batch_residuals[local]
             position += len(selected)
+            if progress is not None:
+                progress(position, len(order), batch_size)
         if automatic:
             self._adaptive_generation_batch_size = batch_size
         if any(value is None for value in responses + token_ids + residuals):
@@ -1324,6 +1356,86 @@ class Model:
             cast(list[list[int]], token_ids),
             torch.stack(cast(list[Tensor], residuals), dim=0),
         )
+
+    def prewarm_generation_backend(
+        self,
+        prompts: Sequence[Prompt],
+        *,
+        expected_rows: int | None = None,
+    ) -> dict[str, object]:
+        """Compile each resident generation shape once before timed trials."""
+
+        backend = getattr(
+            self.settings,
+            "generation_backend",
+            GenerationBackend.DYNAMIC_EAGER,
+        )
+        if (
+            backend != GenerationBackend.COMPILED_STATIC
+            and backend != GenerationBackend.COMPILED_STATIC.value
+        ) or int(self.settings.max_response_length) <= 1:
+            return {"status": "DISABLED", "batch_size": 0, "shapes": []}
+        if not prompts:
+            raise ValueError("generation prewarm requires at least one prompt")
+        row_count = len(prompts) if expected_rows is None else int(expected_rows)
+        if row_count <= 0:
+            raise ValueError("expected_rows must be positive")
+        configured = int(self.settings.batch_size)
+        automatic = configured == 0
+        batch_size = configured or int(
+            getattr(self, "_adaptive_generation_batch_size", 0)
+        )
+        if batch_size <= 0:
+            batch_size = min(int(self.settings.max_batch_size), row_count)
+        token_rows = self._cached_prompt_token_ids(prompts)
+        bucket_multiple = int(
+            getattr(self.settings, "generation_prompt_bucket_multiple", 0)
+        )
+
+        def padded_width(row: Tensor) -> int:
+            width = int(row.numel())
+            if bucket_multiple > 0:
+                width = math.ceil(width / bucket_multiple) * bucket_multiple
+            return width
+
+        by_width: dict[int, list[Prompt]] = {}
+        for prompt, row in zip(prompts, token_rows, strict=True):
+            by_width.setdefault(padded_width(row), []).append(prompt)
+
+        while True:
+            tail_size = row_count % batch_size
+            shapes: list[tuple[int, int, list[Prompt]]] = []
+            for width, candidates in sorted(by_width.items()):
+                sample = [
+                    candidates[index % len(candidates)] for index in range(batch_size)
+                ]
+                shapes.append((batch_size, width, sample))
+            if tail_size:
+                width = max(by_width)
+                candidates = by_width[width]
+                sample = [
+                    candidates[index % len(candidates)] for index in range(tail_size)
+                ]
+                shapes.append((tail_size, width, sample))
+            try:
+                for _size, _width, sample in shapes:
+                    self.get_response_artifacts_with_prefill_residuals(
+                        sample,
+                        skip_special_tokens=True,
+                    )
+                break
+            except BaseException as error:
+                if not automatic or batch_size == 1 or not self._is_cuda_oom(error):
+                    raise
+                batch_size = max(1, batch_size // 2)
+                self._release_failed_cuda_batch()
+        if automatic:
+            self._adaptive_generation_batch_size = batch_size
+        return {
+            "status": "PASS",
+            "batch_size": batch_size,
+            "shapes": [[size, width] for size, width, _sample in shapes],
+        }
 
     def get_responses_with_prefill_residuals_batched(
         self,

@@ -1,6 +1,7 @@
 import importlib
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 from heretic.config import Settings
 
@@ -41,7 +42,10 @@ def test_multilingual_profile_uses_auto_batch_and_100_token_contract():
     )
 
     assert profile["batch_size"] == 0
+    assert profile["max_batch_size"] == 32
     assert profile["max_response_length"] == 100
+    assert profile["generation_backend"] == "compiled_static"
+    assert profile["generation_prompt_bucket_multiple"] == 64
     assert profile["multilingual_search"]["ordinary_max_new_tokens"] == 100
     assert profile["multilingual_search"]["final_max_new_tokens"] == 100
 

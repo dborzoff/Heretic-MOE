@@ -9,8 +9,9 @@ import json
 import os
 import shutil
 import tempfile
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
 import torch
 from torch import Tensor
@@ -18,8 +19,31 @@ from torch import Tensor
 from .language_map_data import GeometryRow
 from .utils import Prompt
 
-
 _FORBIDDEN_PUBLIC_KEYS = {"prompt", "response", "answer", "text"}
+
+
+def _generation_contract(
+    value: Mapping[str, object] | None,
+) -> dict[str, str | int]:
+    raw = value or {
+        "backend": "dynamic_eager",
+        "prompt_bucket_multiple": 0,
+        "compile_mode": "default",
+    }
+    backend = str(raw.get("backend", "")).strip()
+    compile_mode = str(raw.get("compile_mode", "")).strip()
+    prompt_bucket_multiple = int(raw.get("prompt_bucket_multiple", -1))
+    if (
+        backend not in {"dynamic_eager", "compiled_static"}
+        or not compile_mode
+        or prompt_bucket_multiple < 0
+    ):
+        raise ValueError("generation contract is invalid")
+    return {
+        "backend": backend,
+        "prompt_bucket_multiple": prompt_bucket_multiple,
+        "compile_mode": compile_mode,
+    }
 
 
 def _sha256(path: Path) -> str:
@@ -113,6 +137,7 @@ def build_clean_reference_archive(
     model_fingerprint: str,
     max_response_length: int,
     batch_size: int,
+    generation_contract: Mapping[str, object] | None = None,
     progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Generate each frozen trial reference once and materialize a private archive."""
@@ -129,12 +154,13 @@ def build_clean_reference_archive(
     if not model_fingerprint.strip():
         raise ValueError("model fingerprint must be non-empty")
     contract = {
-        "schema_version": 1,
+        "schema_version": 2,
         "dataset_contract_sha256": dataset_sha,
         "direction_sha256": direction_sha,
         "model_fingerprint": model_fingerprint,
         "max_response_length": max_response_length,
         "batch_size": batch_size,
+        "generation_contract": _generation_contract(generation_contract),
         "row_id_order_sha256": _canonical_sha256([row.row_id for row in ordered]),
     }
     contract_sha = _canonical_sha256(contract)
@@ -279,6 +305,7 @@ def merge_clean_reference_archives(
     model_fingerprint: str,
     max_response_length: int,
     batch_size: int,
+    generation_contract: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     """Merge deterministic contiguous GPU shards into one canonical archive."""
 
@@ -301,8 +328,15 @@ def merge_clean_reference_archives(
     if len(shapes) != 1:
         raise ValueError("clean reference shard geometry shapes differ")
     layers, hidden_size = shapes.pop()
+    expected_generation = _generation_contract(generation_contract)
+    if any(
+        _generation_contract(manifest.get("generation_contract"))
+        != expected_generation
+        for manifest in manifests
+    ):
+        raise ValueError("clean reference shard generation contracts differ")
     contract = {
-        "schema_version": 1,
+        "schema_version": 2,
         "dataset_contract_sha256": _validate_sha256(
             dataset_contract_sha256, "dataset contract"
         ),
@@ -310,6 +344,7 @@ def merge_clean_reference_archives(
         "model_fingerprint": model_fingerprint,
         "max_response_length": max_response_length,
         "batch_size": batch_size,
+        "generation_contract": expected_generation,
         "row_id_order_sha256": _canonical_sha256(expected_ids),
     }
     contract_sha = _canonical_sha256(contract)
@@ -369,9 +404,7 @@ def load_clean_reference_archive(
         raise ValueError("clean reference archive manifest is not PASS")
     if manifest.get("private_records_sha256") != _sha256(records_path):
         raise ValueError("clean reference archive hash mismatch")
-    contract = {
-        key: manifest[key]
-        for key in (
+    contract_keys = [
             "schema_version",
             "dataset_contract_sha256",
             "direction_sha256",
@@ -379,8 +412,10 @@ def load_clean_reference_archive(
             "max_response_length",
             "batch_size",
             "row_id_order_sha256",
-        )
-    }
+    ]
+    if int(manifest.get("schema_version", -1)) >= 2:
+        contract_keys.append("generation_contract")
+    contract = {key: manifest[key] for key in contract_keys}
     if manifest.get("archive_contract_sha256") != _canonical_sha256(contract):
         raise ValueError("clean reference archive contract hash mismatch")
     records = _read_private_records(records_path)

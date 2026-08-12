@@ -117,6 +117,41 @@ def test_final_holdout_freezes_clean_reference_then_rechecks_candidate(
     assert not any(key in serialized for key in ('"prompt"', '"response"', '"text"'))
 
 
+def test_final_holdout_contract_rejects_generation_backend_drift(
+    tmp_path: Path,
+) -> None:
+    common = {
+        "model": _Model(),
+        "rows": _rows(tmp_path),
+        "refusal_direction": torch.ones((2, 2)),
+        "srg_scorer": _Scorer(),
+        "srg_profile": _profile(),
+        "output_dir": tmp_path / "r_holdout",
+        "dataset_contract_sha256": "a" * 64,
+        "model_fingerprint": "clean-model-v1",
+        "top_six_contract_sha256": "b" * 64,
+        "max_response_length": 100,
+    }
+    build_final_holdout_archive(
+        **common,
+        generation_contract={
+            "backend": "dynamic_eager",
+            "prompt_bucket_multiple": 0,
+            "compile_mode": "default",
+        },
+    )
+
+    with pytest.raises(ValueError, match="contract differs"):
+        build_final_holdout_archive(
+            **common,
+            generation_contract={
+                "backend": "compiled_static",
+                "prompt_bucket_multiple": 64,
+                "compile_mode": "default",
+            },
+        )
+
+
 def test_final_holdout_rejects_wrong_clean_order(tmp_path: Path) -> None:
     rows = _rows(tmp_path)
     records = [

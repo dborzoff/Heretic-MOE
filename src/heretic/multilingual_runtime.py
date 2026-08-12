@@ -6,24 +6,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from .clean_reference_archive import load_clean_reference_archive
-from .config import DatasetSpecification, SelectionPolicy, Settings
+from .config import (
+    DatasetSpecification,
+    SelectionPolicy,
+    Settings,
+    generation_runtime_contract,
+)
 from .language_map_data import GeometryRow
 from .language_map_directions import DirectionMapProfile, load_direction_map_package
 from .multilingual_contract import (
     MultilingualDatasetBundle,
     load_multilingual_dataset_bundle,
 )
+from .multilingual_final_holdout import load_final_holdout_archive
+from .multilingual_finalist_evaluator import MultilingualFinalistEvaluator
 from .multilingual_search_evaluator import (
     MultilingualConstraintContract,
     MultilingualSearchEvaluator,
 )
-from .multilingual_final_holdout import load_final_holdout_archive
-from .multilingual_finalist_evaluator import MultilingualFinalistEvaluator
 from .multilingual_trial_evaluator import FrozenMultilingualTrialEvaluator
 from .trial_language_schedule import load_trial_language_schedule
 from .utils import Prompt
@@ -107,6 +113,8 @@ def build_multilingual_srg_scorer(
     from .scorer import Context
     from .scorers.sparse_refusal_geometry import (
         Settings as SparseSettings,
+    )
+    from .scorers.sparse_refusal_geometry import (
         SparseRefusalGeometry,
     )
 
@@ -196,6 +204,7 @@ def load_multilingual_worker_runtime(
             constraints=constraints,
             expected_languages=tuple(contract.languages),
             final_max_new_tokens=contract.final_max_new_tokens,
+            expected_generation_contract=generation_runtime_contract(settings),
         )
     else:
         evaluator, manifest = load_multilingual_search_evaluator(
@@ -206,6 +215,7 @@ def load_multilingual_worker_runtime(
             constraints=constraints,
             expected_per_direction=contract.trial_rows_per_cell,
             expected_languages=tuple(contract.languages),
+            expected_generation_contract=generation_runtime_contract(settings),
         )
     if prompt_cache_stats is not None:
         model._last_prompt_cache_stats = prompt_cache_stats
@@ -279,6 +289,7 @@ def load_multilingual_search_evaluator(
     constraints: MultilingualConstraintContract,
     expected_per_direction: int = 400,
     expected_languages: tuple[str, ...] = ("en", "ru", "zh", "es", "fr"),
+    expected_generation_contract: Mapping[str, object] | None = None,
 ) -> tuple[MultilingualSearchEvaluator, dict[str, Any]]:
     """Load, cross-check and wire every immutable worker-side artifact."""
 
@@ -298,6 +309,10 @@ def load_multilingual_search_evaluator(
     dataset_sha = str(bundle.manifest.get("contract_sha256", ""))
     if clean_manifest.get("dataset_contract_sha256") != dataset_sha:
         raise ValueError("clean reference dataset contract mismatch")
+    if expected_generation_contract is not None and dict(
+        clean_manifest.get("generation_contract", {})
+    ) != dict(expected_generation_contract):
+        raise ValueError("clean reference generation backend contract mismatch")
     if clean_manifest.get("direction_sha256") != direction_manifest.get(
         "package_sha256"
     ):
@@ -358,6 +373,7 @@ def load_multilingual_finalist_evaluator(
     constraints: MultilingualConstraintContract,
     expected_languages: tuple[str, ...] = ("en", "ru", "zh", "es", "fr"),
     final_max_new_tokens: int = 1024,
+    expected_generation_contract: Mapping[str, object] | None = None,
 ) -> tuple[MultilingualSearchEvaluator, dict[str, Any]]:
     """Wire the all-translation trial pool and post-freeze R holdout."""
 
@@ -379,6 +395,14 @@ def load_multilingual_finalist_evaluator(
         "contract_sha256"
     ):
         raise ValueError("finalist reference dataset contract mismatch")
+    if expected_generation_contract is not None and dict(
+        clean_manifest.get("generation_contract", {})
+    ) != dict(expected_generation_contract):
+        raise ValueError("finalist reference generation backend contract mismatch")
+    if expected_generation_contract is not None and dict(
+        final_manifest.get("generation_contract", {})
+    ) != dict(expected_generation_contract):
+        raise ValueError("final-holdout generation backend contract mismatch")
     if clean_manifest.get("direction_sha256") != direction_manifest.get(
         "package_sha256"
     ):

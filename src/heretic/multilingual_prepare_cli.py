@@ -7,10 +7,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import tomllib
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
+
+import tomllib
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -59,8 +61,8 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     if not args.config.is_file():
         raise FileNotFoundError(args.config)
 
-    from .config import Settings
     from .clean_reference_archive import merge_clean_reference_archives
+    from .config import Settings, generation_runtime_contract
     from .language_map_controller import (
         GeometryWorkerSpec,
         run_worker_processes,
@@ -216,6 +218,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         model_fingerprint=str(fingerprint["model_fingerprint"]),
         max_response_length=int(contract.ordinary_max_new_tokens),
         batch_size=int(settings.batch_size),
+        generation_contract=generation_runtime_contract(settings),
     )
     job_path.unlink(missing_ok=True)
     # Contract assembly does not execute either object. This validates every
@@ -233,6 +236,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         ),
         expected_per_direction=contract.trial_rows_per_cell,
         expected_languages=tuple(contract.languages),
+        expected_generation_contract=generation_runtime_contract(settings),
     )
     final_manifest: dict[str, Any] = {
         "schema_version": 1,

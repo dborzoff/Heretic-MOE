@@ -7,9 +7,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import tomllib
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
+
+import tomllib
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -46,10 +48,10 @@ def run_worker_job(
     config["batch_size"] = int(job["batch_size"])
     config["max_response_length"] = int(job["max_response_length"])
 
-    from .config import Settings
+    from .clean_reference_archive import build_clean_reference_archive
+    from .config import Settings, generation_runtime_contract
     from .language_map_directions import load_direction_map_package
     from .multilingual_contract import load_multilingual_dataset_bundle
-    from .clean_reference_archive import build_clean_reference_archive
     from .utils import Prompt
 
     settings = Settings.model_validate(config)
@@ -126,6 +128,7 @@ def run_worker_job(
         model_fingerprint=str(job["model_fingerprint"]),
         max_response_length=int(job["max_response_length"]),
         batch_size=int(job["batch_size"]),
+        generation_contract=generation_runtime_contract(settings),
         progress=progress,
     )
     return {

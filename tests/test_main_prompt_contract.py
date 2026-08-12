@@ -23,3 +23,13 @@ def test_frozen_row_summary_uses_actual_runtime_bundle_sizes() -> None:
     assert _format_multilingual_frozen_rows(bundle) == (
         "map 40, trial 50, SRG calibration 10, final holdout 10"
     )
+
+
+def test_generation_runtime_fields_survive_checkpoint_continuation() -> None:
+    from heretic.main import _ALWAYS_RUNTIME_FIELDS
+
+    assert {
+        "generation_backend",
+        "generation_prompt_bucket_multiple",
+        "generation_compile_mode",
+    }.issubset(_ALWAYS_RUNTIME_FIELDS)
