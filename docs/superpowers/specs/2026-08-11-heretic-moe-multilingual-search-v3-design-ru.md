@@ -83,8 +83,10 @@ trial_<lang>_unsafe_400.jsonl
 400 SAFE x 5 + 400 UNSAFE x 5 = 4 000 строк
 ```
 
-Один обычный trial использует ровно 800 строк: 400 SAFE и 400 UNSAFE, по одному
-переводу каждого canonical ID.
+Один обычный trial использует ровно 400 строк: 200 SAFE и 200 UNSAFE. Для
+каждого выбранного canonical ID используется ровно один перевод. Десять
+последовательных trials образуют полный языковой цикл и покрывают все 400 SAFE
+и 400 UNSAFE canonical ID на всех пяти языках ровно по одному разу.
 
 ### SRG search calibration
 
@@ -174,10 +176,10 @@ Validate inputs
 
 ### Измерение
 
-Direction map выполняется на исходной, неизменённой модели один раз. Для карты
-не вызывается `generate()` и не создаётся ни одного выходного токена. Выполняется
-prompt-only `forward()` с capture residual stream в той же decision position,
-которую использует Heretic для построения направлений.
+Direction map выполняется на исходной, неизменённой модели один раз с
+`max_new_tokens=1`. Единственный выходной токен не оценивается и не сохраняется;
+capture забирает только residual stream prompt-prefill в той же decision
+position, которую использует Heretic для построения направлений.
 
 Для строки `i`, языка `l`, класса `d`, категории `c` и слоя `k` сохраняется:
 
@@ -368,9 +370,10 @@ clean_response_length
 clean_conditional_nll
 ```
 
-Текущая версия контракта использует один ответ с `max_new_tokens=512`. Другие
-длины не генерируются. Если нужны метрики 128/256/512, они вычисляются как
-префиксы одного сохранённого 512-token ответа.
+Контракт использует один ответ с `max_new_tokens=100`. Другие длины в runtime
+не генерируются. Это же ограничение является частью хеша clean-reference,
+SRG/R-side и PPL-контракта. Архив, построенный с другой длиной, несовместим и
+не может быть использован при resume.
 
 Clean conditional NLL для preservation рассчитывается на фиксированных
 clean-target tokens. UNSAFE clean-ответы сохраняются для SRG-сравнения, но их
@@ -412,24 +415,25 @@ SRG-формулы или generation contract. Для каждой целево�
 
 Final holdout при настройке SRG calibration не читается и не влияет на веса, пороги или формулу.
 
-## Этап D. Пяти-trial языковое расписание
+## Этап D. Десяти-trial языковое расписание
 
-Один ordinary trial содержит 800 canonical prompts:
+Один ordinary trial содержит 400 canonical prompts:
 
 ```text
-400 SAFE + 400 UNSAFE
+200 SAFE + 200 UNSAFE
 ```
 
 Каждый ID представлен одним переводом. В каждом trial строго:
 
 ```text
-SAFE:   en 80, ru 80, zh 80, es 80, fr 80
-UNSAFE: en 80, ru 80, zh 80, es 80, fr 80
+SAFE:   en 40, ru 40, zh 40, es 40, fr 40
+UNSAFE: en 40, ru 40, zh 40, es 40, fr 40
 ```
 
-Для каждого canonical ID любой блок из пяти trials использует все пять языков
-ровно по одному разу. Новый блок создаёт новую детерминированную раскладку по ID,
-а не только меняет порядок пяти ранее созданных панелей.
+Для каждого canonical ID любой блок из десяти trials использует все пять языков
+ровно по одному разу. Каждый canonical ID попадает ровно в пять из десяти
+trials, один раз на каждом языке. Новый десяти-trial блок создаёт новую
+детерминированную раскладку по ID, сохраняя полный coverage-контракт.
 
 Расписание полностью определяется:
 
@@ -458,17 +462,17 @@ category ID
 
 ### Единственная autoregressive generation
 
-После применения параметров trial генерируются ответы ровно для scheduled 800:
+После применения параметров trial генерируются ответы ровно для scheduled 400:
 
 ```text
-800 x max_new_tokens=512
+400 x max_new_tokens=100
 ```
 
 Это единственная autoregressive generation trial. Во время prefill capture-hook
 сохраняет только decision-position residual projections; все hidden states
-выходных 512 токенов не удерживаются в VRAM.
+выходных 100 токенов не удерживаются в VRAM.
 
-### UNSAFE 400
+### UNSAFE 200
 
 Для каждого ответа находится exact clean reference по ключу:
 
@@ -495,7 +499,7 @@ gain_i = (clean_margin_i - trial_margin_i) / robust_scale_i
 
 Положительный gain означает движение от soft/refuse к delivered.
 
-### SAFE 400
+### SAFE 200
 
 SAFE-строки не используются как цель снятия отказа. На них измеряются:
 
@@ -632,11 +636,48 @@ TPE сам сдвигает плотность предложений в обл�
 после завершения предыдущего. Быстрая карта естественно выполняет больше задач.
 
 Trial number выдаётся очередью до выполнения и не зависит от GPU. Console
-показывает:
+не создаёт отдельные пользовательские окна на worker. Controller собирает
+heartbeat и счётчики всех workers и обновляет одну строку терминала на месте:
 
 ```text
-GPU N | Trial T of TARGET | phase | elapsed | ETA | current TOP
+Search 284/600 | GPU 0: T285 63% bs24 | GPU 1: T286 51% bs32 | 2.8 trial/min | ETA 1h52m
 ```
+
+Для Map, Reference и Recheck используется тот же формат с названием этапа,
+общим числителем, статусом каждой GPU, throughput и ETA. Обычный прогресс не
+создаёт новые строки. Ошибка, OOM-retry, завершение этапа и итоговый TOP
+печатаются отдельной строкой. Полный поток событий независимо сохраняется в
+машиночитаемый JSONL. В non-TTY режиме вместо перерисовки пишется не чаще
+одного progress-event за 30 секунд.
+
+### Автоматический батч и загрузка GPU
+
+По умолчанию `batch_size=0`. Каждый резидентный GPU-worker независимо выбирает
+два эффективных значения:
+
+```text
+generation_batch_size
+conditional_nll_batch_size
+```
+
+Generation-подбор выполняется на реальном 100-token контракте и сравнивает
+измеренный rows/s для степеней двойки. Выбирается самый быстрый батч, который
+оставляет не менее максимума из 10% VRAM и 2 GiB. Проверка NLL выполняется
+отдельно на target длиной до 100 токенов, потому что его профиль памяти не
+совпадает с autoregressive generation. Найденные значения фиксируются в
+run-manifest вместе с моделью, GPU и generation contract и повторно
+используются при совместимом resume.
+
+Если реальный этап всё же получает CUDA OOM, worker очищает только временные
+тензоры, уменьшает батч вдвое, повторяет незавершённый chunk с теми же row ID и
+продолжает без выгрузки модели. Успешно записанные chunks не вычисляются снова.
+OOM и новое значение батча попадают в JSONL и отдельную строку консоли.
+
+Приёмочный GPU-smoke на Gemma-4 E4B и RTX 4090 сравнивает фиксированный batch 4
+с auto-batch на одних row ID и seed. Auto-batch должен выбрать значение больше
+4, дать не менее 2x rows/s без изменения результатов выше числового допуска и
+не получить unrecovered OOM. Дополнительно сохраняются median GPU utilization,
+VRAM peak и power, но оптимизируется rows/s, а не сам процент utilization.
 
 ## Этап G. TOP-6
 
@@ -661,7 +702,7 @@ TOP-6 фиксируется manifest до открытия набора R.
 ### Полный Trial pool
 
 Для одного finalist проверяются все 4 000 переводов Trial pool с тем же
-`max_new_tokens=512`. Это даёт exact per-language и per-category результат
+`max_new_tokens=100`. Это даёт exact per-language и per-category результат
 одного parameter set, которого нет у ordinary trial.
 
 ### Независимый SRG final holdout
@@ -669,7 +710,7 @@ TOP-6 фиксируется manifest до открытия набора R.
 Для одного finalist генерируются:
 
 ```text
-132 x 5 x max_new_tokens=1024
+132 x 5 x max_new_tokens=100
 ```
 
 Final holdout используется только здесь. Отчёт хранит отдельно:
@@ -692,8 +733,9 @@ Final holdout используется только здесь. Отчёт хр�
 Используются:
 
 - все same-ID SAFE targets полного Trial pool;
-- расширенный независимый общий PPL contract `64 x 1024` как дополнительный
-  preservation gate.
+- независимый общий PPL contract `64 x 100` как дополнительный preservation
+  gate. Его target также ограничен первыми 100 токенами и не создаёт второй
+  autoregressive ответ.
 
 ## Этап I. Balanced и Max
 
@@ -797,8 +839,10 @@ parameter sets. Сырые значения старой метрики не п�
 - exact counts и SHA;
 - 1:1 alignment пяти языков;
 - zero overlap четырёх пулов;
-- schedule coverage каждого блока из пяти trials;
-- exact 80 SAFE и 80 UNSAFE на язык в ordinary trial.
+- schedule coverage каждого блока из десяти trials;
+- exact 40 SAFE и 40 UNSAFE на язык в ordinary trial;
+- все 400 SAFE и 400 UNSAFE canonical ID встречаются на всех пяти языках ровно
+  по одному разу внутри каждого десяти-trial блока.
 
 ### Математика
 
@@ -814,12 +858,16 @@ parameter sets. Сырые значения старой метрики не п�
 
 ### Runtime
 
-- prompt-only map не вызывает generate;
+- map вызывает generation с `max_new_tokens=1` и не сохраняет выходной токен;
 - ordinary trial вызывает одну autoregressive generation;
 - PPL forward не сохраняет второй ответ;
 - модель остаётся resident;
 - 1/2/N GPU используют одну очередь;
 - быстрый GPU получает больше trials;
+- Map и 4 000-row clean-reference используют все доступные GPU;
+- auto-batch отдельно калибрует generation и conditional NLL;
+- recovered OOM повторяет только незавершённый chunk с теми же row ID;
+- TTY-прогресс занимает одну обновляемую строку, а JSONL сохраняет все события;
 - resume не меняет IDs или язык уже назначенного trial;
 - 600 -> 1000 продолжает study без перезаписи старых trials.
 
@@ -832,9 +880,11 @@ parameter sets. Сырые значения старой метрики не п�
 - все artifacts имеют SHA-256;
 - полный pytest, compileall и малый GPU smoke проходят до длинного запуска.
 
-## Нерешённое до реализации
+## Зафиксированный runtime-контракт
 
-Текущий план фиксирует `max_new_tokens=512` для ordinary 800-row trial и 1024
-для final holdout. Перед кодированием пользователь может уменьшить ordinary cap до
-128 или 256, не меняя архитектуру. После начала study длина замораживается и не
-может изменяться при resume.
+Direction map содержит 10 000 prompt-only residual-строк. Clean-reference
+содержит 4 000 ответов длиной не более 100 токенов. Ordinary trial содержит
+200 SAFE + 200 UNSAFE и генерирует не более 100 токенов. Full TOP-6 recheck и
+независимый R-holdout также используют `max_new_tokens=100`. После начала study
+длина, размер панели, алгоритм десяти-trial расписания и эффективные batch sizes
+входят в resume-контракт и не могут тихо изменяться.
