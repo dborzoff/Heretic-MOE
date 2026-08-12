@@ -43,6 +43,38 @@ def _group_key(language: object, category_id: object) -> str:
     return f"{str(language).lower()}\x1f{str(category_id)}"
 
 
+def _robust_scale(values: np.ndarray, *, floor: float) -> float:
+    median = float(np.median(values))
+    mad = float(np.median(np.abs(values - median)) * 1.4826)
+    return max(mad, floor)
+
+
+def _target_group_scales(
+    baseline: np.ndarray,
+    groups: Sequence[tuple[str, str]],
+) -> tuple[np.ndarray, float]:
+    """Derive units from the current clean model, never from other models."""
+
+    target_global_scale = _robust_scale(baseline, floor=1e-4)
+    local_floor = max(target_global_scale * 0.25, 1e-4)
+    positions: dict[str, list[int]] = defaultdict(list)
+    for index, (language, category) in enumerate(groups):
+        positions[_group_key(language, category)].append(index)
+    local = {
+        key: (
+            _robust_scale(baseline[indices], floor=local_floor)
+            if len(indices) >= 4
+            else target_global_scale
+        )
+        for key, indices in positions.items()
+    }
+    scales = np.asarray(
+        [local[_group_key(language, category)] for language, category in groups],
+        dtype=np.float64,
+    )
+    return scales, target_global_scale
+
+
 def build_profile(
     results: Sequence[dict[str, Any]],
     *,
@@ -139,21 +171,12 @@ def relative_score(
         scale = np.asarray(profile["scale"], dtype=np.float64)
         weight = np.asarray(profile["weight"], dtype=np.float64)
         scale_mode = "per_row"
+        target_global_scale = None
     else:
         if groups is None or len(groups) != baseline.size:
             raise ValueError("SRG transferred score requires groups for every row")
-        group_scale = dict(profile.get("group_scale") or {})
         group_weight = dict(profile.get("group_weight") or {})
-        global_scale = float(
-            profile.get("global_scale", np.median(profile["scale"]))
-        )
-        scale = np.asarray(
-            [
-                float(group_scale.get(_group_key(language, category), global_scale))
-                for language, category in groups
-            ],
-            dtype=np.float64,
-        )
+        scale, target_global_scale = _target_group_scales(baseline, groups)
         weight = np.asarray(
             [
                 float(group_weight.get(_group_key(language, category), 1.0))
@@ -161,7 +184,7 @@ def relative_score(
             ],
             dtype=np.float64,
         )
-        scale_mode = "language_category"
+        scale_mode = "target_language_category"
     if not bool(
         np.isfinite(baseline).all()
         and np.isfinite(candidate).all()
@@ -195,5 +218,63 @@ def relative_score(
         "unified_gain": unified_gain,
         "rows": int(baseline.size),
         "scale_mode": scale_mode,
+        "target_global_scale": target_global_scale,
         "standardized_gain": standardized_gain.tolist(),
+    }
+
+
+def relative_group_summary(
+    baseline_margins: Sequence[float],
+    candidate_margins: Sequence[float],
+    profile: dict[str, Any],
+    *,
+    groups: Sequence[tuple[str, str]],
+) -> dict[str, Any]:
+    """Aggregate transferred SRG gains by language and category."""
+
+    baseline = list(float(value) for value in baseline_margins)
+    candidate = list(float(value) for value in candidate_margins)
+    normalized_groups = [
+        (str(language).lower(), str(category))
+        for language, category in groups
+    ]
+    if not baseline or len(candidate) != len(baseline) or len(groups) != len(baseline):
+        raise ValueError("SRG group summary rows are not aligned")
+
+    def summarize(position: int) -> dict[str, dict[str, Any]]:
+        indices: dict[str, list[int]] = defaultdict(list)
+        for index, group in enumerate(normalized_groups):
+            indices[group[position]].append(index)
+        output: dict[str, dict[str, Any]] = {}
+        for name, selected in sorted(indices.items()):
+            score = relative_score(
+                [baseline[index] for index in selected],
+                [candidate[index] for index in selected],
+                profile,
+                groups=[normalized_groups[index] for index in selected],
+            )
+            output[name] = {
+                key: score[key]
+                for key in (
+                    "rows",
+                    "srg_gain",
+                    "r_gain",
+                    "unified_gain",
+                    "r_to_d_rate",
+                    "d_to_r_rate",
+                )
+            }
+        return output
+
+    languages = summarize(0)
+    categories = summarize(1)
+    return {
+        "languages": languages,
+        "categories": categories,
+        "worst_language": min(
+            float(row["unified_gain"]) for row in languages.values()
+        ),
+        "worst_category": min(
+            float(row["unified_gain"]) for row in categories.values()
+        ),
     }

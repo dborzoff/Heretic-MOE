@@ -22,7 +22,7 @@ from .multilingual_trial_metrics import (
     aggregate_safe_ppl,
     compose_trial_metrics,
 )
-from .srg_calibration import relative_score
+from .srg_calibration import relative_group_summary, relative_score
 from .trial_geometry_metrics import evaluate_trial_geometry
 from .utils import Prompt
 
@@ -257,14 +257,21 @@ def evaluate_multilingual_trial(
         srg_scorer.score_responses(unsafe_prompts, candidate_unsafe_responses),
         unsafe_rows,
     )
+    srg_groups = [
+        (ordered[index].language, ordered[index].category_id)
+        for index in unsafe_positions
+    ]
     srg = relative_score(
         baseline_margins,
         candidate_margins,
         dict(srg_profile),
-        groups=[
-            (ordered[index].language, ordered[index].category_id)
-            for index in unsafe_positions
-        ],
+        groups=srg_groups,
+    )
+    srg_group_summary = relative_group_summary(
+        baseline_margins,
+        candidate_margins,
+        dict(srg_profile),
+        groups=srg_groups,
     )
 
     safe_positions = [index for index, row in enumerate(ordered) if row.direction == "safe"]
@@ -335,6 +342,7 @@ def evaluate_multilingual_trial(
                 for key, value in srg.items()
                 if key != "standardized_gain"
             },
+            "srg_groups": srg_group_summary,
             "geometry": geometry,
             "ppl": ppl,
         },

@@ -137,6 +137,8 @@ def test_one_trial_phase_produces_all_metrics_and_private_records(tmp_path: Path
     assert public["rows"] == 8
     assert public["safe_rows"] == 4
     assert public["unsafe_rows"] == 4
+    assert public["diagnostics"]["srg_groups"]["worst_language"] <= 1.0
+    assert set(public["diagnostics"]["srg_groups"]["languages"]) == {"en", "ru"}
     records = [json.loads(line) for line in private_path.read_text(encoding="utf-8").splitlines()]
     assert len(records) == 8
     assert records[0]["trial_number"] == 17
