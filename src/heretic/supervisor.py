@@ -241,8 +241,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--continue-shared-only", action="store_true")
-    parser.add_argument(
-        "--finalize", action=argparse.BooleanOptionalAction, default=True
+    post_search = parser.add_mutually_exclusive_group()
+    post_search.add_argument(
+        "--finalize",
+        dest="post_search_mode",
+        action="store_const",
+        const="export",
+        default="export",
+    )
+    post_search.add_argument(
+        "--no-finalize",
+        "--search-only",
+        dest="post_search_mode",
+        action="store_const",
+        const="none",
+    )
+    post_search.add_argument(
+        "--recheck-only",
+        dest="post_search_mode",
+        action="store_const",
+        const="recheck",
+        help="Select and recheck TOP-6 without assembling model weights.",
     )
     parser.add_argument("--worker-executable", type=Path)
     parser.add_argument("--dry-run", action="store_true")
@@ -325,7 +344,13 @@ def main(argv: list[str] | None = None) -> None:
         )
     if args.continue_shared_only:
         command.append("--continue-shared-only")
-    command.append("--finalize" if args.finalize else "--no-finalize")
+    command.append(
+        {
+            "export": "--finalize",
+            "recheck": "--recheck-only",
+            "none": "--no-finalize",
+        }[args.post_search_mode]
+    )
     if args.dry_run:
         command.append("--dry-run")
 

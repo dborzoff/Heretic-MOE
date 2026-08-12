@@ -283,8 +283,14 @@ def _multilingual_enabled(settings: dict[str, Any]) -> bool:
 
 def _multilingual_final_holdout_sha256(settings: dict[str, Any]) -> str:
     contract = settings["multilingual_search"]
-    dataset_root = Path(str(contract["dataset_root"]))
-    manifest = json.loads((dataset_root / "manifest.json").read_text(encoding="utf-8"))
+    runtime_manifest = (
+        Path(str(contract["runtime_root"])) / "dataset" / "manifest.json"
+    )
+    source_manifest = (
+        Path(str(contract["dataset_root"])) / "manifest.json"
+    )
+    manifest_path = runtime_manifest if runtime_manifest.is_file() else source_manifest
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     files = manifest.get("files")
     if not isinstance(files, dict):
         raise RuntimeError("multilingual dataset manifest has no files mapping")
@@ -416,6 +422,12 @@ def prepare_multilingual(
         config_text = replace_top_level(config_text, key, value)
     config_text = replace_table_value(
         config_text, "multilingual_search", "evaluation_phase", '"finalist"'
+    )
+    config_text = replace_table_value(
+        config_text,
+        "multilingual_search",
+        "runtime_root",
+        json.dumps(str(multilingual["runtime_root"]).replace("\\", "/")),
     )
     config = output / "config.toml"
     config.write_text(config_text, encoding="utf-8", newline="\n")
@@ -906,6 +918,32 @@ def worker_environment(base: dict[str, str], device: str) -> dict[str, str]:
     return environment
 
 
+def runtime_pool_rows(runtime_root: Path, pool: str) -> int:
+    """Read a frozen pool size from the runtime dataset contract."""
+
+    manifest = json.loads(
+        (runtime_root / "dataset" / "manifest.json").read_text(encoding="utf-8")
+    )
+    counts = manifest.get("counts")
+    if not isinstance(counts, dict) or pool not in counts:
+        raise RuntimeError(f"Frozen runtime manifest has no {pool!r} row count")
+    rows = int(counts[pool])
+    if rows <= 0:
+        raise RuntimeError(f"Frozen runtime pool {pool!r} must be nonempty")
+    return rows
+
+
+def worker_text_options() -> dict[str, object]:
+    """Decode Heretic worker output exactly as the UTF-8 console emits it."""
+
+    return {
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "bufsize": 1,
+    }
+
+
 def run(args: argparse.Namespace) -> None:
     output = args.output_dir.resolve()
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
@@ -933,7 +971,7 @@ def run(args: argparse.Namespace) -> None:
                     {
                         "event": "final_holdout_reference_start",
                         "device": str(devices[0]),
-                        "rows": 660,
+                        "rows": runtime_pool_rows(runtime_root, "final_holdout"),
                     }
                 ),
                 flush=True,
@@ -1002,8 +1040,7 @@ def run(args: argparse.Namespace) -> None:
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+            **worker_text_options(),
         )
         processes.append((device, process, log_handle))
         reader = threading.Thread(target=stream, args=(device, process, log_handle), daemon=True)

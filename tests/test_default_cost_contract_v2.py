@@ -6,6 +6,7 @@ import pytest
 
 import heretic.main as heretic_main
 from heretic.main import _trial_display_label
+from heretic.scorer import Score
 from research.scripts.finalist_recheck import finalist_ranking_settings
 from research.scripts.run_adaptive_search import (
     build_stage,
@@ -65,6 +66,56 @@ def test_ppl_console_display_keeps_magnitude_and_signed_direction() -> None:
     assert heretic_main._leaderboard_score_parts(record) == [
         "PPL 7.53% (-7.00%)"
     ]
+
+
+def test_multilingual_removal_display_exposes_component_metrics() -> None:
+    record = {
+        "name": "Removal",
+        "score": {
+            "value": -0.21089,
+            "rich_display": "-0.21089",
+            "diagnostics": {
+                "metrics": {
+                    "srg_gain": -0.50139,
+                    "r_gain": -0.17333,
+                    "safe_ppl_drift": 0.00358,
+                    "safe_ppl_signed_change": -0.002,
+                }
+            },
+        },
+    }
+
+    assert heretic_main._display_score_record(record) == (
+        "-0.21089; SRG Δ-0.50139; R-side Δ-17.3 pp; "
+        "PPL 0.36% (-0.20%)"
+    )
+    assert heretic_main._leaderboard_score_parts(record) == [
+        "Removal -0.21089",
+        "SRG Δ-0.50139",
+        "R-side Δ-17.3 pp",
+        "PPL 0.36% (-0.20%)",
+    ]
+
+
+def test_live_multilingual_metric_uses_the_same_transparent_display() -> None:
+    score = Score(
+        -0.21089,
+        "-0.21089",
+        "-0.21089",
+        diagnostics={
+            "metrics": {
+                "srg_gain": -0.50139,
+                "r_gain": -0.17333,
+                "safe_ppl_drift": 0.00358,
+                "safe_ppl_signed_change": -0.002,
+            }
+        },
+    )
+
+    assert heretic_main._display_live_score("Removal", score) == (
+        "-0.21089; SRG Δ-0.50139; R-side Δ-17.3 pp; "
+        "PPL 0.36% (-0.20%)"
+    )
 
 
 def test_all_adaptive_profiles_use_calibrated_cost() -> None:

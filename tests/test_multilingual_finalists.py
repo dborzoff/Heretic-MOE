@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from heretic.multilingual_finalists import (
     freeze_top_six_manifest,
     select_multilingual_winners,
@@ -128,3 +130,33 @@ def test_balanced_and_max_use_only_full_recheck_metrics() -> None:
     assert report["winners"]["Balanced"]["source_trial_number"] == 10
     assert report["winners"]["Max"]["source_trial_number"] == 20
     assert report["winners_distinct"] is True
+
+
+def test_balanced_removal_gate_remains_reachable_when_all_scores_are_negative() -> None:
+    rows = []
+    for number, removal, loss in (
+        (10, -0.30, 0.20),
+        (20, -0.36, 0.10),
+        (30, -0.55, 0.01),
+    ):
+        rows.append(
+            {
+                "source_trial_number": number,
+                "source_trial_index": number + 1,
+                "params_sha256": f"{number:064x}",
+                "feasible": True,
+                "removal": removal,
+                "preservation_loss": loss,
+                "safe_ppl_drift": loss,
+                "safe_geometry_damage": loss,
+                "worst_language": removal,
+                "worst_category": removal,
+                "final_holdout_removal": removal,
+            }
+        )
+
+    report = select_multilingual_winners(rows, balanced_removal_fraction=0.80)
+
+    assert report["resolved_balanced_removal_gate"] == pytest.approx(-0.375)
+    assert report["winners"]["Balanced"]["source_trial_number"] == 20
+    assert report["winners"]["Max"]["source_trial_number"] == 10

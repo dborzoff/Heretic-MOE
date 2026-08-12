@@ -556,6 +556,11 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
 
         self.assertEqual(loaded, report)
 
+    def test_console_safe_text_replaces_glyphs_missing_from_cp1251(self) -> None:
+        rendered = controller.console_safe_text("GPU 0 | 25% ▏", "cp1251")
+
+        self.assertEqual(rendered, "GPU 0 | 25% ?")
+
 
 if __name__ == "__main__":
     unittest.main()

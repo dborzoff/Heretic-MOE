@@ -106,6 +106,7 @@ from .trial_selection import (
 )
 from .work_queue import TrialWorkQueue
 from .utils import (
+    Prompt,
     ask_if_unset,
     format_duration,
     format_exception,
@@ -146,6 +147,18 @@ def _display_score_record(record: dict[str, Any]) -> str:
 
     name = record["name"]
     score = record["score"]
+    if name == "Removal":
+        diagnostics = score.get("diagnostics") or {}
+        metrics = diagnostics.get("metrics")
+        if isinstance(metrics, dict):
+            signed_ppl = float(metrics["safe_ppl_signed_change"]) * 100
+            return (
+                f"{float(score['value']):+.5f}; "
+                f"SRG Δ{float(metrics['srg_gain']):+.5f}; "
+                f"R-side Δ{float(metrics['r_gain']) * 100:+.1f} pp; "
+                f"PPL {float(metrics['safe_ppl_drift']) * 100:.2f}% "
+                f"({signed_ppl:+.2f}%)"
+            )
     if name == "Sparse refusal geometry":
         diagnostics = score.get("diagnostics") or {}
         positive_rate = diagnostics.get("positive_rate")
@@ -179,6 +192,22 @@ def _leaderboard_score_parts(record: dict[str, Any]) -> list[str]:
 
     name = record["name"]
     score = record["score"]
+    if name == "Removal":
+        parts = [f"Removal {float(score['value']):+.5f}"]
+        diagnostics = score.get("diagnostics") or {}
+        metrics = diagnostics.get("metrics")
+        if isinstance(metrics, dict):
+            parts.extend(
+                [
+                    f"SRG Δ{float(metrics['srg_gain']):+.5f}",
+                    f"R-side Δ{float(metrics['r_gain']) * 100:+.1f} pp",
+                    (
+                        f"PPL {float(metrics['safe_ppl_drift']) * 100:.2f}% "
+                        f"({float(metrics['safe_ppl_signed_change']) * 100:+.2f}%)"
+                    ),
+                ]
+            )
+        return parts
     if name == "Sparse refusal geometry":
         parts = [f"SRG {float(score['value']):+.5f}"]
         diagnostics = score.get("diagnostics") or {}
@@ -209,10 +238,36 @@ def _leaderboard_score_parts(record: dict[str, Any]) -> list[str]:
     return [f"{_display_score_name(name)} {_display_score_record(record)}"]
 
 
+def _display_live_score(name: str, score: Any) -> str:
+    """Reuse journal display rules for a freshly evaluated score."""
+
+    return _display_score_record(
+        {
+            "name": name,
+            "score": {
+                "value": score.value,
+                "rich_display": score.rich_display,
+                "diagnostics": score.diagnostics,
+            },
+        }
+    )
+
+
 def _format_selection_cost(penalty: float) -> str:
     """Format the public Cost metric with an explicit higher-is-better direction."""
 
     return f"Cost↑ {selection_cost_value(penalty):.3f}"
+
+
+def _format_multilingual_frozen_rows(bundle: Any) -> str:
+    """Summarize the actual frozen pools instead of production-only constants."""
+
+    return (
+        f"map {len(bundle.direction_rows)}, "
+        f"trial {len(bundle.trial_rows)}, "
+        f"SRG calibration {len(bundle.search_rows)}, "
+        f"final holdout {len(bundle.final_rows)}"
+    )
 
 
 def _trial_display_label(trial: FrozenTrial) -> str:
@@ -629,9 +684,7 @@ def run():
         ]
         print(
             "* Frozen rows: "
-            f"map [bold]{len(multilingual_worker_runtime.bundle.direction_rows)}[/], "
-            f"trial [bold]{len(multilingual_worker_runtime.bundle.trial_rows)}[/], "
-            "SRG calibration [bold]660[/], final holdout [bold]660[/]"
+            f"[bold]{_format_multilingual_frozen_rows(multilingual_worker_runtime.bundle)}[/]"
         )
         print(
             "* Runtime contract: "
@@ -1175,7 +1228,7 @@ def run():
         for name, score in scores:
             print(
                 f"    * {_display_score_name(name)}: "
-                f"[bold]{score.rich_display}[/]"
+                f"[bold]{_display_live_score(name, score)}[/]"
             )
 
         worker_trial_count += 1

@@ -214,7 +214,12 @@ def select_multilingual_winners(
     if not eligible:
         raise ValueError("no feasible complete multilingual recheck record")
     best_removal = max(float(row["removal"]) for row in eligible)
-    balanced_gate = best_removal * balanced_removal_fraction
+    if balanced_removal_fraction == 0.0:
+        balanced_gate = -math.inf
+    elif best_removal < 0.0:
+        balanced_gate = best_removal / balanced_removal_fraction
+    else:
+        balanced_gate = best_removal * balanced_removal_fraction
     balanced_pool = [
         row for row in eligible if float(row["removal"]) >= balanced_gate
     ]

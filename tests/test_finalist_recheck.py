@@ -28,6 +28,49 @@ def load_recheck_module():
 recheck = load_recheck_module()
 
 
+def test_multilingual_holdout_hash_uses_frozen_runtime_manifest(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    (dataset / "manifest.json").write_text(
+        json.dumps({"files": [{"path": "srg_calibration_en.jsonl"}]}),
+        encoding="utf-8",
+    )
+    runtime_dataset = tmp_path / "runtime" / "dataset"
+    runtime_dataset.mkdir(parents=True)
+    files = {
+        f"srg_calibration_{language}.jsonl": {
+            "rows": 2,
+            "sha256": f"{index + 1:064x}",
+        }
+        for index, language in enumerate(("en", "ru", "zh", "es", "fr"))
+    }
+    (runtime_dataset / "manifest.json").write_text(
+        json.dumps({"files": files}), encoding="utf-8"
+    )
+
+    value = recheck._multilingual_final_holdout_sha256(
+        {
+            "multilingual_search": {
+                "dataset_root": dataset.as_posix(),
+                "runtime_root": (tmp_path / "runtime").as_posix(),
+            }
+        }
+    )
+
+    records = [
+        {
+            "name": f"srg_calibration_{language}.jsonl",
+            "rows": 2,
+            "sha256": f"{index + 1:064x}",
+        }
+        for index, language in enumerate(("en", "ru", "zh", "es", "fr"))
+    ]
+    expected = recheck.hashlib.sha256(
+        json.dumps(records, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    assert value == expected
+
+
 def test_recheck_workers_use_device_specific_compiler_caches() -> None:
     assert hasattr(recheck, "worker_environment")
     environment = recheck.worker_environment(
@@ -42,6 +85,26 @@ def test_recheck_workers_use_device_specific_compiler_caches() -> None:
     assert Path(environment["TORCHINDUCTOR_CACHE_DIR"]) == Path(
         "F:/cache/inductor/gpu-1"
     )
+
+
+def test_runtime_pool_rows_uses_frozen_dataset_counts(tmp_path: Path) -> None:
+    dataset = tmp_path / "runtime" / "dataset"
+    dataset.mkdir(parents=True)
+    (dataset / "manifest.json").write_text(
+        json.dumps({"counts": {"final_holdout": 10}}),
+        encoding="utf-8",
+    )
+
+    assert recheck.runtime_pool_rows(tmp_path / "runtime", "final_holdout") == 10
+
+
+def test_recheck_worker_text_mode_is_utf8() -> None:
+    assert recheck.worker_text_options() == {
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "bufsize": 1,
+    }
 
 
 def test_strict_keyword_gate_has_priority_over_near_gate() -> None:
@@ -151,8 +214,7 @@ def test_multilingual_prepare_freezes_top_six_and_finalist_phase() -> None:
         config = root / "config.toml"
         config.write_text(
             'model = "F:/models/example"\n\n[multilingual_search]\n'
-            'enabled = true\ndataset_root = "' + dataset.as_posix() + '"\n'
-            'runtime_root = "' + runtime.as_posix() + '"\n',
+            'enabled = true\ndataset_root = "' + dataset.as_posix() + '"\n',
             encoding="utf-8",
         )
         output = root / "finalists"
@@ -184,6 +246,7 @@ def test_multilingual_prepare_freezes_top_six_and_finalist_phase() -> None:
         assert manifest["top_n"] == 6
         assert (output / "top6_manifest.json").is_file()
         assert config_data["multilingual_search"]["evaluation_phase"] == "finalist"
+        assert config_data["multilingual_search"]["runtime_root"] == runtime.as_posix()
         assert len(prepared.trials) == 6
         assert all(trial.state == optuna.trial.TrialState.WAITING for trial in prepared.trials)
 

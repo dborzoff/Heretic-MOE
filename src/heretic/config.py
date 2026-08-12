@@ -260,6 +260,10 @@ class MultilingualSearchSettings(BaseModel):
     def validate_enabled_root(self) -> "MultilingualSearchSettings":
         if self.enabled and not (self.dataset_root or "").strip():
             raise ValueError("dataset_root is required when enabled=true")
+        if self.trial_rows_per_cell % len(self.languages) != 0:
+            raise ValueError(
+                "trial_rows_per_cell must be divisible by the five languages"
+            )
         return self
 
 

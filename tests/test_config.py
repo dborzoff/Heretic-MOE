@@ -126,6 +126,14 @@ class SearchSettingsTests(unittest.TestCase):
                 languages=["en", "ru", "en"],
             )
 
+    def test_multilingual_search_rejects_unbalanced_trial_size(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "trial_rows_per_cell"):
+            MultilingualSearchSettings(
+                enabled=True,
+                dataset_root="F:/datasets/heretic_moe_5lang_v1",
+                trial_rows_per_cell=2,
+            )
+
     def test_search_extensions_are_disabled_by_default(self) -> None:
         with patch("sys.argv", ["test"]):
             settings = Settings(model="example/model")

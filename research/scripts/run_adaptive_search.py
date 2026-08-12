@@ -835,6 +835,20 @@ def powershell_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def console_safe_text(value: str, encoding: str | None = None) -> str:
+    """Keep worker output visible even when a parent console is not UTF-8."""
+
+    target = encoding or getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        value.encode(target)
+    except (LookupError, UnicodeEncodeError):
+        try:
+            return value.encode(target, errors="replace").decode(target)
+        except LookupError:
+            return value.encode("ascii", errors="replace").decode("ascii")
+    return value
+
+
 def start_stage(
     stage: Stage,
     executable: Path,
@@ -913,7 +927,10 @@ def start_stage(
         assert process.stdout is not None
         prefix = f"GPU {effective_device} | "
         for line in process.stdout:
-            print(prefix + line.rstrip("\r\n"), flush=True)
+            print(
+                console_safe_text(prefix + line.rstrip("\r\n")),
+                flush=True,
+            )
 
     pump = threading.Thread(
         target=forward_output,
