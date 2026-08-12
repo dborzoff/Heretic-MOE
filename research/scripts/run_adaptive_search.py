@@ -215,11 +215,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--balanced-removal-fraction",
         type=float,
-        default=0.0,
+        default=0.8,
         help=(
-            "Minimum fraction of the best SRG improvement required from the "
-            "Balanced finalist. The default 0 accepts any genuine improvement "
-            "over the original baseline."
+            "Minimum fraction of the best measured removal required from the "
+            "Balanced finalist (default: 0.8)."
         ),
     )
     parser.add_argument(
@@ -2303,6 +2302,7 @@ def load_valid_winners_report(path: Path) -> dict[str, Any] | None:
     if contract not in {
         "two_distinct_extremes_from_one_high_fidelity_top_n",
         "pareto_extremes_or_single_winner",
+        "multilingual_v3_full_recheck",
     }:
         return None
     winners = report.get("winners")
@@ -2320,6 +2320,28 @@ def load_valid_winners_report(path: Path) -> dict[str, Any] | None:
     distinct = balanced_number != max_number and balanced_source != max_source
     if contract == "two_distinct_extremes_from_one_high_fidelity_top_n":
         if not distinct:
+            return None
+    elif contract == "multilingual_v3_full_recheck":
+        measured = report.get("measured")
+        if (
+            report.get("winners_distinct") is not distinct
+            or not isinstance(measured, list)
+            or not all(isinstance(row, dict) for row in measured)
+        ):
+            return None
+        measured_sources = {
+            int(row["source_trial_number"])
+            for row in measured
+            if "source_trial_number" in row
+        }
+        try:
+            winner_sources = {
+                int(winners[variant]["source_trial_number"])
+                for variant in ("Balanced", "Max")
+            }
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not winner_sources.issubset(measured_sources):
             return None
     elif (
         report.get("winners_distinct") is not distinct

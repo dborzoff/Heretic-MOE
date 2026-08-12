@@ -1,0 +1,144 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from heretic.multilingual_contract import CalibrationRow
+from heretic.multilingual_final_holdout import (
+    build_final_holdout_archive,
+    evaluate_final_holdout,
+    load_final_holdout_archive,
+)
+
+
+def _rows(tmp_path: Path) -> list[CalibrationRow]:
+    rows = []
+    for language in ("en", "ru"):
+        for index in range(2):
+            rows.append(
+                CalibrationRow(
+                    base_id=f"R{index + 1:04d}",
+                    row_id=f"{language.upper()}-R{index + 1:04d}",
+                    language=language,
+                    category_id=f"C0{index + 1}",
+                    prompt=f"private-{language}-{index}",
+                    source_path=tmp_path / "private.jsonl",
+                    source_line=index + 1,
+                )
+            )
+    return rows
+
+
+class _Model:
+    def __init__(self, *, candidate: bool = False) -> None:
+        self.candidate = candidate
+        self.calls = 0
+
+    def get_response_artifacts_with_prefill_residuals_batched(self, prompts, **kwargs):
+        self.calls += 1
+        prefix = "candidate" if self.candidate else "clean"
+        residual = 0.5 if self.candidate else 1.0
+        return (
+            [f"{prefix}-{index}" for index in range(len(prompts))],
+            [[index + 1, index + 2] for index in range(len(prompts))],
+            torch.full((len(prompts), 2, 2), residual),
+        )
+
+
+class _Scorer:
+    def score_responses(self, prompts, responses):
+        clean = all(response.startswith("clean") for response in responses)
+        margins = [1.0, -1.0, 1.0, -1.0] if clean else [-1.0] * 4
+        return SimpleNamespace(diagnostics={"margins": margins})
+
+
+def _profile() -> dict[str, object]:
+    return {
+        "rows": 660,
+        "scale": [1.0] * 660,
+        "weight": [1.0] * 660,
+        "global_scale": 1.0,
+        "group_scale": {},
+        "group_weight": {},
+    }
+
+
+def test_final_holdout_freezes_clean_reference_then_rechecks_candidate(
+    tmp_path: Path,
+) -> None:
+    rows = _rows(tmp_path)
+    clean_model = _Model()
+    archive = tmp_path / "r_holdout"
+
+    manifest = build_final_holdout_archive(
+        model=clean_model,
+        rows=rows,
+        refusal_direction=torch.ones((2, 2)),
+        srg_scorer=_Scorer(),
+        srg_profile=_profile(),
+        output_dir=archive,
+        dataset_contract_sha256="a" * 64,
+        model_fingerprint="clean-model-v1",
+        top_six_contract_sha256="b" * 64,
+        max_response_length=1024,
+    )
+    loaded_manifest, clean_records = load_final_holdout_archive(archive)
+    candidate_model = _Model(candidate=True)
+    measurement = evaluate_final_holdout(
+        trial_number=3,
+        model=candidate_model,
+        rows=rows,
+        clean_records=clean_records,
+        refusal_direction=torch.ones((2, 2)),
+        layer_reliability=torch.ones(2),
+        srg_scorer=_Scorer(),
+        srg_profile=_profile(),
+        private_records_path=tmp_path / "private" / "candidate-3.jsonl",
+        max_response_length=1024,
+    )
+
+    assert clean_model.calls == 1
+    assert candidate_model.calls == 1
+    assert manifest == loaded_manifest
+    assert manifest["rows"] == 4
+    assert manifest["max_response_length"] == 1024
+    assert manifest["top_six_contract_sha256"] == "b" * 64
+    assert measurement["rows"] == 4
+    assert measurement["removal"] > 0.0
+    assert measurement["srg_gain"] > 0.0
+    assert measurement["r_gain"] > 0.0
+    assert measurement["unsafe_geometry_gain"] > 0.0
+    assert set(measurement["groups"]["languages"]) == {"en", "ru"}
+    serialized = json.dumps(measurement, sort_keys=True)
+    assert not any(key in serialized for key in ('"prompt"', '"response"', '"text"'))
+
+
+def test_final_holdout_rejects_wrong_clean_order(tmp_path: Path) -> None:
+    rows = _rows(tmp_path)
+    records = [
+        {
+            "row_id": row.row_id,
+            "clean_response": "clean",
+            "clean_margin": 1.0,
+            "clean_prompt_residual_projection": [1.0, 1.0],
+        }
+        for row in reversed(rows)
+    ]
+
+    with pytest.raises(ValueError, match="order"):
+        evaluate_final_holdout(
+            trial_number=0,
+            model=_Model(candidate=True),
+            rows=rows,
+            clean_records=records,
+            refusal_direction=torch.ones((2, 2)),
+            layer_reliability=torch.ones(2),
+            srg_scorer=_Scorer(),
+            srg_profile=_profile(),
+            private_records_path=tmp_path / "candidate.jsonl",
+            max_response_length=1024,
+        )

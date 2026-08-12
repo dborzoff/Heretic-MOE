@@ -24,6 +24,11 @@ def main() -> None:
 
         multilingual_prepare_main(sys.argv[2:])
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "prepare-final-holdout":
+        from .multilingual_final_holdout_cli import main as final_holdout_main
+
+        final_holdout_main(sys.argv[2:])
+        return
 
     if os.environ.get("HERETIC_MOE_INTERNAL") == "1":
         from .main import main as worker_main

@@ -90,6 +90,7 @@ class SearchSettingsTests(unittest.TestCase):
         self.assertEqual(contract.calibration_rows_per_language, 132)
         self.assertEqual(contract.ordinary_max_new_tokens, 512)
         self.assertEqual(contract.final_max_new_tokens, 1024)
+        self.assertEqual(contract.evaluation_phase, "search")
         self.assertEqual(contract.schedule_capacity, 1000)
         self.assertIsNone(contract.runtime_root)
         self.assertEqual(contract.max_safe_ppl_drift, 0.005)

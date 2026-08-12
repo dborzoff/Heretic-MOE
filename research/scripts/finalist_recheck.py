@@ -21,6 +21,11 @@ from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 from optuna.trial import FrozenTrial, TrialState
 
 from heretic.config import SelectionPolicy
+from heretic.multilingual_finalists import (
+    freeze_top_six_manifest,
+    select_multilingual_winners,
+    select_top_six,
+)
 from heretic.trial_selection import candidate_trials
 
 
@@ -189,10 +194,320 @@ def trial_metrics(trial: FrozenTrial) -> dict[str, Any]:
     }
 
 
+def multilingual_trial_metrics(trial: FrozenTrial) -> dict[str, Any]:
+    _, record = score_value(trial, "Removal")
+    public = record.get("diagnostics")
+    if not isinstance(public, dict):
+        raise RuntimeError(f"Trial {trial.number} has no multilingual diagnostics")
+    metrics = public.get("metrics")
+    diagnostics = public.get("diagnostics")
+    if not isinstance(metrics, dict) or not isinstance(diagnostics, dict):
+        raise RuntimeError(f"Trial {trial.number} has incomplete multilingual diagnostics")
+    final = diagnostics.get("final_holdout")
+    trial_groups = diagnostics.get("srg_groups")
+    if not isinstance(final, dict) or not isinstance(trial_groups, dict):
+        raise RuntimeError(f"Trial {trial.number} has no independent final holdout")
+    final_groups = final.get("groups")
+    if not isinstance(final_groups, dict):
+        raise RuntimeError(f"Trial {trial.number} final holdout has no group summary")
+    worst_language = min(
+        float(trial_groups["worst_language"]),
+        float(final_groups["worst_language"]),
+    )
+    worst_category = min(
+        float(trial_groups["worst_category"]),
+        float(final_groups["worst_category"]),
+    )
+    constraints = trial.user_attrs.get("constraints")
+    feasible = trial.user_attrs.get("feasible")
+    if not isinstance(feasible, bool):
+        feasible = not isinstance(constraints, (list, tuple)) or all(
+            float(value) <= 0.0 for value in constraints
+        )
+    source_number = int(trial.user_attrs["recheck_source_trial_number"])
+    return {
+        "trial_number": trial.number,
+        "source_trial_number": source_number,
+        "source_trial_index": int(trial.user_attrs["recheck_source_trial_index"]),
+        "params_sha256": params_sha256(trial.params),
+        "feasible": feasible,
+        "removal": float(metrics["removal"]),
+        "preservation_loss": float(metrics["preservation_loss"]),
+        "safe_ppl_drift": float(metrics["safe_ppl_drift"]),
+        "safe_geometry_damage": float(metrics["safe_geometry_drift"]),
+        "worst_language": worst_language,
+        "worst_category": worst_category,
+        "final_holdout_removal": float(final["removal"]),
+    }
+
+
+def final_holdout_prepare_command(
+    heretic: Path,
+    manifest: dict[str, Any],
+    runtime_root: Path,
+    device: str,
+) -> list[str]:
+    return [
+        str(heretic),
+        "prepare-final-holdout",
+        "--config",
+        str(manifest["config"]),
+        "--runtime-root",
+        str(runtime_root),
+        "--top-six-manifest",
+        str(manifest["top_six_manifest"]),
+        "--device",
+        str(device),
+    ]
+
+
+def validate_final_holdout_reference(reference: Path, top_six_path: Path) -> None:
+    if not reference.is_file():
+        raise FileNotFoundError(reference)
+    top_six = json.loads(top_six_path.read_text(encoding="utf-8"))
+    manifest = json.loads(reference.read_text(encoding="utf-8"))
+    expected = top_six.get("shortlist_contract_sha256")
+    if (
+        top_six.get("status") != "FROZEN"
+        or manifest.get("status") != "PASS"
+        or not isinstance(expected, str)
+        or manifest.get("top_six_contract_sha256") != expected
+    ):
+        raise RuntimeError("Final holdout reference does not match the frozen TOP-6")
+
+
+def _multilingual_enabled(settings: dict[str, Any]) -> bool:
+    contract = settings.get("multilingual_search")
+    return isinstance(contract, dict) and contract.get("enabled") is True
+
+
+def _multilingual_final_holdout_sha256(settings: dict[str, Any]) -> str:
+    contract = settings["multilingual_search"]
+    dataset_root = Path(str(contract["dataset_root"]))
+    manifest = json.loads((dataset_root / "manifest.json").read_text(encoding="utf-8"))
+    files = manifest.get("files")
+    if not isinstance(files, dict):
+        raise RuntimeError("multilingual dataset manifest has no files mapping")
+    records = []
+    for language in ("en", "ru", "zh", "es", "fr"):
+        name = f"srg_calibration_{language}.jsonl"
+        record = files.get(name)
+        if not isinstance(record, dict):
+            raise RuntimeError(f"multilingual dataset manifest is missing {name}")
+        records.append(
+            {
+                "name": name,
+                "rows": int(record["rows"]),
+                "sha256": str(record["sha256"]),
+            }
+        )
+    payload = json.dumps(records, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _multilingual_source_rows(source: optuna.study.Study) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for trial in source.trials:
+        complete = trial.state == TrialState.COMPLETE and trial.values is not None
+        if not complete:
+            continue
+        try:
+            cost, _ = score_value(trial, "Cost↑", "Cost")
+        except RuntimeError:
+            removal = float(trial.values[0])
+            loss = float(trial.values[1])
+            cost = (1.0 / (1.0 + pow(2.718281828459045, -4.0 * removal))) / (
+                1.0 + loss
+            )
+        constraints = trial.user_attrs.get("constraints")
+        feasible = trial.user_attrs.get("feasible")
+        if not isinstance(feasible, bool):
+            feasible = not isinstance(constraints, (list, tuple)) or all(
+                float(value) <= 0.0 for value in constraints
+            )
+        rows.append(
+            {
+                "trial_number": trial.number,
+                "source_trial_number": trial.number,
+                "source_trial_index": int(
+                    trial.user_attrs.get("index", trial.number + 1)
+                ),
+                "complete": True,
+                "feasible": feasible,
+                "removal": float(trial.values[0]),
+                "preservation_loss": float(trial.values[1]),
+                "cost_up": float(cost),
+                "params": dict(trial.params),
+                "params_sha256": params_sha256(trial.params),
+            }
+        )
+    return rows
+
+
+def prepare_multilingual(
+    args: argparse.Namespace,
+    source: optuna.study.Study,
+    settings_data: dict[str, Any],
+) -> None:
+    if args.top_n != 6:
+        raise RuntimeError("multilingual v3 finalization requires exactly TOP-6")
+    overrides, override_path = load_finalization_overrides(args.source_journal)
+    removal_fraction = float(
+        overrides.get("balanced_removal_fraction", args.balanced_removal_fraction)
+    )
+    if not 0.0 <= removal_fraction <= 1.0:
+        raise RuntimeError("balanced_removal_fraction must be in [0, 1]")
+    candidates = _multilingual_source_rows(source)
+    if args.trial_indices:
+        if len(args.trial_indices) != 6 or len(set(args.trial_indices)) != 6:
+            raise RuntimeError("--trial-indices must contain six distinct entries")
+        by_index = {int(row["source_trial_index"]): row for row in candidates}
+        missing = [index for index in args.trial_indices if index not in by_index]
+        if missing:
+            raise RuntimeError(f"Completed source trials not found: {missing}")
+        selected = [
+            {**by_index[index], "shortlist_rank": rank, "shortlist_roles": ["explicit"]}
+            for rank, index in enumerate(args.trial_indices, start=1)
+        ]
+        selection_mode = "explicit_verified_shortlist"
+    else:
+        selected = select_top_six(candidates, top_n=6)
+        selection_mode = "multilingual_diverse_top6"
+
+    output = args.output_dir.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    checkpoints = output / "checkpoints"
+    checkpoints.mkdir(exist_ok=True)
+    source_sha = sha256(args.source_journal.resolve())
+    holdout_sha = _multilingual_final_holdout_sha256(settings_data)
+    top6_path = output / "top6_manifest.json"
+    top6 = freeze_top_six_manifest(
+        top6_path,
+        selected,
+        source_journal_sha256=source_sha,
+        final_holdout_sha256=holdout_sha,
+    )
+
+    multilingual = dict(settings_data["multilingual_search"])
+    multilingual["evaluation_phase"] = "finalist"
+    settings_data.update(
+        {
+            "n_trials": 6,
+            "n_startup_trials": 0,
+            "parallel_workers": len(args.devices),
+            "worker_trial_budget": None,
+            "optimization_only": True,
+            "checkpoint_action": "continue",
+            "leaderboard_size": 6,
+            "study_checkpoint_dir": str(checkpoints).replace("\\", "/"),
+            "multilingual_search": multilingual,
+        }
+    )
+    config_text = args.base_config.read_text(encoding="utf-8")
+    for key, value in (
+        ("n_trials", "6"),
+        ("n_startup_trials", "0"),
+        ("parallel_workers", str(len(args.devices))),
+        ("optimization_only", "true"),
+        ("checkpoint_action", '"continue"'),
+        ("leaderboard_size", "6"),
+        ("study_checkpoint_dir", json.dumps(str(checkpoints).replace("\\", "/"))),
+    ):
+        config_text = replace_top_level(config_text, key, value)
+    config_text = replace_table_value(
+        config_text, "multilingual_search", "evaluation_phase", '"finalist"'
+    )
+    config = output / "config.toml"
+    config.write_text(config_text, encoding="utf-8", newline="\n")
+
+    journal = checkpoints / journal_name(str(settings_data["model"]))
+    if journal.exists():
+        raise FileExistsError(f"Refusing to overwrite existing recheck: {journal}")
+    storage = JournalStorage(
+        JournalFileBackend(str(journal), lock_obj=JournalFileOpenLock(str(journal)))
+    )
+    recheck = optuna.create_study(
+        study_name="heretic", storage=storage, directions=source.directions
+    )
+    recheck.set_user_attr("settings", json.dumps(settings_data, separators=(",", ":")))
+    recheck.set_user_attr("constraint_names", source.user_attrs.get("constraint_names", []))
+    recheck.set_user_attr("finished", False)
+    recheck.set_user_attr("top_six_contract_sha256", top6["shortlist_contract_sha256"])
+    for row in selected:
+        recheck.enqueue_trial(
+            row["params"],
+            user_attrs={
+                "recheck_rank": int(row["shortlist_rank"]),
+                "recheck_source_trial_number": int(row["source_trial_number"]),
+                "recheck_source_trial_index": int(row["source_trial_index"]),
+                "recheck_source_params_sha256": str(row["params_sha256"]),
+                "shortlist_roles": list(row["shortlist_roles"]),
+            },
+            skip_if_exists=False,
+        )
+
+    manifest = {
+        "version": 1,
+        "status": "prepared",
+        "contract": "multilingual_v3_full_recheck",
+        "source_journal": str(args.source_journal.resolve()),
+        "source_journal_sha256": source_sha,
+        "base_config": str(args.base_config.resolve()),
+        "base_config_sha256": sha256(args.base_config.resolve()),
+        "config": str(config),
+        "config_sha256": sha256(config),
+        "journal": str(journal),
+        "top_n": 6,
+        "selection_mode": selection_mode,
+        "selection_policy": args.selection_policy,
+        "devices": list(args.devices),
+        "ppl": {"chunks": args.ppl_chunks, "window": args.ppl_window},
+        "gates": {
+            "max_ppl_drift": args.max_ppl_drift,
+            "max_keyword_rate": args.max_keywords / args.keyword_total,
+            "max_keywords": args.max_keywords,
+            "keyword_total": args.keyword_total,
+            "keyword_near_gate_extra": args.keyword_near_gate_extra,
+            "balanced_srg_gate": overrides.get(
+                "balanced_srg_gate", args.balanced_srg_gate
+            ),
+            "balanced_removal_fraction": removal_fraction,
+            "baseline_srg": overrides.get("baseline_srg", args.baseline_srg),
+        },
+        "finalization_overrides": None
+        if override_path is None
+        else {"path": str(override_path), "sha256": sha256(override_path)},
+        "top_six_manifest": str(top6_path),
+        "top_six_manifest_sha256": sha256(top6_path),
+        "final_holdout_sha256": holdout_sha,
+        "runtime_root": str(Path(str(multilingual["runtime_root"])).resolve()),
+        "selection": [
+            {
+                "rank": int(row["shortlist_rank"]),
+                "source_trial_number": int(row["source_trial_number"]),
+                "source_trial_index": int(row["source_trial_index"]),
+                "params": row["params"],
+                "params_sha256": row["params_sha256"],
+                "shortlist_roles": row["shortlist_roles"],
+            }
+            for row in selected
+        ],
+    }
+    manifest_path = output / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    print(json.dumps({"status": "PASS", "manifest": str(manifest_path), "top_n": 6}))
+
+
 def prepare(args: argparse.Namespace) -> None:
     source = load_study(args.source_journal.resolve())
     with args.base_config.open("rb") as stream:
         base_config_data = tomllib.load(stream)
+    settings_data = json.loads(source.user_attrs["settings"])
+    if _multilingual_enabled(settings_data):
+        prepare_multilingual(args, source, settings_data)
+        return
     overrides, override_path = load_finalization_overrides(args.source_journal)
     balanced_srg_gate = overrides.get("balanced_srg_gate", args.balanced_srg_gate)
     baseline_srg = overrides.get("baseline_srg", args.baseline_srg)
@@ -209,7 +524,6 @@ def prepare(args: argparse.Namespace) -> None:
         )
     if not 0 <= float(removal_fraction) <= 1:
         raise RuntimeError("balanced_removal_fraction must be in [0, 1]")
-    settings_data = json.loads(source.user_attrs["settings"])
     diagnostic_names, score_targets, score_weights = finalist_ranking_settings(
         settings_data,
         base_config_data,
@@ -420,6 +734,38 @@ def finalize(output: Path) -> dict[str, Any]:
     manifest_path = output / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     study = load_study(Path(manifest["journal"]))
+    if manifest.get("contract") == "multilingual_v3_full_recheck":
+        expected = {int(row["source_trial_index"]) for row in manifest["selection"]}
+        measured: dict[int, dict[str, Any]] = {}
+        for trial in study.trials:
+            source_index = trial.user_attrs.get("recheck_source_trial_index")
+            if source_index is None or trial.state != TrialState.COMPLETE:
+                continue
+            source_index = int(source_index)
+            if source_index in measured:
+                raise RuntimeError(
+                    f"Duplicate completed recheck for source T{source_index}"
+                )
+            measured[source_index] = multilingual_trial_metrics(trial)
+        missing = sorted(expected - measured.keys())
+        if missing:
+            raise RuntimeError(f"Incomplete recheck; missing source trials: {missing}")
+        report = select_multilingual_winners(
+            list(measured.values()),
+            balanced_removal_fraction=float(
+                manifest["gates"]["balanced_removal_fraction"]
+            ),
+        )
+        result = output / "winners.json"
+        result.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        print(
+            json.dumps(
+                {"status": "PASS", "result": str(result), "winners": report["winners"]}
+            )
+        )
+        return report
     expected = {int(row["source_trial_index"]) for row in manifest["selection"]}
     measured: dict[int, dict[str, Any]] = {}
     for trial in study.trials:
@@ -572,6 +918,37 @@ def run(args: argparse.Namespace) -> None:
     if waiting == 0:
         finalize(output)
         return
+    if manifest.get("contract") == "multilingual_v3_full_recheck":
+        runtime_root = Path(manifest["runtime_root"])
+        final_reference = runtime_root / "final_holdout_reference" / "manifest.json"
+        if not final_reference.is_file():
+            command = final_holdout_prepare_command(
+                args.heretic,
+                manifest,
+                runtime_root,
+                str(devices[0]),
+            )
+            print(
+                json.dumps(
+                    {
+                        "event": "final_holdout_reference_start",
+                        "device": str(devices[0]),
+                        "rows": 660,
+                    }
+                ),
+                flush=True,
+            )
+            completed = subprocess.run(command, cwd=output, check=False)
+            if completed.returncode:
+                raise RuntimeError(
+                    f"Final holdout preparation failed with exit code {completed.returncode}"
+                )
+            if not final_reference.is_file():
+                raise RuntimeError("Final holdout preparation produced no manifest")
+        validate_final_holdout_reference(
+            final_reference,
+            Path(manifest["top_six_manifest"]),
+        )
     workers = min(len(devices), waiting)
     budgets = [waiting // workers + (index < waiting % workers) for index in range(workers)]
     lock = threading.Lock()

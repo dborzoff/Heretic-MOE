@@ -9,10 +9,16 @@ import torch
 from heretic.clean_reference_archive import build_clean_reference_archive
 from heretic.config import SelectionPolicy, Settings
 from heretic.language_map_data import GeometryRow, text_free_row_index
-from heretic.language_map_directions import DirectionMapProfile, write_direction_map_package
-from heretic.multilingual_contract import MultilingualDatasetBundle
+from heretic.language_map_directions import (
+    DirectionMapProfile,
+    load_direction_map_package,
+    write_direction_map_package,
+)
+from heretic.multilingual_contract import CalibrationRow, MultilingualDatasetBundle
+from heretic.multilingual_final_holdout import build_final_holdout_archive
 from heretic.multilingual_runtime import (
     apply_multilingual_search_mode,
+    load_multilingual_finalist_evaluator,
     load_multilingual_search_evaluator,
     resolve_srg_runtime_contract,
 )
@@ -32,9 +38,19 @@ class _ReferenceModel:
     def get_conditional_nll(self, prompts, targets):
         return [1.0] * len(prompts)
 
+    def get_response_artifacts_with_prefill_residuals_batched(self, prompts, **kwargs):
+        return self.get_response_artifacts_with_prefill_residuals(prompts, **kwargs)
+
 
 class _UnusedScorer:
     pass
+
+
+class _FinalScorer:
+    def score_responses(self, prompts, responses):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(diagnostics={"margins": [1.0] * len(prompts)})
 
 
 def _rows(tmp_path: Path) -> list[GeometryRow]:
@@ -220,3 +236,43 @@ def test_srg_runtime_contract_uses_only_pinned_660_files(tmp_path: Path) -> None
     assert resolved["prototype_path"] == prototypes.resolve()
     assert resolved["prompt_path"] == prompts.resolve()
     assert resolved["validate_prompt_alignment"] is False
+
+
+def test_finalist_runtime_uses_full_pool_and_frozen_r_archive(tmp_path: Path) -> None:
+    bundle, runtime_root = _prepare_runtime(tmp_path)
+    final_rows = (
+        CalibrationRow(
+            base_id="R1", row_id="EN-R1", language="en", category_id="C01",
+            prompt="private-final", source_path=tmp_path / "private.jsonl", source_line=1,
+        ),
+    )
+    bundle = MultilingualDatasetBundle(
+        direction_rows=bundle.direction_rows,
+        trial_rows=bundle.trial_rows,
+        search_rows=bundle.search_rows,
+        final_rows=final_rows,
+        manifest=bundle.manifest,
+    )
+    profile, _ = load_direction_map_package(runtime_root / "clean_map" / "directions")
+    srg_profile = json.loads(
+        (runtime_root / "srg_calibration" / "calibration_profile.json").read_text(encoding="utf-8")
+    )
+    build_final_holdout_archive(
+        model=_ReferenceModel(), rows=final_rows,
+        refusal_direction=profile.consensus_refusal_direction,
+        srg_scorer=_FinalScorer(), srg_profile=srg_profile,
+        output_dir=runtime_root / "final_holdout_reference",
+        dataset_contract_sha256="a" * 64, model_fingerprint="fake-model-v1",
+        top_six_contract_sha256="b" * 64, max_response_length=1024,
+    )
+
+    evaluator, manifest = load_multilingual_finalist_evaluator(
+        bundle=bundle, runtime_root=runtime_root, model=object(),
+        srg_scorer=_FinalScorer(), constraints=MultilingualConstraintContract(),
+        expected_languages=("en",), final_max_new_tokens=1024,
+    )
+
+    assert manifest["evaluation_phase"] == "finalist"
+    assert manifest["trial_rows_per_finalist"] == 2
+    assert manifest["final_holdout_rows"] == 1
+    assert evaluator.runtime.expected_per_direction == 1

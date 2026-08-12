@@ -148,7 +148,7 @@ def test_one_trial_phase_produces_all_metrics_and_private_records(tmp_path: Path
 
 def test_trial_rejects_incomplete_direction_coverage(tmp_path: Path) -> None:
     rows = _rows(tmp_path)[:-1]
-    with pytest.raises(ValueError, match="400 SAFE and 400 UNSAFE"):
+    with pytest.raises(ValueError, match="configured 4 SAFE and 4 UNSAFE"):
         evaluate_multilingual_trial(
             trial_number=1,
             model=_FakeModel(rows),

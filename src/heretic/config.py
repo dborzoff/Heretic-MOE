@@ -237,6 +237,7 @@ class MultilingualSearchSettings(BaseModel):
     calibration_rows_per_language: PositiveInt = 132
     ordinary_max_new_tokens: PositiveInt = 512
     final_max_new_tokens: PositiveInt = 1024
+    evaluation_phase: Literal["search", "finalist"] = "search"
     schedule_seed: int = 20260811
     schedule_version: PositiveInt = 2
     schedule_capacity: PositiveInt = 1000

@@ -22,6 +22,8 @@ from .multilingual_search_evaluator import (
     MultilingualConstraintContract,
     MultilingualSearchEvaluator,
 )
+from .multilingual_final_holdout import load_final_holdout_archive
+from .multilingual_finalist_evaluator import MultilingualFinalistEvaluator
 from .multilingual_trial_evaluator import FrozenMultilingualTrialEvaluator
 from .trial_language_schedule import load_trial_language_schedule
 
@@ -159,15 +161,26 @@ def load_multilingual_worker_runtime(
         max_language_instability=float(contract.max_language_instability),
         max_category_instability=float(contract.max_category_instability),
     )
-    evaluator, manifest = load_multilingual_search_evaluator(
-        bundle=bundle,
-        runtime_root=contract.runtime_root,
-        model=model,
-        srg_scorer=scorer,
-        constraints=constraints,
-        expected_per_direction=contract.trial_rows_per_cell,
-        expected_languages=tuple(contract.languages),
-    )
+    if contract.evaluation_phase == "finalist":
+        evaluator, manifest = load_multilingual_finalist_evaluator(
+            bundle=bundle,
+            runtime_root=contract.runtime_root,
+            model=model,
+            srg_scorer=scorer,
+            constraints=constraints,
+            expected_languages=tuple(contract.languages),
+            final_max_new_tokens=contract.final_max_new_tokens,
+        )
+    else:
+        evaluator, manifest = load_multilingual_search_evaluator(
+            bundle=bundle,
+            runtime_root=contract.runtime_root,
+            model=model,
+            srg_scorer=scorer,
+            constraints=constraints,
+            expected_per_direction=contract.trial_rows_per_cell,
+            expected_languages=tuple(contract.languages),
+        )
     direction_profile, _ = load_direction_map_package(
         Path(contract.runtime_root).resolve() / "clean_map" / "directions"
     )
@@ -309,6 +322,89 @@ def load_multilingual_search_evaluator(
         ).hexdigest(),
         "schedule_trials": int(schedule_manifest["trials"]),
         "trial_rows": len(bundle.trial_rows),
+        "objectives": ["Removal", "Preservation loss"],
+        "constraints": evaluator.get_constraint_names(),
+    }
+    manifest["runtime_contract_sha256"] = _canonical_sha256(manifest)
+    return evaluator, manifest
+
+
+def load_multilingual_finalist_evaluator(
+    *,
+    bundle: MultilingualDatasetBundle,
+    runtime_root: str | Path,
+    model: Any,
+    srg_scorer: Any,
+    constraints: MultilingualConstraintContract,
+    expected_languages: tuple[str, ...] = ("en", "ru", "zh", "es", "fr"),
+    final_max_new_tokens: int = 1024,
+) -> tuple[MultilingualSearchEvaluator, dict[str, Any]]:
+    """Wire the all-translation trial pool and post-freeze R holdout."""
+
+    root = Path(runtime_root).resolve()
+    profile, direction_manifest = load_direction_map_package(
+        root / "clean_map" / "directions"
+    )
+    clean_manifest, clean_records = load_clean_reference_archive(
+        root / "clean_trial_reference"
+    )
+    final_manifest, final_records = load_final_holdout_archive(
+        root / "final_holdout_reference"
+    )
+    srg_profile_path = root / "srg_calibration" / "calibration_profile.json"
+    srg_profile = _load_profile(srg_profile_path)
+    if clean_manifest.get("dataset_contract_sha256") != bundle.manifest.get(
+        "contract_sha256"
+    ) or final_manifest.get("dataset_contract_sha256") != bundle.manifest.get(
+        "contract_sha256"
+    ):
+        raise ValueError("finalist reference dataset contract mismatch")
+    if clean_manifest.get("direction_sha256") != direction_manifest.get(
+        "package_sha256"
+    ):
+        raise ValueError("finalist direction contract mismatch")
+    expected_trial_ids = [row.row_id for row in bundle.trial_rows]
+    if [record.get("row_id") for record in clean_records] != expected_trial_ids:
+        raise ValueError("full trial reference order differs from trial pool")
+    expected_final_ids = [row.row_id for row in bundle.final_rows]
+    if [record.get("row_id") for record in final_records] != expected_final_ids:
+        raise ValueError("final-holdout reference order differs from R pool")
+    languages = tuple(language.lower() for language in expected_languages)
+    if not languages or len(bundle.trial_rows) % (2 * len(languages)):
+        raise ValueError("full trial pool cannot balance languages and directions")
+    expected_per_direction = len(bundle.trial_rows) // 2
+    runtime = MultilingualFinalistEvaluator(
+        model=model,
+        trial_rows=bundle.trial_rows,
+        clean_trial_records=clean_records,
+        final_rows=bundle.final_rows,
+        clean_final_records=final_records,
+        refusal_direction=profile.consensus_refusal_direction,
+        layer_reliability=profile.layer_reliability,
+        srg_scorer=srg_scorer,
+        srg_profile=srg_profile,
+        private_output_dir=root / "recheck" / "private_responses",
+        expected_per_direction=expected_per_direction,
+        expected_languages=languages,
+        final_max_new_tokens=final_max_new_tokens,
+    )
+    evaluator = MultilingualSearchEvaluator(runtime, constraints=constraints)
+    manifest: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "PASS",
+        "evaluation_phase": "finalist",
+        "dataset_contract_sha256": bundle.manifest["contract_sha256"],
+        "direction_package_sha256": direction_manifest["package_sha256"],
+        "clean_reference_contract_sha256": clean_manifest[
+            "archive_contract_sha256"
+        ],
+        "final_holdout_contract_sha256": final_manifest[
+            "archive_contract_sha256"
+        ],
+        "srg_profile_sha256": hashlib.sha256(srg_profile_path.read_bytes()).hexdigest(),
+        "trial_rows_per_finalist": len(bundle.trial_rows),
+        "final_holdout_rows": len(bundle.final_rows),
+        "final_max_new_tokens": int(final_max_new_tokens),
         "objectives": ["Removal", "Preservation loss"],
         "constraints": evaluator.get_constraint_names(),
     }

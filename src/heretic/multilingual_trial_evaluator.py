@@ -193,7 +193,10 @@ def evaluate_multilingual_trial(
         or unsafe_rows != expected_per_direction
         or len({row.row_id for row in ordered}) != len(ordered)
     ):
-        raise ValueError("trial must contain exactly 400 SAFE and 400 UNSAFE rows")
+        raise ValueError(
+            "trial direction coverage differs from the configured "
+            f"{expected_per_direction} SAFE and {expected_per_direction} UNSAFE rows"
+        )
     languages = tuple(language.lower() for language in expected_languages)
     if (
         not languages

@@ -1,8 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 import importlib.util
+import json
 import sys
+from argparse import Namespace
 from pathlib import Path
+from tempfile import TemporaryDirectory
+
+import optuna
+import pytest
+from optuna.storages import JournalStorage
+from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
+from optuna.trial import create_trial
 
 
 def load_recheck_module():
@@ -81,3 +90,192 @@ def test_near_keyword_gate_recovers_single_best_available_tier() -> None:
         "keyword_total": 136,
         "keyword_excess": 1,
     }
+
+
+def test_multilingual_prepare_freezes_top_six_and_finalist_phase() -> None:
+    with TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        dataset = root / "dataset"
+        dataset.mkdir()
+        files = {
+            f"srg_calibration_{language}.jsonl": {
+                "rows": 132,
+                "sha256": f"{index + 1:064x}",
+            }
+            for index, language in enumerate(("en", "ru", "zh", "es", "fr"))
+        }
+        (dataset / "manifest.json").write_text(
+            json.dumps({"files": files}), encoding="utf-8"
+        )
+        runtime = root / "runtime"
+        runtime.mkdir()
+        source_journal = root / "run" / "shared_tpe" / "checkpoints" / "source.jsonl"
+        source_journal.parent.mkdir(parents=True)
+        storage = JournalStorage(JournalFileBackend(
+            str(source_journal), lock_obj=JournalFileOpenLock(str(source_journal))
+        ))
+        source = optuna.create_study(
+            study_name="heretic", storage=storage, directions=["maximize", "minimize"]
+        )
+        settings = {
+            "model": "F:/models/example",
+            "multilingual_search": {
+                "enabled": True,
+                "dataset_root": dataset.as_posix(),
+                "runtime_root": runtime.as_posix(),
+                "evaluation_phase": "search",
+            },
+        }
+        source.set_user_attr("settings", json.dumps(settings))
+        source.set_user_attr("constraint_names", ["ppl"])
+        source.set_user_attr("finished", True)
+        for number in range(7):
+            removal = 0.9 - number * 0.05
+            loss = 0.02 + number * 0.01
+            cost = 0.8 - number * 0.01
+            source.add_trial(create_trial(
+                params={"x": float(number)},
+                distributions={"x": optuna.distributions.FloatDistribution(0.0, 10.0)},
+                values=[removal, loss],
+                user_attrs={
+                    "index": number + 1,
+                    "feasible": True,
+                    "constraints": [-0.1],
+                    "scores": [
+                        {"name": "Removal", "score": {"value": removal}},
+                        {"name": "Preservation loss", "score": {"value": loss}},
+                        {"name": "Cost↑", "score": {"value": cost}},
+                    ],
+                },
+            ))
+        config = root / "config.toml"
+        config.write_text(
+            'model = "F:/models/example"\n\n[multilingual_search]\n'
+            'enabled = true\ndataset_root = "' + dataset.as_posix() + '"\n'
+            'runtime_root = "' + runtime.as_posix() + '"\n',
+            encoding="utf-8",
+        )
+        output = root / "finalists"
+        args = Namespace(
+            source_journal=source_journal,
+            base_config=config,
+            output_dir=output,
+            top_n=6,
+            selection_policy="feasible_diverse",
+            trial_indices=None,
+            ppl_chunks=64,
+            ppl_window=1024,
+            devices=["0", "1"],
+            max_ppl_drift=0.005,
+            max_keywords=2,
+            keyword_total=136,
+            keyword_near_gate_extra=1,
+            balanced_srg_gate=None,
+            baseline_srg=None,
+            balanced_removal_fraction=0.8,
+        )
+
+        recheck.prepare(args)
+
+        manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+        config_data = recheck.tomllib.loads((output / "config.toml").read_text(encoding="utf-8"))
+        prepared = recheck.load_study(Path(manifest["journal"]))
+        assert manifest["contract"] == "multilingual_v3_full_recheck"
+        assert manifest["top_n"] == 6
+        assert (output / "top6_manifest.json").is_file()
+        assert config_data["multilingual_search"]["evaluation_phase"] == "finalist"
+        assert len(prepared.trials) == 6
+        assert all(trial.state == optuna.trial.TrialState.WAITING for trial in prepared.trials)
+
+
+def test_multilingual_trial_metrics_use_full_pool_and_independent_r() -> None:
+    trial = create_trial(
+        values=[0.7, 0.2],
+        user_attrs={
+            "recheck_source_trial_number": 123,
+            "recheck_source_trial_index": 124,
+            "feasible": True,
+            "constraints": [-0.1, -0.2],
+            "scores": [{
+                "name": "Removal",
+                "score": {
+                    "value": 0.7,
+                    "diagnostics": {
+                        "metrics": {
+                            "removal": 0.7,
+                            "preservation_loss": 0.2,
+                            "safe_ppl_drift": 0.03,
+                            "safe_geometry_drift": 0.04,
+                        },
+                        "diagnostics": {
+                            "srg_groups": {
+                                "worst_language": 0.61,
+                                "worst_category": 0.52,
+                            },
+                            "final_holdout": {
+                                "removal": 0.66,
+                                "groups": {
+                                    "worst_language": 0.57,
+                                    "worst_category": 0.49,
+                                },
+                            },
+                        },
+                    },
+                },
+            }],
+        },
+    )
+
+    row = recheck.multilingual_trial_metrics(trial)
+
+    assert row["trial_number"] == trial.number
+    assert row["source_trial_number"] == 123
+    assert row["source_trial_index"] == 124
+    assert row["removal"] == 0.7
+    assert row["safe_ppl_drift"] == 0.03
+    assert row["final_holdout_removal"] == 0.66
+    assert row["worst_language"] == 0.57
+    assert row["worst_category"] == 0.49
+
+
+def test_final_holdout_prepare_command_is_bound_to_frozen_top_six() -> None:
+    manifest = {
+        "config": "F:/run/config.toml",
+        "top_six_manifest": "F:/run/top6_manifest.json",
+    }
+    command = recheck.final_holdout_prepare_command(
+        Path("F:/bin/hereticMOE.exe"),
+        manifest,
+        Path("F:/run/runtime"),
+        "1",
+    )
+
+    assert command == [
+        "F:\\bin\\hereticMOE.exe",
+        "prepare-final-holdout",
+        "--config",
+        "F:/run/config.toml",
+        "--runtime-root",
+        "F:\\run\\runtime",
+        "--top-six-manifest",
+        "F:/run/top6_manifest.json",
+        "--device",
+        "1",
+    ]
+
+
+def test_existing_final_holdout_must_match_current_top_six(tmp_path: Path) -> None:
+    top_six = tmp_path / "top6_manifest.json"
+    reference = tmp_path / "final_holdout_reference" / "manifest.json"
+    top_six.write_text(
+        json.dumps({"status": "FROZEN", "shortlist_contract_sha256": "a" * 64}),
+        encoding="utf-8",
+    )
+    reference.parent.mkdir()
+    reference.write_text(
+        json.dumps({"status": "PASS", "top_six_contract_sha256": "b" * 64}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="TOP-6"):
+        recheck.validate_final_holdout_reference(reference, top_six)

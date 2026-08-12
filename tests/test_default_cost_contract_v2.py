@@ -78,6 +78,11 @@ def test_all_adaptive_profiles_use_calibrated_cost() -> None:
         with profile.open("rb") as stream:
             config = tomllib.load(stream)
         validate_adaptive_cost_contract(config, source=profile)
+        multilingual = config.get("multilingual_search")
+        if isinstance(multilingual, dict) and multilingual.get("enabled"):
+            assert "selection_score_targets" not in config
+            assert "selection_score_weights" not in config
+            continue
         assert config["selection_score_targets"] == EXPECTED_TARGETS
         assert config["selection_score_weights"] == EXPECTED_WEIGHTS
 

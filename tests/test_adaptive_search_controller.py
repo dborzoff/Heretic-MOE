@@ -2,6 +2,7 @@
 
 import importlib.util
 import io
+import json
 import sys
 import unittest
 from argparse import Namespace
@@ -527,6 +528,33 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
             config["multilingual_search"]["runtime_root"],
             (root / "runtime").as_posix(),
         )
+
+    def test_load_valid_winners_report_accepts_multilingual_v3(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "winners.json"
+            report = {
+                "status": "PASS",
+                "contract": "multilingual_v3_full_recheck",
+                "winners": {
+                    "Balanced": {
+                        "trial_number": 2,
+                        "source_trial_index": 403,
+                        "source_trial_number": 402,
+                    },
+                    "Max": {
+                        "trial_number": 4,
+                        "source_trial_index": 542,
+                        "source_trial_number": 541,
+                    },
+                },
+                "winners_distinct": True,
+                "measured": [{"source_trial_number": 402}, {"source_trial_number": 541}],
+            }
+            path.write_text(json.dumps(report), encoding="utf-8")
+
+            loaded = controller.load_valid_winners_report(path)
+
+        self.assertEqual(loaded, report)
 
 
 if __name__ == "__main__":
