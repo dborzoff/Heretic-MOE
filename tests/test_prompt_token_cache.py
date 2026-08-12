@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from torch import nn
 
+from heretic.generation_batch_selection import GenerationBatchProbe
 from heretic.model import Model
 from heretic.utils import Prompt
 
@@ -183,3 +185,247 @@ def test_batched_artifact_progress_reports_completed_rows() -> None:
     )
 
     assert progress == [(2, 5, 2), (4, 5, 2), (5, 5, 2)]
+
+
+def test_compiled_batch_autotune_measures_every_eight_rows_to_40() -> None:
+    wrapper = _wrapper()
+    wrapper.settings.generation_backend = "compiled_static"
+    wrapper.settings.max_batch_size = 256
+    wrapper.settings.generation_batch_probe_start = 8
+    wrapper.settings.generation_batch_granularity = 8
+    wrapper.settings.batch_size_vram_headroom_fraction = 0.05
+    wrapper.settings.batch_size_vram_headroom_gib = 1.0
+    wrapper.settings.generation_batch_target_headroom_fraction = 0.10
+    prompts = [Prompt(system="", user=f"row-{index}") for index in range(80)]
+    gib = 1024**3
+    probes = {
+        8: GenerationBatchProbe(8, int(9.5 * gib), 24 * gib, 15 * gib),
+        16: GenerationBatchProbe(16, 8 * gib, 24 * gib, 16 * gib),
+        24: GenerationBatchProbe(24, 6 * gib, 24 * gib, 18 * gib),
+        32: GenerationBatchProbe(32, 4 * gib, 24 * gib, 20 * gib),
+        40: GenerationBatchProbe(40, int(1.7 * gib), 24 * gib, int(22.3 * gib)),
+    }
+    calls: list[int] = []
+
+    def probe(_prompts, batch_size):
+        calls.append(batch_size)
+        return probes[batch_size]
+
+    wrapper._probe_generation_batch = probe
+    result = wrapper.autotune_generation_batch_size(prompts, expected_rows=800)
+
+    assert calls == [8, 16, 24, 32, 40]
+    assert result["status"] == "PASS"
+    assert result["batch_size"] == 40
+    assert wrapper._adaptive_generation_batch_size == 40
+
+
+def test_batch_autotune_is_memory_only_even_when_trial_has_a_tail() -> None:
+    wrapper = _wrapper()
+    wrapper.settings.generation_backend = "compiled_static"
+    wrapper.settings.max_batch_size = 8
+    wrapper.settings.generation_batch_probe_start = 8
+    wrapper.settings.generation_batch_granularity = 8
+    wrapper.settings.batch_size_vram_headroom_fraction = 0.05
+    wrapper.settings.batch_size_vram_headroom_gib = 1.0
+    wrapper.settings.generation_batch_target_headroom_fraction = 0.10
+    gib = 1024**3
+    wrapper._probe_generation_batch = lambda _prompts, _batch: GenerationBatchProbe(
+        8,
+        8 * gib,
+        24 * gib,
+        16 * gib,
+    )
+
+    def reject_generation(*_args, **_kwargs):
+        raise AssertionError("autotune must not run a full response generation")
+
+    wrapper.get_response_artifacts_with_prefill_residuals = reject_generation
+
+    result = wrapper.autotune_generation_batch_size(
+        [Prompt(system="", user="row")],
+        expected_rows=803,
+    )
+
+    assert result["batch_size"] == 8
+
+
+def test_batch_autotune_backs_off_below_probe_start_when_reserve_is_too_low() -> None:
+    wrapper = _wrapper()
+    wrapper.settings.generation_backend = "compiled_static"
+    wrapper.settings.max_batch_size = 256
+    wrapper.settings.generation_batch_probe_start = 8
+    wrapper.settings.generation_batch_granularity = 8
+    wrapper.settings.batch_size_vram_headroom_fraction = 0.05
+    wrapper.settings.batch_size_vram_headroom_gib = 1.0
+    wrapper.settings.generation_batch_target_headroom_fraction = 0.10
+    gib = 1024**3
+    probes = {
+        8: GenerationBatchProbe(8, int(0.8 * gib), 24 * gib, 23 * gib),
+        4: GenerationBatchProbe(4, int(0.9 * gib), 24 * gib, 22 * gib),
+        2: GenerationBatchProbe(2, 3 * gib, 24 * gib, 21 * gib),
+    }
+    calls: list[int] = []
+
+    def probe(_prompts, batch_size):
+        calls.append(batch_size)
+        return probes[batch_size]
+
+    wrapper._probe_generation_batch = probe
+
+    result = wrapper.autotune_generation_batch_size(
+        [Prompt(system="", user="row")],
+        expected_rows=800,
+    )
+
+    assert calls == [8, 4, 2]
+    assert result["batch_size"] == 2
+
+
+def test_memory_probe_presizes_cache_for_full_trial_but_decodes_one_token(
+    monkeypatch,
+) -> None:
+    wrapper = _wrapper()
+    wrapper.settings.generation_backend = "compiled_static"
+    wrapper.settings.generation_prompt_bucket_multiple = 64
+    wrapper.settings.max_response_length = 100
+    wrapper.settings.generation_batch_recovery_tolerance_mib = 256
+    wrapper.model.generation_config = SimpleNamespace(max_length=262144)
+    prompts = [Prompt(system="", user="short") for _index in range(8)]
+    calls: list[dict[str, object]] = []
+
+    def generate(prompts, **kwargs):
+        calls.append(
+            {
+                "rows": len(prompts),
+                "model_max_length": wrapper.model.generation_config.max_length,
+                **kwargs,
+            }
+        )
+        inputs = {"input_ids": torch.zeros((len(prompts), 64), dtype=torch.long)}
+        outputs = torch.ones((len(prompts), 65), dtype=torch.long)
+        return inputs, outputs
+
+    wrapper.generate = generate
+    gib = 1024**3
+    snapshots = iter(
+        [
+            (20 * gib, 24 * gib, 0),
+            (8 * gib, 24 * gib, 16 * gib),
+            (20 * gib, 24 * gib, 0),
+        ]
+    )
+    wrapper._cuda_memory_snapshot = lambda: next(snapshots)
+    wrapper.model._cache = object()
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+
+    probe = wrapper._probe_generation_batch(prompts, 8)
+
+    assert calls == [
+        {
+            "rows": 8,
+            "model_max_length": None,
+            "max_new_tokens": 1,
+            "cache_implementation": "static",
+            "max_cache_len": 164,
+            "disable_compile": True,
+        }
+    ]
+    assert probe.batch_size == 8
+    assert probe.baseline_free_bytes == 20 * gib
+    assert probe.recovered_free_bytes == 20 * gib
+    assert wrapper.model._cache is None
+    assert wrapper.model.generation_config.max_length == 262144
+
+
+def test_memory_probe_uses_longest_cached_prompts() -> None:
+    wrapper = _wrapper()
+    wrapper.settings.generation_backend = "compiled_static"
+    wrapper.settings.max_response_length = 100
+    wrapper.settings.generation_batch_recovery_tolerance_mib = 256
+    prompts = [
+        Prompt(system="", user="short"),
+        Prompt(system="", user="long"),
+    ]
+    wrapper.prepare_prompt_cache(prompts)
+    calls: list[int] = []
+
+    def generate(_prompts, **kwargs):
+        calls.append(int(kwargs["max_cache_len"]))
+        return {"input_ids": torch.zeros((1, 2), dtype=torch.long)}, torch.ones(
+            (1, 3), dtype=torch.long
+        )
+
+    wrapper.generate = generate
+    wrapper._cuda_memory_snapshot = lambda: (20 * 1024**3, 24 * 1024**3, 0)
+    wrapper._release_generation_probe_cache = lambda: None
+    original_reset = torch.cuda.reset_peak_memory_stats
+    original_synchronize = torch.cuda.synchronize
+    try:
+        torch.cuda.reset_peak_memory_stats = lambda: None
+        torch.cuda.synchronize = lambda: None
+        wrapper._probe_generation_batch(prompts, 1)
+    finally:
+        torch.cuda.reset_peak_memory_stats = original_reset
+        torch.cuda.synchronize = original_synchronize
+
+    assert calls == [102]
+
+
+def test_memory_probe_rechecks_recovery_before_reraising_oom(monkeypatch) -> None:
+    wrapper = _wrapper()
+    wrapper.settings.generation_backend = "compiled_static"
+    wrapper.settings.max_response_length = 100
+    wrapper.settings.generation_batch_recovery_tolerance_mib = 256
+    prompts = [Prompt(system="", user="row")]
+    gib = 1024**3
+    snapshots = iter(
+        [
+            (20 * gib, 24 * gib, 0),
+            (20 * gib, 24 * gib, 0),
+        ]
+    )
+    releases: list[bool] = []
+
+    def oom(*_args, **_kwargs):
+        raise torch.OutOfMemoryError("probe oom")
+
+    wrapper.generate = oom
+    wrapper._cuda_memory_snapshot = lambda: next(snapshots)
+    wrapper._release_generation_probe_cache = lambda: releases.append(True)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+
+    with pytest.raises(torch.OutOfMemoryError, match="probe oom"):
+        wrapper._probe_generation_batch(prompts, 8)
+
+    assert releases == [True, True]
+
+
+def test_memory_probe_reports_leaked_cache_instead_of_hiding_it_as_oom(
+    monkeypatch,
+) -> None:
+    wrapper = _wrapper()
+    wrapper.settings.generation_backend = "compiled_static"
+    wrapper.settings.max_response_length = 100
+    wrapper.settings.generation_batch_recovery_tolerance_mib = 256
+    prompts = [Prompt(system="", user="row")]
+    gib = 1024**3
+    snapshots = iter(
+        [
+            (20 * gib, 24 * gib, 0),
+            (19 * gib, 24 * gib, 0),
+        ]
+    )
+
+    def oom(*_args, **_kwargs):
+        raise torch.OutOfMemoryError("probe oom")
+
+    wrapper.generate = oom
+    wrapper._cuda_memory_snapshot = lambda: next(snapshots)
+    wrapper._release_generation_probe_cache = lambda: None
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+
+    with pytest.raises(RuntimeError, match="did not release its CUDA cache"):
+        wrapper._probe_generation_batch(prompts, 8)

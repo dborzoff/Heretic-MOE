@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2025-2026  Philipp Emanuel Weidmann <pew@worldwidemann.com> + contributors
 
+import gc
 import math
 from collections.abc import Callable, Sequence
 from contextlib import suppress
@@ -34,6 +35,10 @@ from transformers.generation import (
 )
 
 from .config import GenerationBackend, QuantizationMethod, RowNormalization, Settings
+from .generation_batch_selection import (
+    GenerationBatchProbe,
+    next_batch_candidate,
+)
 from .system import empty_cache
 from .teacher_forced import per_row_conditional_nll
 from .utils import Prompt, batchify, format_exception, print
@@ -1435,6 +1440,176 @@ class Model:
             "status": "PASS",
             "batch_size": batch_size,
             "shapes": [[size, width] for size, width, _sample in shapes],
+        }
+
+    def _probe_generation_batch(
+        self,
+        prompts: Sequence[Prompt],
+        batch_size: int,
+    ) -> GenerationBatchProbe:
+        prompt_rows = self._cached_prompt_token_ids(prompts)
+        longest = sorted(
+            range(len(prompts)),
+            key=lambda index: int(prompt_rows[index].numel()),
+            reverse=True,
+        )
+        sample = [
+            prompts[longest[index % len(longest)]] for index in range(batch_size)
+        ]
+        widths = [int(row.numel()) for row in self._cached_prompt_token_ids(sample)]
+        width = max(widths)
+        bucket_multiple = int(
+            getattr(self.settings, "generation_prompt_bucket_multiple", 0)
+        )
+        if bucket_multiple > 0:
+            width = math.ceil(width / bucket_multiple) * bucket_multiple
+        self._release_generation_probe_cache()
+        baseline_free, baseline_total, _baseline_peak = self._cuda_memory_snapshot()
+        torch.cuda.reset_peak_memory_stats()
+        inputs = outputs = None
+        measured_free = measured_total = measured_peak = 0
+        generation_config = getattr(self.model, "generation_config", None)
+        configured_max_length = (
+            getattr(generation_config, "max_length", None)
+            if generation_config is not None
+            else None
+        )
+        probe_error: BaseException | None = None
+        try:
+            if generation_config is not None:
+                generation_config.max_length = None
+            inputs, outputs = self.generate(
+                sample,
+                max_new_tokens=1,
+                cache_implementation="static",
+                max_cache_len=width + int(self.settings.max_response_length),
+                disable_compile=True,
+            )
+            torch.cuda.synchronize()
+            measured_free, measured_total, measured_peak = self._cuda_memory_snapshot()
+        except BaseException as error:
+            probe_error = error
+        finally:
+            if generation_config is not None:
+                generation_config.max_length = configured_max_length
+            del inputs, outputs
+            self._release_generation_probe_cache()
+        recovered_free, recovered_total, _recovered_peak = self._cuda_memory_snapshot()
+        if baseline_total != recovered_total or (
+            probe_error is None and baseline_total != measured_total
+        ):
+            raise RuntimeError("CUDA device memory total changed during batch probe")
+        tolerance = int(
+            getattr(self.settings, "generation_batch_recovery_tolerance_mib", 256)
+        ) * 1024**2
+        if recovered_free + tolerance < baseline_free:
+            leaked = (baseline_free - recovered_free) / 1024**2
+            raise RuntimeError(
+                "generation batch probe did not release its CUDA cache "
+                f"({leaked:.0f} MiB still resident)"
+            )
+        if probe_error is not None:
+            raise probe_error.with_traceback(probe_error.__traceback__)
+        return GenerationBatchProbe(
+            batch_size=batch_size,
+            free_bytes=int(measured_free),
+            total_bytes=int(measured_total),
+            peak_allocated_bytes=int(measured_peak),
+            baseline_free_bytes=int(baseline_free),
+            recovered_free_bytes=int(recovered_free),
+        )
+
+    def _release_generation_probe_cache(self) -> None:
+        for module in self.model.modules():
+            if "_cache" in vars(module):
+                module._cache = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+    @staticmethod
+    def _cuda_memory_snapshot() -> tuple[int, int, int]:
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        return int(free_bytes), int(total_bytes), int(torch.cuda.max_memory_allocated())
+
+    def autotune_generation_batch_size(
+        self,
+        prompts: Sequence[Prompt],
+        *,
+        expected_rows: int,
+    ) -> dict[str, object]:
+        """Choose a resident batch with isolated fixed-step VRAM probes."""
+
+        if not prompts or expected_rows <= 0:
+            raise ValueError("generation autotune requires prompts and rows")
+        maximum = min(int(self.settings.max_batch_size), expected_rows)
+        granularity = int(self.settings.generation_batch_granularity)
+        candidate = min(int(self.settings.generation_batch_probe_start), maximum)
+        candidate = max(1, candidate)
+        probes: list[GenerationBatchProbe] = []
+        best: GenerationBatchProbe | None = None
+        while candidate <= maximum:
+            try:
+                probe = self._probe_generation_batch(prompts, candidate)
+            except BaseException as error:
+                if not self._is_cuda_oom(error):
+                    raise
+                self._release_failed_cuda_batch()
+                if best is None and candidate > 1:
+                    candidate = max(1, candidate // 2)
+                    continue
+                break
+            probes.append(probe)
+            hard_reserve = max(
+                int(float(self.settings.batch_size_vram_headroom_gib) * 1024**3),
+                int(
+                    float(self.settings.batch_size_vram_headroom_fraction)
+                    * probe.total_bytes
+                ),
+            )
+            if probe.free_bytes < hard_reserve:
+                if best is None and candidate > 1:
+                    candidate = max(1, candidate // 2)
+                    continue
+                break
+            best = probe
+            if candidate < int(self.settings.generation_batch_probe_start):
+                break
+            preferred_reserve = max(
+                hard_reserve,
+                int(
+                    float(self.settings.generation_batch_target_headroom_fraction)
+                    * probe.total_bytes
+                ),
+            )
+            next_candidate = next_batch_candidate(
+                current_batch_size=probe.batch_size,
+                current_free_bytes=probe.free_bytes,
+                required_free_bytes=preferred_reserve,
+                maximum_batch_size=maximum,
+                granularity=granularity,
+            )
+            if next_candidate is None or next_candidate <= candidate:
+                break
+            candidate = next_candidate
+        if best is None:
+            raise RuntimeError(
+                "no generation batch candidate satisfies the CUDA VRAM reserve"
+            )
+        self._adaptive_generation_batch_size = best.batch_size
+        return {
+            "status": "PASS",
+            "batch_size": best.batch_size,
+            "probes": [
+                {
+                    "batch_size": probe.batch_size,
+                    "free_gib": probe.free_bytes / 1024**3,
+                    "baseline_free_gib": probe.baseline_free_bytes / 1024**3,
+                    "recovered_free_gib": probe.recovered_free_bytes / 1024**3,
+                    "peak_allocated_gib": probe.peak_allocated_bytes / 1024**3,
+                }
+                for probe in probes
+            ],
         }
 
     def get_responses_with_prefill_residuals_batched(

@@ -899,14 +899,38 @@ def run():
         evaluator = Evaluator(settings, model)
 
     if multilingual_worker_runtime is not None and not direct_trial_save:
+        resident_prompts = [
+            Prompt(system="", user=row.prompt)
+            for row in multilingual_worker_runtime.bundle.trial_rows
+        ]
+        resident_rows = 2 * settings.multilingual_search.trial_rows_per_cell
+        if settings.batch_size == 0:
+            print()
+            print("Selecting resident generation batch from VRAM...")
+            tuning = model.autotune_generation_batch_size(
+                resident_prompts,
+                expected_rows=resident_rows,
+            )
+            for probe in tuning["probes"]:
+                print(
+                    "* VRAM probe: "
+                    f"batch [bold]{probe['batch_size']}[/], "
+                    f"free [bold]{probe['free_gib']:.2f}[/] GiB, "
+                    f"recovered [bold]{probe['recovered_free_gib']:.2f}[/] GiB"
+                )
+            print(
+                "* Resident batch selected: "
+                f"[bold]{tuning['batch_size']}[/] "
+                "(target corridor "
+                f"{settings.batch_size_vram_headroom_fraction * 100:.0f}-"
+                f"{settings.generation_batch_target_headroom_fraction * 100:.0f}% "
+                "free VRAM)"
+            )
         print()
         print("Prewarming resident generation backend...")
         prewarm = model.prewarm_generation_backend(
-            [
-                Prompt(system="", user=row.prompt)
-                for row in multilingual_worker_runtime.bundle.trial_rows
-            ],
-            expected_rows=2 * settings.multilingual_search.trial_rows_per_cell,
+            resident_prompts,
+            expected_rows=resident_rows,
         )
         if prewarm["status"] == "PASS":
             shapes = ", ".join(

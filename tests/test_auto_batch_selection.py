@@ -42,7 +42,12 @@ def test_multilingual_profile_uses_auto_batch_and_100_token_contract():
     )
 
     assert profile["batch_size"] == 0
-    assert profile["max_batch_size"] == 32
+    assert profile["max_batch_size"] == 4096
+    assert profile["generation_batch_probe_start"] == 8
+    assert profile["generation_batch_granularity"] == 8
+    assert profile["batch_size_vram_headroom_fraction"] == 0.05
+    assert profile["batch_size_vram_headroom_gib"] == 0.0
+    assert profile["generation_batch_target_headroom_fraction"] == 0.10
     assert profile["max_response_length"] == 100
     assert profile["generation_backend"] == "compiled_static"
     assert profile["generation_prompt_bucket_multiple"] == 64

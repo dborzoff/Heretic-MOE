@@ -404,6 +404,34 @@ class Settings(BaseSettings):
         description="torch.compile mode used by compiled_static generation.",
     )
 
+    generation_batch_probe_start: PositiveInt = Field(
+        default=8,
+        description="First candidate used by compiled resident batch autotuning.",
+    )
+
+    generation_batch_granularity: PositiveInt = Field(
+        default=8,
+        description="Memory-only batch probes advance by this many rows.",
+    )
+
+    generation_batch_target_headroom_fraction: float = Field(
+        default=0.10,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Preferred free-VRAM fraction where fixed-step probing stops; the "
+            "hard batch_size_vram_headroom reserve remains the safety floor."
+        ),
+    )
+
+    generation_batch_recovery_tolerance_mib: NonNegativeInt = Field(
+        default=256,
+        description=(
+            "Maximum tolerated free-VRAM difference after releasing one "
+            "memory-only generation probe."
+        ),
+    )
+
     max_batch_size: PositiveInt = Field(
         default=4096,
         description="Maximum batch size to try when automatically determining the optimal batch size.",
