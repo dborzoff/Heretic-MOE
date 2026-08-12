@@ -267,7 +267,6 @@ class Settings(BaseSettings):
 
     multilingual_search: MultilingualSearchSettings = Field(
         default_factory=MultilingualSearchSettings,
-        exclude=True,
         description=(
             "Private frozen input contract for multilingual Heretic-MOE search v3."
         ),

@@ -99,6 +99,24 @@ class SearchSettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "dataset_root"):
             MultilingualSearchSettings(enabled=True)
 
+    def test_multilingual_search_contract_survives_journal_serialization(self) -> None:
+        settings = Settings(
+            model="example/model",
+            multilingual_search={
+                "enabled": True,
+                "dataset_root": "F:/datasets/heretic_moe_5lang_v1",
+                "runtime_root": "F:/runs/model-v3/runtime",
+            },
+        )
+
+        restored = Settings.model_validate_json(settings.model_dump_json())
+
+        self.assertTrue(restored.multilingual_search.enabled)
+        self.assertEqual(
+            restored.multilingual_search.runtime_root,
+            "F:/runs/model-v3/runtime",
+        )
+
     def test_multilingual_search_rejects_duplicate_languages(self) -> None:
         with self.assertRaisesRegex(ValidationError, "languages"):
             MultilingualSearchSettings(
