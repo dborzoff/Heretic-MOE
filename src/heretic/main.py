@@ -376,9 +376,7 @@ def run():
             f"[cyan]█░█░█▀▀░█▀▄░█▀▀░▀█▀░█░█▀▀[/]  "
             f"[bold cyan]HereticMOE[/] v{version('heretic-llm')}"
         )
-        print(
-            "[cyan]█▀█░█▀▀░█▀▄░█▀▀░░█░░█░█░░[/]  Adaptive multi-GPU search"
-        )
+        print("[cyan]█▀█░█▀▀░█▀▄░█▀▀░░█░░█░█░░[/]  Adaptive multi-GPU search")
         print(
             "[cyan]▀░▀░▀▀▀░▀░▀░▀▀▀░░▀░░▀░▀▀▀[/]  "
             "[blue underline]https://github.com/dborzoff/Heretic-MOE[/]"
@@ -672,6 +670,14 @@ def run():
             settings,
             model,
         )
+        prompt_cache_stats = getattr(model, "_last_prompt_cache_stats", None)
+        if prompt_cache_stats:
+            print(
+                "* Pretokenized trial cache: "
+                f"[bold]{prompt_cache_stats['requested_rows']}[/] rows, "
+                f"[bold]{prompt_cache_stats['tokens']}[/] tokens, "
+                f"pinned=[bold]{str(bool(prompt_cache_stats['pinned'])).lower()}[/]"
+            )
         good_prompts = [
             Prompt(system="", user=row.prompt)
             for row in multilingual_worker_runtime.bundle.direction_rows
@@ -701,7 +707,7 @@ def run():
         bad_prompts = load_prompts(settings, settings.bad_prompts)
         print(f"* [bold]{len(bad_prompts)}[/] prompts loaded")
 
-    if settings.batch_size == 0:
+    if settings.batch_size == 0 and not settings.multilingual_search.enabled:
         print()
         print("Determining optimal batch size...")
         print(
@@ -763,10 +769,11 @@ def run():
                     f"[bold]{required_bytes / gib:.1f}[/] GiB required"
                 )
 
-            status = "[green]Ok[/]" if headroom_ok else "[yellow]Insufficient headroom[/]"
+            status = (
+                "[green]Ok[/]" if headroom_ok else "[yellow]Insufficient headroom[/]"
+            )
             print(
-                f"{status} ([bold]{performance:.0f}[/] tokens/s"
-                f"{headroom_description})"
+                f"{status} ([bold]{performance:.0f}[/] tokens/s{headroom_description})"
             )
 
             if not headroom_ok:
@@ -814,7 +821,7 @@ def run():
         settings.batch_size = best_batch_size
         print(f"* Chosen batch size: [bold]{settings.batch_size}[/]")
 
-    if settings.response_prefix is None:
+    if settings.response_prefix is None and not settings.multilingual_search.enabled:
         print()
         print("Checking for common response prefix...")
         prefix_check_prompts = good_prompts[:100] + bad_prompts[:100]
@@ -852,6 +859,12 @@ def run():
                     break
         else:
             print("* None found")
+
+    if settings.multilingual_search.enabled and settings.response_prefix is None:
+        # Prefix probing would add 200 unnecessary autoregressive generations
+        # before every resident worker starts. The frozen multilingual evaluator
+        # compares complete responses and does not require prefix alignment.
+        settings.response_prefix = ""
 
     # A non-interactive save of an explicit completed trial does not need any
     # scorer.  Historically it followed the normal optimization path, which
@@ -892,8 +905,7 @@ def run():
         print("[bold]Metrics:[/]")
         for score_name, score in evaluator.get_scores():
             print(
-                f"  * {_display_score_name(score_name)}: "
-                f"[bold]{score.rich_display}[/]"
+                f"  * {_display_score_name(score_name)}: [bold]{score.rich_display}[/]"
             )
         return
 
@@ -934,7 +946,9 @@ def run():
     else:
         print("Calculating per-layer residual directions...")
 
-        needs_full_residuals = settings.print_residual_geometry or settings.plot_residuals
+        needs_full_residuals = (
+            settings.print_residual_geometry or settings.plot_residuals
+        )
 
         if needs_full_residuals:
             print("* Obtaining residuals for good prompts...")
@@ -1138,9 +1152,7 @@ def run():
             # Match component meaning rather than exact keys. Splitting components
             # here must not change the bounds of unchanged keys on other models.
             max_weight_lower_bound = (
-                -0.25
-                if component.startswith("mlp.") or "linear" in component
-                else 0.8
+                -0.25 if component.startswith("mlp.") or "linear" in component else 0.8
             )
             max_weight = max(
                 0.0,
@@ -1181,9 +1193,7 @@ def run():
         trial.set_user_attr("component_enabled", component_enabled)
 
         worker_label = (
-            ""
-            if supervised
-            else os.environ.get("HERETIC_WORKER_LABEL", "").strip()
+            "" if supervised else os.environ.get("HERETIC_WORKER_LABEL", "").strip()
         )
         worker_prefix = f"[bold cyan]{worker_label}[/] | " if worker_label else ""
         print()
@@ -1212,17 +1222,14 @@ def run():
             response_archive_id=trial.number,
             residual_capture=(
                 geometry_session.capture_evaluation
-                if geometry_session is not None
-                and settings.geometry_capture_evaluation
+                if geometry_session is not None and settings.geometry_capture_evaluation
                 else None
             ),
         )
         objective_values = evaluator.get_objective_values(scores)
         constraint_values = evaluator.get_constraint_values(scores)
         record_trial_constraints(trial, constraint_values)
-        trial.set_user_attr(
-            "feasible", all(value <= 0 for value in constraint_values)
-        )
+        trial.set_user_attr("feasible", all(value <= 0 for value in constraint_values))
 
         print("  * Metrics:")
         for name, score in scores:
@@ -1306,9 +1313,7 @@ def run():
                     "coordinate_status": geometry_entry["coordinate_status"],
                     "sha256": geometry_entry["sha256"],
                     "evaluation_count": geometry_entry.get("evaluation_count", 0),
-                    "retained_shift_ratio": geometry_entry[
-                        "retained_shift_ratio"
-                    ],
+                    "retained_shift_ratio": geometry_entry["retained_shift_ratio"],
                 },
             )
             print(
@@ -1334,9 +1339,7 @@ def run():
     primary_objective_index = 0
     if settings.primary_objective is not None:
         try:
-            primary_objective_index = objective_names.index(
-                settings.primary_objective
-            )
+            primary_objective_index = objective_names.index(settings.primary_objective)
         except ValueError as error:
             raise ValueError(
                 "primary_objective must match one configured objective name; "
@@ -1352,9 +1355,7 @@ def run():
 
     if settings.leaderboard_size > 0:
 
-        def print_live_leaderboard(
-            study: Study, completed_trial: FrozenTrial
-        ) -> None:
+        def print_live_leaderboard(study: Study, completed_trial: FrozenTrial) -> None:
             del completed_trial
             ranked = candidate_trials(
                 study.trials,
@@ -2236,7 +2237,6 @@ def run():
                         print(f"[red]Error: {formatted}[/]")
 
 
-
 def report_bound_pressure(study, threshold: float = 0.05) -> None:
     """Warn when Pareto-front trials crowd a search bound.
 
@@ -2280,11 +2280,12 @@ def report_bound_pressure(study, threshold: float = 0.05) -> None:
     print()
     print("[bold yellow]Pareto-front trials are crowding the search bounds:[/]")
     for name, side, bound, n, total in pressed:
-        print(f"  * [bold]{name}[/]: {n} of {total} front trials are near the "
-              f"{side} bound ({bound:.3f})")
+        print(
+            f"  * [bold]{name}[/]: {n} of {total} front trials are near the "
+            f"{side} bound ({bound:.3f})"
+        )
     print("  The optimum may lie outside the search space.")
-    print("  Widen the bounds and restart from these points "
-          "(--seed-trials-from).")
+    print("  Widen the bounds and restart from these points (--seed-trials-from).")
 
 
 def main():

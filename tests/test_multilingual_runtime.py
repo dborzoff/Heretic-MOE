@@ -201,11 +201,12 @@ def test_multilingual_mode_cannot_fall_back_to_legacy_136_objectives(tmp_path: P
 
     apply_multilingual_search_mode(settings)
 
-    assert settings.max_response_length == 512
+    assert settings.max_response_length == 100
     assert settings.primary_objective == "Removal"
     assert settings.selection_policy == SelectionPolicy.FEASIBLE_DIVERSE
     assert settings.selection_score_targets == {}
     assert settings.selection_score_weights == {}
+    assert settings.response_prefix == ""
 
 
 def test_srg_runtime_contract_uses_only_pinned_660_files(tmp_path: Path) -> None:

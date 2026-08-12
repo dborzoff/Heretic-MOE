@@ -235,8 +235,8 @@ class MultilingualSearchSettings(BaseModel):
     direction_rows_per_cell: PositiveInt = 1000
     trial_rows_per_cell: PositiveInt = 400
     calibration_rows_per_language: PositiveInt = 132
-    ordinary_max_new_tokens: PositiveInt = 512
-    final_max_new_tokens: PositiveInt = 1024
+    ordinary_max_new_tokens: PositiveInt = 100
+    final_max_new_tokens: PositiveInt = 100
     evaluation_phase: Literal["search", "finalist"] = "search"
     schedule_seed: int = 20260811
     schedule_version: PositiveInt = 2
@@ -396,6 +396,15 @@ class Settings(BaseSettings):
             "Batch size for per-layer residual extraction (0 = use batch_size). "
             "Set this below the generation batch size when hidden-state capture "
             "needs additional VRAM headroom."
+        ),
+    )
+
+    conditional_nll_batch_size: NonNegativeInt = Field(
+        default=0,
+        description=(
+            "Batch size for teacher-forced conditional NLL (0 = tune it "
+            "independently on first use). NLL and autoregressive generation "
+            "have different memory profiles, so sharing one fixed batch wastes VRAM."
         ),
     )
 

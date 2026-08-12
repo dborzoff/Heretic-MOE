@@ -130,12 +130,27 @@ class Model:
     # Original weights of fused-expert MoE tensors, cached to keep abliteration reversible.
     _fused_experts_cache: dict[int, tuple[torch.nn.Parameter, Tensor]]
 
+    @staticmethod
+    def _is_cuda_oom(error: BaseException) -> bool:
+        return isinstance(error, torch.OutOfMemoryError) or (
+            isinstance(error, RuntimeError) and "out of memory" in str(error).lower()
+        )
+
+    @staticmethod
+    def _release_failed_cuda_batch() -> None:
+        """Release only failed temporary allocations; keep model weights resident."""
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self.needs_reload = False
         self._fused_experts_cache = {}
         self._last_edit_telemetry: dict[str, Any] = {"layers": [], "total": {}}
-        self._edit_telemetry_accumulator: dict[tuple[str, int, str], dict[str, Any]] = {}
+        self._edit_telemetry_accumulator: dict[
+            tuple[str, int, str], dict[str, Any]
+        ] = {}
 
         self.revision_kwargs = {}
         if settings.model_commit is not None:
@@ -730,9 +745,7 @@ class Model:
                             layer_index=layer_index,
                             path="dense_lora",
                             scheduled_weight=weight,
-                            delta_squared=low_rank_frobenius_squared(
-                                lora_B, lora_A
-                            ),
+                            delta_squared=low_rank_frobenius_squared(lora_B, lora_A),
                             base_squared=float(
                                 torch.sum(W_base.to(torch.float32) ** 2)
                             ),
@@ -793,9 +806,7 @@ class Model:
             base_fro = math.sqrt(base_squared)
             entry["delta_fro"] = delta_fro
             entry["base_fro"] = base_fro
-            entry["relative_edit_fro"] = (
-                delta_fro / base_fro if base_fro > 0 else 0.0
-            )
+            entry["relative_edit_fro"] = delta_fro / base_fro if base_fro > 0 else 0.0
             layers.append(entry)
             total_delta_squared += delta_squared
             total_base_squared += base_squared
@@ -807,7 +818,9 @@ class Model:
             "total": {
                 "delta_fro": total_delta,
                 "base_fro": total_base,
-                "relative_edit_fro": total_delta / total_base if total_base > 0 else 0.0,
+                "relative_edit_fro": total_delta / total_base
+                if total_base > 0
+                else 0.0,
                 "edited_parameter_count": total_parameters,
             },
         }
@@ -904,9 +917,7 @@ class Model:
                         path="fused_exact",
                         scheduled_weight=weight,
                         delta_squared=float(torch.sum(delta * delta)),
-                        base_squared=float(
-                            torch.sum(original_fp32 * original_fp32)
-                        ),
+                        base_squared=float(torch.sum(original_fp32 * original_fp32)),
                         parameter_count=original_chunk.numel(),
                     )
                 fused.data[start:stop].copy_(edited_chunk.to(fused.dtype))
@@ -957,19 +968,147 @@ class Model:
             rendered = [value + self.settings.response_prefix for value in rendered]
         return rendered
 
+    def _prompt_cache_signature(self) -> tuple[str, bool]:
+        return (
+            str(getattr(self.settings, "response_prefix", None) or ""),
+            bool(getattr(self, "_no_system_role", False)),
+        )
+
+    @staticmethod
+    def _prompt_cache_key(prompt: Prompt) -> tuple[str, str]:
+        return prompt.system, prompt.user
+
+    def prepare_prompt_cache(self, prompts: Sequence[Prompt]) -> dict[str, int]:
+        """Tokenize fixed prompts once and retain compact CPU token IDs.
+
+        The persistent cache intentionally stays in ordinary RAM. Generation
+        collates only the current batch into one pinned CPU allocation and copies
+        it asynchronously, leaving VRAM available for KV cache and larger batches.
+        """
+
+        signature = self._prompt_cache_signature()
+        cache_signature = getattr(self, "_prompt_token_cache_signature", None)
+        if cache_signature != signature:
+            self._prompt_token_cache = {}
+            self._prompt_token_cache_signature = signature
+            self._prompt_token_arena = None
+        cache: dict[tuple[str, str], Tensor] = getattr(self, "_prompt_token_cache", {})
+        self._prompt_token_cache = cache
+
+        unique: dict[tuple[str, str], Prompt] = {}
+        for prompt in prompts:
+            unique.setdefault(self._prompt_cache_key(prompt), prompt)
+        missing = [prompt for key, prompt in unique.items() if key not in cache]
+        if missing:
+            self._prompt_token_arena = None
+        new_rows = 0
+        new_tokens = 0
+        for start in range(0, len(missing), 4096):
+            chunk = missing[start : start + 4096]
+            rendered = self._render_chat_prompts(chunk)
+            # A tokenizer can discover that the model's chat template rejects a
+            # system role. That changes the rendered form and invalidates any
+            # entries produced under the previous template mode.
+            final_signature = self._prompt_cache_signature()
+            if final_signature != self._prompt_token_cache_signature:
+                cache.clear()
+                self._prompt_token_cache_signature = final_signature
+            encoded = self.tokenizer(
+                rendered,
+                padding=False,
+                return_token_type_ids=False,
+            )
+            rows = encoded["input_ids"]
+            if isinstance(rows, Tensor):
+                rows = rows.tolist()
+            if len(rows) != len(chunk):
+                raise ValueError("tokenizer returned an unaligned prompt batch")
+            for prompt, raw_ids in zip(chunk, rows, strict=True):
+                ids = torch.tensor(raw_ids, dtype=torch.int32, device="cpu")
+                if ids.ndim != 1 or ids.numel() == 0:
+                    raise ValueError("tokenizer returned an empty prompt")
+                cache[self._prompt_cache_key(prompt)] = ids.contiguous()
+                new_rows += 1
+                new_tokens += int(ids.numel())
+        return {
+            "rows": len(prompts),
+            "unique": len(unique),
+            "new": new_rows,
+            "tokens": new_tokens,
+        }
+
+    def pin_prompt_cache(self) -> dict[str, int | bool]:
+        """Pack cached IDs into one contiguous, optionally page-locked arena."""
+
+        cache: dict[tuple[str, str], Tensor] = getattr(self, "_prompt_token_cache", {})
+        total = sum(int(row.numel()) for row in cache.values())
+        use_pin = bool(
+            torch.cuda.is_available() and torch.device(self.model.device).type == "cuda"
+        )
+        arena = torch.empty(
+            total,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=use_pin,
+        )
+        offset = 0
+        for key, row in tuple(cache.items()):
+            stop = offset + int(row.numel())
+            arena[offset:stop].copy_(row)
+            cache[key] = arena[offset:stop]
+            offset = stop
+        self._prompt_token_arena = arena
+        return {"rows": len(cache), "tokens": total, "pinned": use_pin}
+
+    def _cached_prompt_token_ids(self, prompts: Sequence[Prompt]) -> list[Tensor]:
+        self.prepare_prompt_cache(prompts)
+        cache = self._prompt_token_cache
+        return [cache[self._prompt_cache_key(prompt)] for prompt in prompts]
+
+    def _collate_cached_prompts(self, prompts: Sequence[Prompt]) -> BatchEncoding:
+        rows = self._cached_prompt_token_ids(prompts)
+        if not rows:
+            raise ValueError("prompts must not be empty")
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = getattr(self.tokenizer, "eos_token_id", None)
+        if pad_token_id is None:
+            raise ValueError("tokenizer has neither pad_token_id nor eos_token_id")
+        maximum = max(int(row.numel()) for row in rows)
+        device = self.model.device
+        pin_memory = bool(
+            torch.cuda.is_available() and torch.device(device).type == "cuda"
+        )
+        input_ids = torch.full(
+            (len(rows), maximum),
+            int(pad_token_id),
+            dtype=torch.long,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
+        attention_mask = torch.zeros(
+            (len(rows), maximum),
+            dtype=torch.bool,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
+        for index, row in enumerate(rows):
+            offset = maximum - int(row.numel())
+            input_ids[index, offset:] = row
+            attention_mask[index, offset:] = True
+        return BatchEncoding(
+            {
+                "input_ids": input_ids.to(device, non_blocking=pin_memory),
+                "attention_mask": attention_mask.to(device, non_blocking=pin_memory),
+            }
+        )
+
     def generate(
         self,
         prompts: list[Prompt],
         **kwargs: Any,
     ) -> tuple[BatchEncoding, GenerateDecoderOnlyOutput | LongTensor]:
-        chat_prompts = self._render_chat_prompts(prompts)
-
-        inputs = self.tokenizer(
-            chat_prompts,
-            return_tensors="pt",
-            padding=True,
-            return_token_type_ids=False,
-        ).to(self.model.device)
+        inputs = self._collate_cached_prompts(prompts)
 
         # FIXME: The type checker has been disabled here because of the extremely complex
         #        interplay between different generate() signatures and dynamic delegation.
@@ -1043,9 +1182,10 @@ class Model:
                     raise ValueError(
                         f"prefill hook {index} did not receive [batch,sequence,hidden]"
                     )
-                captured[index] = (
-                    value[:, -1, :].detach().to(torch.float32).cpu().contiguous()
-                )
+                # Keep only one position per layer on-device. Moving each hook
+                # result to CPU here serializes the forward pass behind dozens
+                # of tiny device synchronizations. Stack first and transfer once.
+                captured[index] = value[:, -1, :].detach()
 
             return hook
 
@@ -1066,7 +1206,7 @@ class Model:
         residuals = torch.stack(
             [cast(Tensor, value) for value in captured],
             dim=1,
-        )
+        ).to(torch.float32)
         if 0 <= self.settings.winsorization_quantile < 1:
             thresholds = torch.quantile(
                 torch.abs(residuals),
@@ -1075,6 +1215,7 @@ class Model:
                 keepdim=True,
             )
             residuals = torch.clamp(residuals, -thresholds, thresholds)
+        residuals = residuals.cpu().contiguous()
 
         sequences = outputs.sequences if hasattr(outputs, "sequences") else outputs
         sequences = cast(Tensor, sequences)
@@ -1127,20 +1268,62 @@ class Model:
 
         if not prompts:
             raise ValueError("prompts must not be empty")
-        responses: list[str] = []
-        token_ids: list[list[int]] = []
-        residuals: list[Tensor] = []
-        for batch in batchify(prompts, self.settings.batch_size):
-            batch_responses, batch_token_ids, batch_residuals = (
-                self.get_response_artifacts_with_prefill_residuals(
-                    batch,
-                    skip_special_tokens=skip_special_tokens,
+        configured = int(self.settings.batch_size)
+        automatic = configured == 0
+        batch_size = (
+            int(getattr(self, "_adaptive_generation_batch_size", 0))
+            if automatic
+            else configured
+        )
+        if batch_size <= 0:
+            batch_size = min(int(self.settings.max_batch_size), len(prompts))
+        # Similar lengths reduce left-padding without changing the row contract.
+        if hasattr(self, "tokenizer"):
+            prompt_lengths = [
+                int(row.numel()) for row in self._cached_prompt_token_ids(prompts)
+            ]
+        else:
+            # Some narrow unit-test doubles replace the artifact capture method
+            # and intentionally have no tokenizer. Production Models always do.
+            prompt_lengths = [
+                len(prompt.system) + len(prompt.user) for prompt in prompts
+            ]
+        order = sorted(range(len(prompts)), key=prompt_lengths.__getitem__)
+        responses: list[str | None] = [None] * len(prompts)
+        token_ids: list[list[int] | None] = [None] * len(prompts)
+        residuals: list[Tensor | None] = [None] * len(prompts)
+        position = 0
+        while position < len(order):
+            selected = order[position : position + batch_size]
+            batch = [prompts[index] for index in selected]
+            try:
+                batch_responses, batch_token_ids, batch_residuals = (
+                    self.get_response_artifacts_with_prefill_residuals(
+                        batch,
+                        skip_special_tokens=skip_special_tokens,
+                    )
                 )
-            )
-            responses.extend(batch_responses)
-            token_ids.extend(batch_token_ids)
-            residuals.append(batch_residuals)
-        return responses, token_ids, torch.cat(residuals, dim=0)
+            except BaseException as error:
+                if not automatic or batch_size == 1 or not self._is_cuda_oom(error):
+                    raise
+                batch_size = max(1, batch_size // 2)
+                self._adaptive_generation_batch_size = batch_size
+                self._release_failed_cuda_batch()
+                continue
+            for local, original in enumerate(selected):
+                responses[original] = batch_responses[local]
+                token_ids[original] = batch_token_ids[local]
+                residuals[original] = batch_residuals[local]
+            position += len(selected)
+        if automatic:
+            self._adaptive_generation_batch_size = batch_size
+        if any(value is None for value in responses + token_ids + residuals):
+            raise RuntimeError("adaptive generation batch lost row coverage")
+        return (
+            cast(list[str], responses),
+            cast(list[list[int]], token_ids),
+            torch.stack(cast(list[Tensor], residuals), dim=0),
+        )
 
     def get_responses_with_prefill_residuals_batched(
         self,
@@ -1172,16 +1355,10 @@ class Model:
         """Score fixed clean targets without autoregressive generation."""
 
         if not prompts or len(prompts) != len(target_token_ids):
-            raise ValueError("prompts and target token IDs must be non-empty and aligned")
-        rendered = self._render_chat_prompts(prompts)
-        encoded = self.tokenizer(
-            rendered,
-            padding=False,
-            return_token_type_ids=False,
-        )
-        prompt_token_ids = encoded["input_ids"]
-        if isinstance(prompt_token_ids, Tensor):
-            prompt_token_ids = prompt_token_ids.tolist()
+            raise ValueError(
+                "prompts and target token IDs must be non-empty and aligned"
+            )
+        prompt_token_ids = self._cached_prompt_token_ids(prompts)
         if len(prompt_token_ids) != len(prompts):
             raise ValueError("tokenizer returned an unaligned prompt batch")
         pad_token_id = self.tokenizer.pad_token_id
@@ -1191,79 +1368,145 @@ class Model:
             raise ValueError("tokenizer has neither pad_token_id nor eos_token_id")
 
         pairs = list(zip(prompt_token_ids, target_token_ids, strict=True))
-        values: list[float] = []
-        for start in range(0, len(pairs), self.settings.batch_size):
-            batch = pairs[start : start + self.settings.batch_size]
-            sequences: list[list[int]] = []
+        order = sorted(
+            range(len(pairs)),
+            key=lambda index: len(pairs[index][0]) + len(pairs[index][1]),
+        )
+        configured = int(
+            getattr(
+                self.settings,
+                "conditional_nll_batch_size",
+                self.settings.batch_size,
+            )
+        )
+        automatic = configured == 0
+        batch_size = (
+            int(getattr(self, "_adaptive_nll_batch_size", 0))
+            if automatic
+            else configured
+        )
+        if batch_size <= 0:
+            batch_size = min(int(self.settings.max_batch_size), len(pairs))
+        values: list[float | None] = [None] * len(pairs)
+        position = 0
+        while position < len(order):
+            selected = order[position : position + batch_size]
+            batch = [pairs[index] for index in selected]
+            sequences: list[tuple[Tensor, Tensor]] = []
             prompt_lengths: list[int] = []
             for raw_prompt_ids, raw_target_ids in batch:
-                prompt_ids = [int(value) for value in raw_prompt_ids]
-                target_ids = [int(value) for value in raw_target_ids]
-                if not prompt_ids or not target_ids:
-                    raise ValueError("prompt and target token sequences must be non-empty")
-                sequences.append(prompt_ids + target_ids)
-                prompt_lengths.append(len(prompt_ids))
-            maximum = max(len(sequence) for sequence in sequences)
-            input_ids = torch.full(
+                prompt_ids = raw_prompt_ids.to(dtype=torch.long, device="cpu")
+                target_ids = torch.as_tensor(
+                    raw_target_ids, dtype=torch.long, device="cpu"
+                )
+                if prompt_ids.numel() == 0 or target_ids.numel() == 0:
+                    raise ValueError(
+                        "prompt and target token sequences must be non-empty"
+                    )
+                sequences.append((prompt_ids, target_ids))
+                prompt_lengths.append(int(prompt_ids.numel()))
+            maximum = max(
+                int(prompt_ids.numel() + target_ids.numel())
+                for prompt_ids, target_ids in sequences
+            )
+            device = self.model.device
+            pin_memory = bool(
+                torch.cuda.is_available() and torch.device(device).type == "cuda"
+            )
+            cpu_input_ids = torch.full(
                 (len(batch), maximum),
                 int(pad_token_id),
                 dtype=torch.long,
-                device=self.model.device,
+                device="cpu",
+                pin_memory=pin_memory,
             )
-            attention_mask = torch.zeros_like(input_ids, dtype=torch.bool)
-            labels = torch.full_like(input_ids, -100)
-            for row, (sequence, prompt_length) in enumerate(
+            cpu_attention_mask = torch.zeros(
+                (len(batch), maximum),
+                dtype=torch.bool,
+                device="cpu",
+                pin_memory=pin_memory,
+            )
+            cpu_labels = torch.full(
+                (len(batch), maximum),
+                -100,
+                dtype=torch.long,
+                device="cpu",
+                pin_memory=pin_memory,
+            )
+            for row, ((prompt_ids, target_ids), prompt_length) in enumerate(
                 zip(sequences, prompt_lengths, strict=True)
             ):
-                length = len(sequence)
-                input_ids[row, :length] = torch.tensor(
-                    sequence, dtype=torch.long, device=input_ids.device
-                )
-                attention_mask[row, :length] = True
-                labels[row, prompt_length:length] = input_ids[row, prompt_length:length]
-            with torch.inference_mode():
-                outputs = self.model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    use_cache=False,
-                )
+                target_length = int(target_ids.numel())
+                length = prompt_length + target_length
+                cpu_input_ids[row, :prompt_length].copy_(prompt_ids)
+                cpu_input_ids[row, prompt_length:length].copy_(target_ids)
+                cpu_attention_mask[row, :length] = True
+                cpu_labels[row, prompt_length:length].copy_(target_ids)
+            input_ids = cpu_input_ids.to(device, non_blocking=pin_memory)
+            attention_mask = cpu_attention_mask.to(device, non_blocking=pin_memory)
+            labels = cpu_labels.to(device, non_blocking=pin_memory)
+            try:
+                with torch.inference_mode():
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        use_cache=False,
+                    )
+            except BaseException as error:
+                del input_ids, attention_mask, labels
+                if not automatic or batch_size == 1 or not self._is_cuda_oom(error):
+                    raise
+                batch_size = max(1, batch_size // 2)
+                self._adaptive_nll_batch_size = batch_size
+                self._release_failed_cuda_batch()
+                continue
             batch_values = per_row_conditional_nll(outputs.logits, labels)
-            values.extend(float(value) for value in batch_values)
-        return values
+            for original, value in zip(selected, batch_values, strict=True):
+                values[original] = float(value)
+            position += len(selected)
+        if automatic:
+            self._adaptive_nll_batch_size = batch_size
+        if any(value is None for value in values):
+            raise RuntimeError("adaptive conditional NLL batch lost row coverage")
+        return cast(list[float], values)
 
     def get_residuals(self, prompts: list[Prompt]) -> Tensor:
-        # We only generate one token, and we return the residual vectors
-        # at that token position, for each prompt and layer.
-        _, outputs = self.generate(
-            prompts,
-            max_new_tokens=1,
-            output_hidden_states=True,
-            return_dict_in_generate=True,
-            # KV cache is unnecessary here because we only need the hidden states
-            # for the first generated token.
-            use_cache=False,
+        # Capture only the final prefill position. Asking generate() to return
+        # all hidden states retains every prompt position for every layer.
+        modules: list[Module] = [self.model.get_input_embeddings(), *self.get_layers()]
+        captured: list[Tensor | None] = [None] * len(modules)
+        handles = []
+
+        def capture(index: int):
+            def hook(_module: Module, _inputs: Any, output: Any) -> None:
+                if captured[index] is not None:
+                    return
+                value = output[0] if isinstance(output, (tuple, list)) else output
+                if not isinstance(value, Tensor) or value.ndim != 3:
+                    raise ValueError(
+                        f"residual hook {index} did not receive [batch,sequence,hidden]"
+                    )
+                captured[index] = value[:, -1, :].detach()
+
+            return hook
+
+        for index, module in enumerate(modules):
+            handles.append(module.register_forward_hook(capture(index)))
+        try:
+            self.generate(
+                prompts,
+                max_new_tokens=1,
+                use_cache=False,
+            )
+        finally:
+            for handle in handles:
+                handle.remove()
+        missing = [index for index, value in enumerate(captured) if value is None]
+        if missing:
+            raise RuntimeError(f"residual hooks did not fire: {missing}")
+        residuals = torch.stack([cast(Tensor, value) for value in captured], dim=1).to(
+            torch.float32
         )
-
-        # This cast is valid because GenerateDecoderOnlyOutput is the return type
-        # of model.generate with return_dict_in_generate=True.
-        outputs = cast(GenerateDecoderOnlyOutput, outputs)
-
-        # Hidden states for the first (only) generated token.
-        # This cast is valid because we passed output_hidden_states=True above.
-        hidden_states = cast(tuple[tuple[FloatTensor]], outputs.hidden_states)[0]
-
-        # The returned tensor has shape (prompt, layer, component).
-        residuals = torch.stack(
-            # layer_hidden_states has shape (prompt, position, component),
-            # so this extracts the hidden states at the end of each prompt,
-            # and stacks them up over the layers.
-            [layer_hidden_states[:, -1, :] for layer_hidden_states in hidden_states],
-            dim=1,
-        )
-
-        # Upcast the data type to avoid precision (bfloat16) or range (float16)
-        # problems during calculations involving residual vectors.
-        residuals = residuals.to(torch.float32)
 
         if 0 <= self.settings.winsorization_quantile < 1:
             # Apply symmetric winsorization to each layer of the per-prompt residuals.
@@ -1278,8 +1521,10 @@ class Model:
             residuals = torch.clamp(residuals, -thresholds, thresholds)
 
         if self.settings.offload_outputs_to_cpu:
-            residuals = residuals.cpu()
-            empty_cache()
+            # One consolidated transfer. The caching allocator is intentionally
+            # retained between successful batches and is cleared only after OOM
+            # or an explicit phase boundary.
+            residuals = residuals.cpu().contiguous()
 
         return residuals
 
@@ -1287,15 +1532,48 @@ class Model:
         batch_size = self.settings.residual_batch_size or self.settings.batch_size
         return torch.cat(list(self.iter_residual_batches(prompts, batch_size)), dim=0)
 
-    def iter_residual_batches(
-        self, prompts: list[Prompt], batch_size: int
-    ):
+    def iter_residual_batches(self, prompts: list[Prompt], batch_size: int):
         """Yield residual tensors without materializing the complete corpus."""
 
-        if batch_size <= 0:
-            raise ValueError("batch_size must be positive")
-        for batch in batchify(prompts, batch_size):
-            yield self.get_residuals(batch)
+        automatic = batch_size == 0
+        if batch_size < 0:
+            raise ValueError("batch_size must be nonnegative")
+        if automatic:
+            batch_size = int(getattr(self, "_adaptive_residual_batch_size", 0))
+            if batch_size <= 0:
+                batch_size = min(int(self.settings.max_batch_size), len(prompts))
+        token_lengths = None
+        if hasattr(self, "tokenizer"):
+            token_lengths = [
+                int(row.numel()) for row in self._cached_prompt_token_ids(prompts)
+            ]
+        position = 0
+        while position < len(prompts):
+            batch = prompts[position : position + batch_size]
+            restore_order = None
+            if token_lengths is not None:
+                local_lengths = token_lengths[position : position + len(batch)]
+                order = sorted(range(len(batch)), key=local_lengths.__getitem__)
+                if order != list(range(len(batch))):
+                    batch = [batch[index] for index in order]
+                    restore_order = [0] * len(order)
+                    for sorted_index, original_index in enumerate(order):
+                        restore_order[original_index] = sorted_index
+            try:
+                residuals = self.get_residuals(batch)
+            except BaseException as error:
+                if not automatic or batch_size == 1 or not self._is_cuda_oom(error):
+                    raise
+                batch_size = max(1, batch_size // 2)
+                self._adaptive_residual_batch_size = batch_size
+                self._release_failed_cuda_batch()
+                continue
+            if restore_order is not None:
+                residuals = residuals[restore_order]
+            position += len(batch)
+            yield residuals
+        if automatic:
+            self._adaptive_residual_batch_size = batch_size
 
     def get_residuals_mean(self, prompts: list[Prompt]) -> Tensor:
         if not prompts:

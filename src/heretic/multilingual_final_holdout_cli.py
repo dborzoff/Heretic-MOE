@@ -37,6 +37,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, object]:
         apply_multilingual_search_mode,
         build_multilingual_srg_scorer,
     )
+    from .utils import Prompt
 
     with args.config.open("rb") as stream:
         config = tomllib.load(stream)
@@ -66,6 +67,10 @@ def main(argv: Sequence[str] | None = None) -> dict[str, object]:
         raise ValueError("final-holdout preparation requires a local model directory")
     model_fingerprint = fingerprint_local_model(model_path)["model_fingerprint"]
     model = Model(settings)
+    model.prepare_prompt_cache(
+        [Prompt(system="", user=row.prompt) for row in bundle.final_rows]
+    )
+    model.pin_prompt_cache()
     scorer = build_multilingual_srg_scorer(settings, model, runtime_root)
     profile, _ = load_direction_map_package(runtime_root / "clean_map" / "directions")
     srg_profile = json.loads(

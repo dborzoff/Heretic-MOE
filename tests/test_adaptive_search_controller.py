@@ -132,7 +132,8 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
         self.assertEqual(geometry.count("--group-a"), 5)
         self.assertEqual(geometry.count("--group-b"), 5)
         self.assertIn("prepare-multilingual", prepare)
-        self.assertEqual(prepare[prepare.index("--device") + 1], "0")
+        self.assertEqual(prepare[prepare.index("--devices") + 1], "0,1,3")
+        self.assertEqual(prepare[prepare.index("--batch-size") + 1], "8")
         self.assertEqual(
             Path(prepare[prepare.index("--runtime-root") + 1]),
             root / "run" / "runtime",

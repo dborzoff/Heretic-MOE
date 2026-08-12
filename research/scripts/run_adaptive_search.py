@@ -486,7 +486,7 @@ def multilingual_geometry_command(
         "--max-workers",
         str(len(devices)),
         "--batch-size",
-        str(int(config.get("batch_size", 4))),
+        str(int(config.get("batch_size", 0))),
         "--dtype",
         str((config.get("dtypes") or ["bfloat16"])[0]),
         "--seed",
@@ -518,10 +518,10 @@ def multilingual_runtime_prepare_command(
     devices: list[str],
     srg_source: Path,
 ) -> list[str]:
-    """Build the single-GPU clean-reference preparation command."""
+    """Build the N-GPU clean-reference preparation command."""
 
     if not devices:
-        raise ValueError("multilingual runtime preparation needs one GPU")
+        raise ValueError("multilingual runtime preparation needs at least one GPU")
     return [
         str(executable),
         "prepare-multilingual",
@@ -542,10 +542,10 @@ def multilingual_runtime_prepare_command(
         ),
         "--srg-source",
         str(srg_source.resolve()),
-        "--device",
-        devices[0],
+        "--devices",
+        ",".join(devices),
         "--batch-size",
-        str(int(config.get("batch_size", 4))),
+        str(int(config.get("batch_size", 0))),
     ]
 
 

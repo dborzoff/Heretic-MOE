@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import tomllib
+import sys
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -22,7 +23,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--direction-source", required=True, type=Path)
     parser.add_argument("--srg-source", required=True, type=Path)
     parser.add_argument("--model")
-    parser.add_argument("--device", default="0")
+    parser.add_argument("--device", help="Legacy single-GPU shorthand.")
+    parser.add_argument("--devices", default="0")
     parser.add_argument("--batch-size", type=int)
     return parser
 
@@ -41,26 +43,39 @@ def _write_or_verify(path: Path, value: dict[str, Any]) -> None:
 
 def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     args = _parser().parse_args(list(argv) if argv is not None else None)
-    if args.batch_size is not None and args.batch_size <= 0:
-        raise ValueError("--batch-size must be positive")
+    if args.device is not None and args.devices != "0":
+        raise ValueError("--device cannot be combined with --devices")
+    devices = tuple(
+        dict.fromkeys(
+            part.strip()
+            for part in (args.device or args.devices).split(",")
+            if part.strip()
+        )
+    )
+    if not devices:
+        raise ValueError("at least one preparation GPU is required")
+    if args.batch_size is not None and args.batch_size < 0:
+        raise ValueError("--batch-size must be nonnegative")
     if not args.config.is_file():
         raise FileNotFoundError(args.config)
 
-    # Select the physical preparation device before importing the ML runtime.
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
-
     from .config import Settings
-    from .model import Model
+    from .clean_reference_archive import merge_clean_reference_archives
+    from .language_map_controller import (
+        GeometryWorkerSpec,
+        run_worker_processes,
+        worker_environment,
+    )
     from .multilingual_contract import load_multilingual_dataset_bundle
     from .multilingual_prepare import (
         fingerprint_local_model,
-        prepare_clean_reference_runtime,
         prepare_static_multilingual_runtime,
     )
     from .multilingual_runtime import (
         apply_multilingual_search_mode,
-        load_multilingual_worker_runtime,
+        load_multilingual_search_evaluator,
     )
+    from .multilingual_search_evaluator import MultilingualConstraintContract
 
     with args.config.open("rb") as stream:
         config = tomllib.load(stream)
@@ -74,8 +89,6 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     config["device_map"] = "auto"
     if args.batch_size is not None:
         config["batch_size"] = args.batch_size
-    if int(config.get("batch_size", 0)) <= 0:
-        raise ValueError("preparation requires a fixed positive batch_size")
     settings = Settings.model_validate(config)
     apply_multilingual_search_mode(settings)
     contract = settings.multilingual_search
@@ -130,16 +143,97 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         flush=True,
     )
 
-    model = Model(settings)
-    clean_manifest = prepare_clean_reference_runtime(
+    shards_root = runtime_root / "clean_trial_reference_shards"
+    worker_count = min(len(devices), len(bundle.trial_rows))
+    boundaries = [
+        len(bundle.trial_rows) * index // worker_count
+        for index in range(worker_count + 1)
+    ]
+    job_path = runtime_root / "clean_reference_job.json"
+    _write_or_verify(
+        job_path,
+        {
+            "schema_version": 1,
+            "config_path": str(args.config.resolve()),
+            "runtime_root": str(runtime_root),
+            "shards_root": str(shards_root),
+            "model": str(settings.model),
+            "model_fingerprint": str(fingerprint["model_fingerprint"]),
+            "batch_size": int(settings.batch_size),
+            "max_response_length": int(contract.ordinary_max_new_tokens),
+        },
+    )
+    specifications = []
+    for index, device in enumerate(devices[:worker_count]):
+        start, end = boundaries[index], boundaries[index + 1]
+        command = (
+            sys.executable,
+            "-u",
+            "-c",
+            "from heretic.multilingual_reference_worker import main; main()",
+            "--job",
+            str(job_path),
+            "--device",
+            str(device),
+            "--worker-id",
+            f"gpu-{device}",
+            "--start",
+            str(start),
+            "--end",
+            str(end),
+        )
+        specifications.append(
+            GeometryWorkerSpec(
+                device=str(device),
+                worker_id=f"gpu-{device}",
+                command=command,
+                environment=worker_environment(
+                    os.environ,
+                    device=str(device),
+                    cpu_threads=max(1, (os.cpu_count() or 4) // worker_count),
+                ),
+            )
+        )
+    exits = run_worker_processes(specifications)
+    failures = {key: value for key, value in exits.items() if value != 0}
+    if failures:
+        raise RuntimeError(f"clean-reference worker failure(s): {failures}")
+    from .language_map_directions import load_direction_map_package
+
+    _, direction_manifest = load_direction_map_package(
+        runtime_root / "clean_map" / "directions"
+    )
+    shard_dirs = [
+        shards_root / f"{boundaries[index]:08d}-{boundaries[index + 1]:08d}"
+        for index in range(worker_count)
+    ]
+    clean_manifest = merge_clean_reference_archives(
+        shard_dirs=shard_dirs,
+        rows=bundle.trial_rows,
+        output_dir=runtime_root / "clean_trial_reference",
+        dataset_contract_sha256=str(bundle.manifest["contract_sha256"]),
+        direction_sha256=str(direction_manifest["package_sha256"]),
+        model_fingerprint=str(fingerprint["model_fingerprint"]),
+        max_response_length=int(contract.ordinary_max_new_tokens),
+        batch_size=int(settings.batch_size),
+    )
+    job_path.unlink(missing_ok=True)
+    # Contract assembly does not execute either object. This validates every
+    # frozen component without loading a third redundant copy of the model.
+    _, worker_runtime_manifest = load_multilingual_search_evaluator(
         bundle=bundle,
         runtime_root=runtime_root,
-        model=model,
-        model_fingerprint=str(fingerprint["model_fingerprint"]),
-        max_response_length=contract.ordinary_max_new_tokens,
-        batch_size=settings.batch_size,
+        model=object(),
+        srg_scorer=object(),
+        constraints=MultilingualConstraintContract(
+            max_safe_ppl_drift=float(contract.max_safe_ppl_drift),
+            max_safe_geometry_damage=float(contract.max_safe_geometry_damage),
+            max_language_instability=float(contract.max_language_instability),
+            max_category_instability=float(contract.max_category_instability),
+        ),
+        expected_per_direction=contract.trial_rows_per_cell,
+        expected_languages=tuple(contract.languages),
     )
-    worker_runtime = load_multilingual_worker_runtime(settings, model)
     final_manifest: dict[str, Any] = {
         "schema_version": 1,
         "status": "PASS",
@@ -149,7 +243,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         "clean_reference_contract_sha256": clean_manifest[
             "archive_contract_sha256"
         ],
-        "worker_runtime_contract_sha256": worker_runtime.manifest[
+        "worker_runtime_contract_sha256": worker_runtime_manifest[
             "runtime_contract_sha256"
         ],
         "direction_rows": len(bundle.direction_rows),

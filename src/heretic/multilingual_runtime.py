@@ -26,6 +26,7 @@ from .multilingual_final_holdout import load_final_holdout_archive
 from .multilingual_finalist_evaluator import MultilingualFinalistEvaluator
 from .multilingual_trial_evaluator import FrozenMultilingualTrialEvaluator
 from .trial_language_schedule import load_trial_language_schedule
+from .utils import Prompt
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,10 @@ def apply_multilingual_search_mode(settings: Settings) -> None:
     settings.selection_policy = SelectionPolicy.FEASIBLE_DIVERSE
     settings.selection_score_targets = {}
     settings.selection_score_weights = {}
+    # The multilingual corpus is frozen and pretokenized when a resident worker
+    # starts. Prefix probing would both waste generation and invalidate that cache.
+    if settings.response_prefix is None:
+        settings.response_prefix = ""
 
 
 def resolve_srg_runtime_contract(runtime_dir: str | Path) -> dict[str, Any]:
@@ -76,7 +81,9 @@ def resolve_srg_runtime_contract(runtime_dir: str | Path) -> dict[str, Any]:
         if not path.is_file() or _file_sha256(path) != expected:
             raise ValueError(f"SRG runtime {label} file hash mismatch")
     if bool(manifest.get("validate_prompt_alignment")):
-        raise ValueError("multilingual SRG runtime must disable numeric prompt alignment")
+        raise ValueError(
+            "multilingual SRG runtime must disable numeric prompt alignment"
+        )
     return {
         "prototype_path": prototype_path,
         "prototype_sha256": str(manifest["prototype_sha256"]),
@@ -118,9 +125,7 @@ def build_multilingual_srg_scorer(
         validate_prompt_alignment=False,
     )
     calibration_settings = settings.model_copy(deep=True)
-    calibration_settings.max_response_length = int(
-        contract["max_response_length"]
-    )
+    calibration_settings.max_response_length = int(contract["max_response_length"])
     scorer = SparseRefusalGeometry(
         heretic_settings=calibration_settings,
         settings=scorer_settings,
@@ -150,6 +155,27 @@ def load_multilingual_worker_runtime(
         trial_rows_per_cell=contract.trial_rows_per_cell,
         calibration_rows_per_language=contract.calibration_rows_per_language,
     )
+    prompt_cache_stats: dict[str, Any] | None = None
+    if hasattr(model, "prepare_prompt_cache"):
+        cache_rows: Sequence[Any] = bundle.trial_rows
+        if contract.evaluation_phase == "finalist":
+            cache_rows = (*bundle.trial_rows, *bundle.final_rows)
+        prepared = model.prepare_prompt_cache(
+            [Prompt(system="", user=row.prompt) for row in cache_rows]
+        )
+        prompt_cache_stats = {
+            "requested_rows": int(prepared["rows"]),
+            "unique_requested_rows": int(prepared["unique"]),
+            "new_rows": int(prepared["new"]),
+        }
+        if hasattr(model, "pin_prompt_cache"):
+            packed = model.pin_prompt_cache()
+            prompt_cache_stats = {
+                **prompt_cache_stats,
+                "cached_rows": int(packed["rows"]),
+                "tokens": int(packed["tokens"]),
+                "pinned": bool(packed["pinned"]),
+            }
     scorer = srg_scorer or build_multilingual_srg_scorer(
         settings,
         model,
@@ -181,6 +207,8 @@ def load_multilingual_worker_runtime(
             expected_per_direction=contract.trial_rows_per_cell,
             expected_languages=tuple(contract.languages),
         )
+    if prompt_cache_stats is not None:
+        model._last_prompt_cache_stats = prompt_cache_stats
     direction_profile, _ = load_direction_map_package(
         Path(contract.runtime_root).resolve() / "clean_map" / "directions"
     )
@@ -274,9 +302,7 @@ def load_multilingual_search_evaluator(
         "package_sha256"
     ):
         raise ValueError("clean reference direction contract mismatch")
-    if schedule_manifest.get("index_sha256") != _trial_index_sha256(
-        bundle.trial_rows
-    ):
+    if schedule_manifest.get("index_sha256") != _trial_index_sha256(bundle.trial_rows):
         raise ValueError("trial schedule dataset index mismatch")
     expected_row_ids = [row.row_id for row in bundle.trial_rows]
     if [record.get("row_id") for record in clean_records] != expected_row_ids:
@@ -311,15 +337,9 @@ def load_multilingual_search_evaluator(
         "status": "PASS",
         "dataset_contract_sha256": dataset_sha,
         "direction_package_sha256": direction_manifest["package_sha256"],
-        "schedule_contract_sha256": schedule_manifest[
-            "schedule_contract_sha256"
-        ],
-        "clean_reference_contract_sha256": clean_manifest[
-            "archive_contract_sha256"
-        ],
-        "srg_profile_sha256": hashlib.sha256(
-            srg_profile_path.read_bytes()
-        ).hexdigest(),
+        "schedule_contract_sha256": schedule_manifest["schedule_contract_sha256"],
+        "clean_reference_contract_sha256": clean_manifest["archive_contract_sha256"],
+        "srg_profile_sha256": hashlib.sha256(srg_profile_path.read_bytes()).hexdigest(),
         "schedule_trials": int(schedule_manifest["trials"]),
         "trial_rows": len(bundle.trial_rows),
         "objectives": ["Removal", "Preservation loss"],
@@ -395,12 +415,8 @@ def load_multilingual_finalist_evaluator(
         "evaluation_phase": "finalist",
         "dataset_contract_sha256": bundle.manifest["contract_sha256"],
         "direction_package_sha256": direction_manifest["package_sha256"],
-        "clean_reference_contract_sha256": clean_manifest[
-            "archive_contract_sha256"
-        ],
-        "final_holdout_contract_sha256": final_manifest[
-            "archive_contract_sha256"
-        ],
+        "clean_reference_contract_sha256": clean_manifest["archive_contract_sha256"],
+        "final_holdout_contract_sha256": final_manifest["archive_contract_sha256"],
         "srg_profile_sha256": hashlib.sha256(srg_profile_path.read_bytes()).hexdigest(),
         "trial_rows_per_finalist": len(bundle.trial_rows),
         "final_holdout_rows": len(bundle.final_rows),

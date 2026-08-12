@@ -126,3 +126,43 @@ def test_batched_artifact_capture_preserves_text_tokens_and_residual_order() -> 
     assert responses == ["r-0", "r-1", "r-2", "r-3", "r-4"]
     assert token_ids == [[0, 10], [1, 11], [2, 12], [3, 13], [4, 14]]
     assert residuals.flatten().tolist() == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+
+def test_adaptive_artifact_batch_buckets_lengths_and_recovers_from_oom() -> None:
+    wrapper = object.__new__(Model)
+    wrapper.settings = SimpleNamespace(batch_size=0, max_batch_size=8)
+    attempted: list[list[str]] = []
+
+    def capture(self, prompts, skip_special_tokens=False):
+        attempted.append([prompt.user for prompt in prompts])
+        if len(prompts) > 2:
+            raise torch.OutOfMemoryError("synthetic OOM")
+        values = [int(prompt.user.split("-")[0]) for prompt in prompts]
+        return (
+            [f"r-{value}" for value in values],
+            [[value] for value in values],
+            torch.tensor(values, dtype=torch.float32).reshape(-1, 1, 1),
+        )
+
+    wrapper.get_response_artifacts_with_prefill_residuals = MethodType(
+        capture, wrapper
+    )
+    prompts = [
+        Prompt(system="", user="0-xxxxxxxx"),
+        Prompt(system="", user="1-x"),
+        Prompt(system="", user="2-xxxx"),
+        Prompt(system="", user="3-xx"),
+    ]
+
+    responses, token_ids, residuals = (
+        wrapper.get_response_artifacts_with_prefill_residuals_batched(prompts)
+    )
+
+    assert responses == ["r-0", "r-1", "r-2", "r-3"]
+    assert token_ids == [[0], [1], [2], [3]]
+    assert residuals.flatten().tolist() == [0.0, 1.0, 2.0, 3.0]
+    assert wrapper._adaptive_generation_batch_size == 2
+    assert any(len(batch) == 4 for batch in attempted)
+    assert [len(value) for value in attempted[-1]] == sorted(
+        len(value) for value in attempted[-1]
+    )

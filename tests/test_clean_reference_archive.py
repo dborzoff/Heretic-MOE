@@ -9,6 +9,7 @@ import torch
 from heretic.clean_reference_archive import (
     build_clean_reference_archive,
     load_clean_reference_archive,
+    merge_clean_reference_archives,
 )
 from heretic.language_map_data import GeometryRow
 
@@ -157,3 +158,41 @@ def test_archive_rejects_direction_shape_mismatch(tmp_path: Path) -> None:
             max_response_length=512,
             batch_size=2,
         )
+
+
+def test_merge_gpu_shards_restores_canonical_archive_and_removes_shards(
+    tmp_path: Path,
+) -> None:
+    rows = _rows(tmp_path)
+    direction = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    shards = [tmp_path / "shard-0", tmp_path / "shard-1"]
+    for shard, selected in zip(shards, (rows[:2], rows[2:]), strict=True):
+        build_clean_reference_archive(
+            model=_FakeModel(),
+            rows=selected,
+            refusal_direction=direction,
+            output_dir=shard,
+            dataset_contract_sha256="a" * 64,
+            direction_sha256="b" * 64,
+            model_fingerprint="fake-model-v1",
+            max_response_length=100,
+            batch_size=2,
+        )
+
+    manifest = merge_clean_reference_archives(
+        shard_dirs=shards,
+        rows=rows,
+        output_dir=tmp_path / "merged",
+        dataset_contract_sha256="a" * 64,
+        direction_sha256="b" * 64,
+        model_fingerprint="fake-model-v1",
+        max_response_length=100,
+        batch_size=2,
+    )
+
+    assert manifest["status"] == "PASS"
+    assert manifest["rows"] == 4
+    assert manifest["shards"] == 2
+    _, records = load_clean_reference_archive(tmp_path / "merged")
+    assert [record["row_id"] for record in records] == [row.row_id for row in rows]
+    assert all(not shard.exists() for shard in shards)

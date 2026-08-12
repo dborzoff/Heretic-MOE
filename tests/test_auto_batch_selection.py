@@ -10,6 +10,7 @@ def test_auto_batch_defaults_and_search_profiles():
     assert settings.batch_size == 0
     assert settings.max_batch_size == 4096
     assert settings.batch_size_vram_headroom_fraction == 0.10
+    assert settings.conditional_nll_batch_size == 0
 
     root = Path(__file__).parents[1]
     for name in (
@@ -25,6 +26,24 @@ def test_auto_batch_defaults_and_search_profiles():
         assert profile["batch_size"] == 0
         assert profile["max_batch_size"] == 4096
         assert profile["batch_size_vram_headroom_fraction"] == 0.10
+
+
+def test_multilingual_profile_uses_auto_batch_and_100_token_contract():
+    root = Path(__file__).parents[1]
+    profile = tomllib.loads(
+        (
+            root
+            / "research"
+            / "configs"
+            / "adaptive_search"
+            / "multilingual_v3.toml"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert profile["batch_size"] == 0
+    assert profile["max_response_length"] == 100
+    assert profile["multilingual_search"]["ordinary_max_new_tokens"] == 100
+    assert profile["multilingual_search"]["final_max_new_tokens"] == 100
 
 
 def test_next_batch_memory_prediction_blocks_unsafe_doubling():

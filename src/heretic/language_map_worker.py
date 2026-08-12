@@ -16,6 +16,7 @@ from .language_map_cache import _capture_fingerprint
 from .language_map_data import GeometryRow, LanguageFile, load_aligned_corpus
 from .language_map_parallel import capture_claimed_ranges
 from .range_work_queue import RangeWorkQueue
+from .utils import Prompt
 
 
 def _selected_rows(
@@ -51,11 +52,13 @@ def _load_model(job: dict[str, Any]):
         device_map="auto",
         batch_size=int(job["batch_size"]),
         residual_batch_size=int(job["batch_size"]),
+        max_batch_size=int(job.get("max_batch_size", 64)),
         offload_outputs_to_cpu=True,
         seed=int(job["seed"]),
         system_prompt=str(job["system_prompt"]),
     )
     return Model(settings)
+
 
 def run_worker_job(
     job_path: str | Path,
@@ -89,9 +92,48 @@ def run_worker_job(
         raise ValueError("geometry worker fingerprint mismatch")
     queue = RangeWorkQueue(job["queue_path"])
     model = (model_factory or _load_model)(job)
+    cache_prompts = [
+        Prompt(system=str(job["system_prompt"]), user=row.prompt) for row in rows
+    ]
+    if hasattr(model, "prepare_prompt_cache"):
+        prepared = model.prepare_prompt_cache(cache_prompts)
+        packed = None
+        if hasattr(model, "pin_prompt_cache"):
+            packed = model.pin_prompt_cache()
+        print(
+            json.dumps(
+                {
+                    "event": "token_cache_ready",
+                    "worker_id": worker_id,
+                    "rows": int(prepared.get("rows", len(cache_prompts)))
+                    if isinstance(prepared, dict)
+                    else len(cache_prompts),
+                    "tokens": int(packed.get("tokens", 0))
+                    if isinstance(packed, dict)
+                    else 0,
+                    "pinned": bool(packed.get("pinned", False))
+                    if isinstance(packed, dict)
+                    else False,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
 
     def progress(_worker_id: str, completed: int, total: int) -> None:
-        print(f"{worker_id} | Geometry capture: {completed}/{total}", flush=True)
+        print(
+            json.dumps(
+                {
+                    "event": "worker_progress",
+                    "scope": "global",
+                    "worker_id": worker_id,
+                    "completed": completed,
+                    "total": total,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
 
     return capture_claimed_ranges(
         model,
@@ -121,4 +163,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         device=args.device,
         worker_id=args.worker_id,
     )
-    print(json.dumps({"event": "worker_complete", **result}, sort_keys=True), flush=True)
+    print(
+        json.dumps({"event": "worker_complete", **result}, sort_keys=True), flush=True
+    )

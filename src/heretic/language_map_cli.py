@@ -135,7 +135,12 @@ def _parser() -> argparse.ArgumentParser:
     _add_input_arguments(run)
     run.add_argument("--model", help="Hugging Face model directory or repository ID.")
     run.add_argument("--output-dir", type=Path, default=Path("geometry_map_output"))
-    run.add_argument("--batch-size", type=int, default=8)
+    run.add_argument(
+        "--batch-size",
+        type=int,
+        default=0,
+        help="Residual capture batch size (0 = per-worker adaptive OOM probe).",
+    )
     run.add_argument(
         "--limit-per-cell",
         type=int,
@@ -152,7 +157,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--max-workers", type=int)
     run.add_argument("--min-free-gib", type=float, default=4.0)
     run.add_argument("--min-free-fraction", type=float, default=0.35)
-    run.add_argument("--task-rows", type=int, default=32)
+    run.add_argument("--task-rows", type=int, default=128)
     run.add_argument("--cpu-threads-per-worker", type=int, default=6)
     run.add_argument("--dtype", default="bfloat16")
     run.add_argument("--seed", type=int, default=42)
@@ -227,8 +232,8 @@ def _capture_parallel(
 ) -> dict[str, Any]:
     if not args.model:
         raise ValueError("--model is required unless --dry-run is used")
-    if args.batch_size <= 0:
-        raise ValueError("--batch-size must be positive")
+    if args.batch_size < 0:
+        raise ValueError("--batch-size must be nonnegative")
 
     cache_dir = args.output_dir / "cache"
     if (cache_dir / "manifest.json").is_file():

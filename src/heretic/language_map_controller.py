@@ -7,10 +7,12 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import json
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 
 
 @dataclass(frozen=True)
@@ -70,12 +72,59 @@ def run_worker_processes(
         raise ValueError("at least one worker specification is required")
     processes: list[tuple[GeometryWorkerSpec, subprocess.Popen[str]]] = []
     readers: list[Thread] = []
+    progress_by_worker: dict[str, tuple[int, int]] = {}
+    progress_started = time.monotonic()
+    progress_lock = Lock()
 
     def stream(specification: GeometryWorkerSpec, process: subprocess.Popen[str]) -> None:
         assert process.stdout is not None
         prefix = f"[GPU {specification.device}]"
         for raw_line in process.stdout:
-            line_sink(f"{prefix} {raw_line.rstrip()}")
+            line = raw_line.rstrip()
+            try:
+                event = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                event = None
+            if isinstance(event, dict) and event.get("event") in {
+                "worker_progress",
+                "reference_worker_progress",
+            }:
+                completed = int(event["completed"])
+                total = int(event["total"])
+                with progress_lock:
+                    progress_by_worker[specification.worker_id] = (completed, total)
+                    if event.get("scope") == "global":
+                        global_completed = max(
+                            value[0] for value in progress_by_worker.values()
+                        )
+                        global_total = max(
+                            value[1] for value in progress_by_worker.values()
+                        )
+                    else:
+                        global_completed = sum(
+                            value[0] for value in progress_by_worker.values()
+                        )
+                        global_total = sum(
+                            value[1] for value in progress_by_worker.values()
+                        )
+                    elapsed = max(time.monotonic() - progress_started, 1e-6)
+                    rate = global_completed / elapsed
+                    remaining = max(global_total - global_completed, 0)
+                    eta = remaining / rate if rate > 0 else 0.0
+                    progress_line = (
+                        f"{prefix} {global_completed}/{global_total} | "
+                        f"{rate:.1f} rows/s | ETA {eta / 60:.1f}m"
+                    )
+                    if line_sink is print:
+                        sys.stdout.write(f"\r{progress_line:<100}")
+                        sys.stdout.flush()
+                    else:
+                        line_sink(progress_line)
+                continue
+            if progress_by_worker and line_sink is print:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            line_sink(f"{prefix} {line}")
 
     try:
         for specification in specifications:
@@ -104,6 +153,9 @@ def run_worker_processes(
         }
         for reader in readers:
             reader.join()
+        if progress_by_worker and line_sink is print:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
         return exits
     except BaseException:
         for _, process in processes:

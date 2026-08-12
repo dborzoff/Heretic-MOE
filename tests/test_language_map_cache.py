@@ -1,5 +1,6 @@
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -184,3 +185,60 @@ def test_model_residual_iterator_preserves_batch_order():
 
     assert seen == [["p0", "p1"], ["p2", "p3"], ["p4"]]
     assert [batch.shape[0] for batch in batches] == [2, 2, 1]
+
+
+def test_model_residual_iterator_auto_batch_backs_off_without_reloading():
+    model = object.__new__(Model)
+    model.settings = SimpleNamespace(max_batch_size=8)
+    attempts: list[int] = []
+
+    def fake_get_residuals(batch):
+        attempts.append(len(batch))
+        if len(batch) > 2:
+            raise torch.OutOfMemoryError("synthetic OOM")
+        return torch.arange(len(batch), dtype=torch.float32).reshape(-1, 1, 1)
+
+    model.get_residuals = fake_get_residuals
+    prompts = [Prompt(system="", user=str(index)) for index in range(5)]
+
+    batches = list(model.iter_residual_batches(prompts, batch_size=0))
+
+    assert [batch.shape[0] for batch in batches] == [2, 2, 1]
+    assert attempts[:2] == [5, 2]
+    assert model._adaptive_residual_batch_size == 2
+
+
+def test_model_residual_iterator_buckets_cached_token_lengths_and_restores_order():
+    model = object.__new__(Model)
+    model.settings = SimpleNamespace(max_batch_size=8)
+    model.tokenizer = object()
+    seen: list[list[str]] = []
+    lengths = {"zero": 4, "one": 1, "two": 3, "three": 2}
+
+    def cached(prompts):
+        return [
+            torch.zeros(lengths[prompt.user], dtype=torch.int32) for prompt in prompts
+        ]
+
+    def residuals(prompts):
+        seen.append([prompt.user for prompt in prompts])
+        return torch.tensor(
+            [
+                float(prompt.user == "zero") + index * 10
+                for index, prompt in enumerate(prompts)
+            ]
+        ).reshape(-1, 1, 1)
+
+    model._cached_prompt_token_ids = cached
+    model.get_residuals = residuals
+    prompts = [
+        Prompt(system="", user="zero"),
+        Prompt(system="", user="one"),
+        Prompt(system="", user="two"),
+        Prompt(system="", user="three"),
+    ]
+
+    batches = list(model.iter_residual_batches(prompts, batch_size=4))
+
+    assert seen == [["one", "three", "two", "zero"]]
+    assert batches[0].flatten().tolist() == [31.0, 0.0, 20.0, 10.0]

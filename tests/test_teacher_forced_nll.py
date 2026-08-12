@@ -60,16 +60,27 @@ class _Tokenizer:
         return {"input_ids": [[1, 2] for _ in values]}
 
 
+class _CountingTokenizer(_Tokenizer):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, values, **kwargs):
+        self.calls += 1
+        return super().__call__(values, **kwargs)
+
+
 class _CausalModel(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.anchor = nn.Parameter(torch.zeros(()))
+        self.batch_sizes: list[int] = []
 
     @property
     def device(self) -> torch.device:
         return self.anchor.device
 
     def forward(self, *, input_ids, attention_mask, use_cache):
+        self.batch_sizes.append(int(input_ids.shape[0]))
         assert use_cache is False
         assert torch.equal(attention_mask, input_ids != 0)
         batch, sequence = input_ids.shape
@@ -97,3 +108,64 @@ def test_model_conditional_nll_uses_fixed_target_tokens_without_generation() -> 
         3
     ]
     assert values == pytest.approx([float(expected), float(expected)])
+
+
+def test_fixed_prompt_tokenization_is_cached_across_nll_trials() -> None:
+    wrapper = object.__new__(Model)
+    wrapper.model = _CausalModel()
+    wrapper.tokenizer = _CountingTokenizer()
+    wrapper.settings = type(
+        "Settings",
+        (),
+        {
+            "batch_size": 2,
+            "conditional_nll_batch_size": 2,
+            "response_prefix": None,
+        },
+    )()
+    wrapper._render_chat_prompts = lambda prompts: [prompt.user for prompt in prompts]
+    prompts = [Prompt(system="", user="a"), Prompt(system="", user="b")]
+
+    first = wrapper.get_conditional_nll(prompts, [[3, 4], [3, 4]])
+    second = wrapper.get_conditional_nll(prompts, [[3, 4], [3, 4]])
+
+    assert first == pytest.approx(second)
+    assert wrapper.tokenizer.calls == 1
+
+
+class _OomCausalModel(_CausalModel):
+    def forward(self, *, input_ids, attention_mask, use_cache):
+        if input_ids.shape[0] > 2:
+            self.batch_sizes.append(int(input_ids.shape[0]))
+            raise torch.OutOfMemoryError("synthetic OOM")
+        return super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=use_cache,
+        )
+
+
+def test_conditional_nll_has_independent_adaptive_batch_with_oom_backoff() -> None:
+    wrapper = object.__new__(Model)
+    wrapper.model = _OomCausalModel()
+    wrapper.tokenizer = _Tokenizer()
+    wrapper.settings = type(
+        "Settings",
+        (),
+        {
+            "batch_size": 1,
+            "conditional_nll_batch_size": 0,
+            "max_batch_size": 8,
+        },
+    )()
+    wrapper._render_chat_prompts = lambda prompts: [prompt.user for prompt in prompts]
+
+    values = wrapper.get_conditional_nll(
+        [Prompt(system="", user=str(index)) for index in range(5)],
+        [[3, 4] for _ in range(5)],
+    )
+
+    assert len(values) == 5
+    assert wrapper._adaptive_nll_batch_size == 2
+    assert 5 in wrapper.model.batch_sizes
+    assert max(size for size in wrapper.model.batch_sizes if size <= 2) == 2

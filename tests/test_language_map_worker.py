@@ -13,6 +13,16 @@ from heretic.range_work_queue import RangeWorkQueue
 
 
 class FakeModel:
+    def __init__(self):
+        self.prepared = []
+        self.pinned = False
+
+    def prepare_prompt_cache(self, prompts):
+        self.prepared.extend(prompts)
+
+    def pin_prompt_cache(self):
+        self.pinned = True
+
     def iter_residual_batches(self, prompts, batch_size):
         for start in range(0, len(prompts), batch_size):
             count = min(batch_size, len(prompts) - start)
@@ -80,16 +90,19 @@ def _job(tmp_path: Path) -> tuple[Path, RangeWorkQueue]:
 
 def test_worker_validates_job_and_completes_real_range_queue(tmp_path: Path) -> None:
     job, queue = _job(tmp_path)
+    model = FakeModel()
 
     result = run_worker_job(
         job,
         device="0",
         worker_id="gpu-0",
-        model_factory=lambda _job: FakeModel(),
+        model_factory=lambda _job: model,
     )
 
     assert result == {"worker_id": "gpu-0", "tasks": 2, "rows": 4}
     assert queue.stats().complete_rows == 4
+    assert len(model.prepared) == 4
+    assert model.pinned is True
 
 
 def test_worker_rejects_fingerprint_drift_before_loading_model(tmp_path: Path) -> None:
@@ -108,4 +121,3 @@ def test_worker_rejects_fingerprint_drift_before_loading_model(tmp_path: Path) -
         run_worker_job(job, device="0", worker_id="gpu-0", model_factory=model_factory)
 
     assert loaded is False
-

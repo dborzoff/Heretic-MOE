@@ -58,8 +58,8 @@ def capture_claimed_ranges(
 ) -> dict[str, int | str]:
     """Keep one model resident while dynamically claiming global row ranges."""
 
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
+    if batch_size < 0:
+        raise ValueError("batch_size must be nonnegative")
     parts_dir = Path(parts_dir)
     parts_dir.mkdir(parents=True, exist_ok=True)
     completed_tasks = 0

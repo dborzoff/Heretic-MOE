@@ -7,9 +7,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import torch
 from torch import Tensor
@@ -112,6 +113,7 @@ def build_clean_reference_archive(
     model_fingerprint: str,
     max_response_length: int,
     batch_size: int,
+    progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Generate each frozen trial reference once and materialize a private archive."""
 
@@ -120,8 +122,8 @@ def build_clean_reference_archive(
         raise ValueError("reference rows must be non-empty with unique row IDs")
     if refusal_direction.ndim != 2 or not bool(torch.isfinite(refusal_direction).all()):
         raise ValueError("refusal direction must be a finite [layers,hidden] tensor")
-    if batch_size <= 0 or max_response_length <= 0:
-        raise ValueError("batch size and response length must be positive")
+    if batch_size < 0 or max_response_length <= 0:
+        raise ValueError("batch size must be nonnegative and response length positive")
     dataset_sha = _validate_sha256(dataset_contract_sha256, "dataset contract")
     direction_sha = _validate_sha256(direction_sha256, "direction")
     if not model_fingerprint.strip():
@@ -145,8 +147,9 @@ def build_clean_reference_archive(
     parts.mkdir(parents=True, exist_ok=True)
     direction = refusal_direction.detach().to(torch.float32).cpu().contiguous()
     part_paths: list[Path] = []
-    for start in range(0, len(ordered), batch_size):
-        stop = min(start + batch_size, len(ordered))
+    part_rows = batch_size or 64
+    for start in range(0, len(ordered), part_rows):
+        stop = min(start + part_rows, len(ordered))
         batch_rows = ordered[start:stop]
         part = parts / f"{start:08d}-{stop:08d}.jsonl"
         metadata_path = part.with_suffix(".meta.json")
@@ -164,11 +167,15 @@ def build_clean_reference_archive(
             continue
 
         prompts = [Prompt(system="", user=row.prompt) for row in batch_rows]
-        responses, token_ids, residuals = (
-            model.get_response_artifacts_with_prefill_residuals(
-                prompts,
-                skip_special_tokens=True,
-            )
+        artifact_method = (
+            model.get_response_artifacts_with_prefill_residuals_batched
+            if batch_size == 0
+            and hasattr(model, "get_response_artifacts_with_prefill_residuals_batched")
+            else model.get_response_artifacts_with_prefill_residuals
+        )
+        responses, token_ids, residuals = artifact_method(
+            prompts,
+            skip_special_tokens=True,
         )
         if (
             len(responses) != len(batch_rows)
@@ -227,6 +234,8 @@ def build_clean_reference_archive(
             },
         )
         part_paths.append(part)
+        if progress is not None:
+            progress(stop, len(ordered))
 
     final_records = destination / "private" / "records.jsonl"
     _atomic_write(final_records, b"".join(path.read_bytes() for path in part_paths))
@@ -257,6 +266,91 @@ def build_clean_reference_archive(
     }
     _assert_public_text_free(manifest)
     _write_json(destination / "manifest.json", manifest)
+    return manifest
+
+
+def merge_clean_reference_archives(
+    *,
+    shard_dirs: Sequence[str | Path],
+    rows: Sequence[GeometryRow],
+    output_dir: str | Path,
+    dataset_contract_sha256: str,
+    direction_sha256: str,
+    model_fingerprint: str,
+    max_response_length: int,
+    batch_size: int,
+) -> dict[str, Any]:
+    """Merge deterministic contiguous GPU shards into one canonical archive."""
+
+    ordered = tuple(rows)
+    if not ordered or not shard_dirs:
+        raise ValueError("rows and shard directories must be non-empty")
+    records: list[dict[str, Any]] = []
+    manifests: list[dict[str, Any]] = []
+    for raw in shard_dirs:
+        manifest, shard_records = load_clean_reference_archive(raw)
+        manifests.append(manifest)
+        records.extend(shard_records)
+    expected_ids = [row.row_id for row in ordered]
+    if [record.get("row_id") for record in records] != expected_ids:
+        raise ValueError("clean reference shards do not reconstruct canonical order")
+    shapes = {
+        (int(manifest["layers"]), int(manifest["hidden_size"]))
+        for manifest in manifests
+    }
+    if len(shapes) != 1:
+        raise ValueError("clean reference shard geometry shapes differ")
+    layers, hidden_size = shapes.pop()
+    contract = {
+        "schema_version": 1,
+        "dataset_contract_sha256": _validate_sha256(
+            dataset_contract_sha256, "dataset contract"
+        ),
+        "direction_sha256": _validate_sha256(direction_sha256, "direction"),
+        "model_fingerprint": model_fingerprint,
+        "max_response_length": max_response_length,
+        "batch_size": batch_size,
+        "row_id_order_sha256": _canonical_sha256(expected_ids),
+    }
+    contract_sha = _canonical_sha256(contract)
+    destination = Path(output_dir).resolve()
+    existing = _existing_manifest(destination, contract_sha)
+    if existing is not None:
+        return existing
+    final_records = destination / "private" / "records.jsonl"
+    payload = b"".join(
+        (
+            json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        for record in records
+    )
+    _atomic_write(final_records, payload)
+    lengths = [int(record["clean_response_length"]) for record in records]
+    manifest = {
+        **contract,
+        "status": "PASS",
+        "archive_contract_sha256": contract_sha,
+        "rows": len(records),
+        "safe_rows_with_nll": sum(
+            record["direction_class"] == "safe"
+            and record["clean_conditional_nll"] is not None
+            for record in records
+        ),
+        "layers": layers,
+        "hidden_size": hidden_size,
+        "parts": sum(int(value["parts"]) for value in manifests),
+        "shards": len(manifests),
+        "token_length": {
+            "min": min(lengths),
+            "mean": sum(lengths) / len(lengths),
+            "max": max(lengths),
+        },
+        "private_records_sha256": _sha256(final_records),
+    }
+    _assert_public_text_free(manifest)
+    _write_json(destination / "manifest.json", manifest)
+    for raw in shard_dirs:
+        shutil.rmtree(Path(raw), ignore_errors=True)
     return manifest
 
 
