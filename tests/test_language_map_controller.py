@@ -6,6 +6,7 @@ import sys
 from heretic.language_map_controller import (
     GeometryWorkerSpec,
     build_worker_command,
+    format_worker_event,
     run_worker_processes,
     worker_environment,
 )
@@ -63,3 +64,51 @@ def test_two_real_worker_processes_stream_into_one_prefixed_output() -> None:
         "[GPU 1] worker-1-ready",
     ]
 
+
+def test_worker_batch_and_phase_events_are_rendered_as_human_status() -> None:
+    lines: list[str] = []
+    payload = (
+        "import json; "
+        "print(json.dumps({'event':'worker_phase','phase':'model_load'})); "
+        "print(json.dumps({'event':'batch_probe','mode':'generation','batch_size':64})); "
+        "print(json.dumps({'event':'batch_backoff','mode':'generation','batch_size':64,"
+        "'next_batch_size':32,'reason':'OOM'})); "
+        "print(json.dumps({'event':'batch_selected','mode':'generation','batch_size':32}))"
+    )
+    spec = GeometryWorkerSpec(
+        device="0",
+        worker_id="gpu-0",
+        command=(sys.executable, "-u", "-c", payload),
+        environment=os.environ.copy(),
+    )
+
+    exits = run_worker_processes([spec], line_sink=lines.append)
+
+    assert exits == {"gpu-0": 0}
+    assert lines == [
+        "[GPU 0] Loading model...",
+        "[GPU 0] Batch probe (generation): 64",
+        "[GPU 0] Batch 64 OOM; retrying 32",
+        "[GPU 0] Batch selected (generation): 32",
+    ]
+
+
+def test_batch_validation_event_explains_long_full_generation() -> None:
+    assert format_worker_event(
+        "[GPU 1]",
+        {
+            "event": "batch_validation",
+            "mode": "generation",
+            "batch_size": 40,
+            "max_new_tokens": 100,
+        },
+    ) == "[GPU 1] Validating batch 40 with 100 generated tokens..."
+
+
+def test_worker_prewarm_phases_explain_compile_pause() -> None:
+    assert format_worker_event(
+        "[GPU 0]", {"event": "worker_phase", "phase": "prewarm"}
+    ) == "[GPU 0] Compiling resident generation shapes..."
+    assert format_worker_event(
+        "[GPU 0]", {"event": "worker_phase", "phase": "prewarm_ready"}
+    ) == "[GPU 0] Generation backend ready; starting trials..."

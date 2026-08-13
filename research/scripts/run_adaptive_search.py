@@ -766,26 +766,30 @@ def prepare_multilingual_run_runtime(
         run_root.resolve() / "runtime_sources" / "direction_map" / "analysis"
     )
     if dry_run or not (direction_package / "manifest.json").is_file():
-        print(
-            json.dumps(
-                {"event": "multilingual_geometry_prepare", "command": geometry_command},
-                sort_keys=True,
-            ),
-            flush=True,
-        )
+        print("▶ Direction map | preparing 10,000 frozen geometry rows...", flush=True)
+        if dry_run:
+            print(
+                json.dumps(
+                    {"event": "multilingual_geometry_prepare", "command": geometry_command},
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
         if not dry_run:
             subprocess.run(geometry_command, check=True, cwd=Path(__file__).parents[2])
     if not dry_run:
         from heretic.language_map_directions import load_direction_map_package
 
         load_direction_map_package(direction_package)
-    print(
-        json.dumps(
-            {"event": "multilingual_runtime_prepare", "command": prepare_command},
-            sort_keys=True,
-        ),
-        flush=True,
-    )
+    print("▶ Multilingual runtime | preparing clean reference...", flush=True)
+    if dry_run:
+        print(
+            json.dumps(
+                {"event": "multilingual_runtime_prepare", "command": prepare_command},
+                sort_keys=True,
+            ),
+            flush=True,
+        )
     if dry_run:
         return {"status": "DRY_RUN"}
     subprocess.run(prepare_command, check=True, cwd=Path(__file__).parents[2])
@@ -839,9 +843,11 @@ def prepare_geometry_trajectory(
         )
         return package_dir
     create_empty_trial_journal(journal, study_name="heretic")
+    print("▶ 3D geometry | projecting the frozen map and preparing HTML...", flush=True)
     subprocess.run(command, check=True, cwd=Path(__file__).parents[2])
     if not (package_dir / "trajectory_manifest.json").is_file():
         raise RuntimeError("geometry projection produced no trajectory manifest")
+    print(f"✓ 3D geometry | ready | {package_dir / 'report.html'}", flush=True)
     return package_dir
 
 
@@ -1037,6 +1043,20 @@ def console_safe_text(value: str, encoding: str | None = None) -> str:
     return value
 
 
+def format_stage_worker_line(device: str, line: str) -> str | None:
+    """Render structured worker phases without leaking ordinary worker output."""
+
+    try:
+        event = json.loads(line)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(event, dict):
+        return None
+    from heretic.language_map_controller import format_worker_event
+
+    return format_worker_event(f"GPU {device} |", event)
+
+
 def start_stage(
     stage: Stage,
     executable: Path,
@@ -1050,19 +1070,25 @@ def start_stage(
     command = [str(executable), *command_args]
     effective_device = stage.device if device is None else device
     effective_name = display_name or stage.name
-    print(
-        json.dumps(
-            {
-                "event": "stage_start",
-                "stage": effective_name,
-                "cwd": str(stage.directory),
-                "device": effective_device,
-                "command": command,
-            },
-            sort_keys=True,
-        ),
-        flush=True,
-    )
+    if dry_run or os.environ.get("HERETIC_SUPERVISED") != "1":
+        print(
+            json.dumps(
+                {
+                    "event": "stage_start",
+                    "stage": effective_name,
+                    "cwd": str(stage.directory),
+                    "device": effective_device,
+                    "command": command,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+    else:
+        print(
+            f"GPU {effective_device} | Starting {effective_name}; loading model...",
+            flush=True,
+        )
     if dry_run:
         return subprocess.Popen(
             [sys.executable, "-c", "pass"],
@@ -1120,6 +1146,11 @@ def start_stage(
             for line in process.stdout:
                 log.write(line)
                 log.flush()
+                if human_line := format_stage_worker_line(
+                    str(effective_device), line.rstrip("\r\n")
+                ):
+                    print(console_safe_text(human_line), flush=True)
+                    continue
                 lowered = line.lower()
                 if any(
                     marker in lowered

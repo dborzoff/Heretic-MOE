@@ -65,6 +65,47 @@ def build_worker_command(
     )
 
 
+def format_worker_event(prefix: str, event: Mapping[str, object]) -> str | None:
+    kind = str(event.get("event", ""))
+    if kind == "worker_phase":
+        phase = str(event.get("phase", ""))
+        labels = {
+            "model_load": "Loading model...",
+            "model_ready": "Model loaded; preparing token cache...",
+            "tokenize": "Tokenizing frozen rows...",
+            "prewarm": "Compiling resident generation shapes...",
+            "prewarm_ready": "Generation backend ready; starting trials...",
+        }
+        label = labels.get(phase)
+        return f"{prefix} {label}" if label is not None else None
+    if kind == "token_cache_ready":
+        rows = int(event.get("rows", 0))
+        tokens = int(event.get("tokens", 0))
+        pinned = "pinned" if bool(event.get("pinned", False)) else "CPU"
+        return f"{prefix} Token cache ready: {rows} rows, {tokens} tokens ({pinned})"
+    mode = str(event.get("mode", "batch"))
+    batch_size = int(event.get("batch_size", 0))
+    if kind == "batch_probe":
+        return f"{prefix} Batch probe ({mode}): {batch_size}"
+    if kind == "batch_backoff":
+        next_batch_size = int(event.get("next_batch_size", 0))
+        reason = str(event.get("reason", "retry"))
+        return f"{prefix} Batch {batch_size} {reason}; retrying {next_batch_size}"
+    if kind == "batch_probe_result":
+        free_gib = float(event.get("free_gib", 0.0))
+        return f"{prefix} Batch {batch_size} fits; {free_gib:.2f} GiB free"
+    if kind == "batch_validation":
+        tokens = int(event.get("max_new_tokens", 0))
+        return f"{prefix} Validating batch {batch_size} with {tokens} generated tokens..."
+    if kind == "batch_validation_result":
+        free_gib = float(event.get("free_gib", 0.0))
+        status = str(event.get("status", "unknown"))
+        return f"{prefix} Batch validation {status}: {batch_size}, {free_gib:.2f} GiB free"
+    if kind == "batch_selected":
+        return f"{prefix} Batch selected ({mode}): {batch_size}"
+    return None
+
+
 def run_worker_processes(
     specifications: Sequence[GeometryWorkerSpec],
     *,
@@ -78,6 +119,7 @@ def run_worker_processes(
     processes: list[tuple[GeometryWorkerSpec, subprocess.Popen[str]]] = []
     readers: list[Thread] = []
     progress_by_worker: dict[str, tuple[int, int]] = {}
+    selected_batch_by_worker: dict[str, int] = {}
     progress_started = time.monotonic()
     progress_lock = Lock()
     ui = PipelineUI() if line_sink is print and total_rows is not None else None
@@ -98,6 +140,19 @@ def run_worker_processes(
                 event = json.loads(line)
             except (json.JSONDecodeError, TypeError):
                 event = None
+            if isinstance(event, dict):
+                human_event = format_worker_event(prefix, event)
+                if human_event is not None:
+                    if event.get("event") == "batch_selected":
+                        with progress_lock:
+                            selected_batch_by_worker[specification.worker_id] = int(
+                                event["batch_size"]
+                            )
+                    if ui is not None:
+                        ui.note(human_event)
+                    else:
+                        line_sink(human_event)
+                    continue
             if isinstance(event, dict) and event.get("event") in {
                 "worker_progress",
                 "reference_worker_progress",
@@ -190,6 +245,16 @@ def run_worker_processes(
             }
             if next_action is not None and not any(exits.values()):
                 summary["next"] = next_action
+            if selected_batch_by_worker:
+                selected = set(selected_batch_by_worker.values())
+                summary["batch"] = (
+                    str(next(iter(selected)))
+                    if len(selected) == 1
+                    else ", ".join(
+                        f"{worker.removeprefix('gpu-')}:{batch}"
+                        for worker, batch in sorted(selected_batch_by_worker.items())
+                    )
+                )
             ui.finish_stage(summary)
             ui.close()
         return exits

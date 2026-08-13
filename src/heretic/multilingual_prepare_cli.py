@@ -151,6 +151,10 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         trial_rows_per_cell=contract.trial_rows_per_cell,
         final_holdout_rows_per_language=contract.final_holdout_rows_per_language,
     )
+    print(
+        "▶ Runtime contract | freezing dataset, directions and language schedule...",
+        flush=True,
+    )
     static_manifest = prepare_static_multilingual_runtime(
         bundle=bundle,
         direction_source=args.direction_source,
@@ -161,15 +165,9 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         expected_per_direction=contract.trial_rows_per_cell,
     )
     print(
-        json.dumps(
-            {
-                "event": "multilingual_static_ready",
-                "status": "PASS",
-                "rows_per_trial": static_manifest["rows_per_trial"],
-                "schedule_trials": static_manifest["schedule_trials"],
-            },
-            sort_keys=True,
-        ),
+        "✓ Runtime contract | "
+        f"{static_manifest['rows_per_trial']} rows/trial | "
+        f"{static_manifest['schedule_trials']} scheduled trials",
         flush=True,
     )
 
@@ -178,18 +176,12 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         raise ValueError(
             "strict multilingual preparation requires a local model directory"
         )
+    print("▶ Model fingerprint | hashing local model artifacts...", flush=True)
     fingerprint = fingerprint_local_model(model_path)
     _write_or_verify(runtime_root / "model" / "manifest.json", fingerprint)
     print(
-        json.dumps(
-            {
-                "event": "model_fingerprint_ready",
-                "status": "PASS",
-                "files": fingerprint["files"],
-                "bytes": fingerprint["bytes"],
-            },
-            sort_keys=True,
-        ),
+        "✓ Model fingerprint | "
+        f"{fingerprint['files']} files | {fingerprint['bytes'] / 1024**3:.2f} GiB",
         flush=True,
     )
 
@@ -284,15 +276,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     }
     _write_or_verify(runtime_root / "manifest.json", final_manifest)
     print(
-        json.dumps(
-            {
-                "event": "multilingual_runtime_ready",
-                "status": "PASS",
-                "runtime_root": str(runtime_root),
-                "rows": clean_manifest["rows"],
-            },
-            sort_keys=True,
-        ),
+        f"✓ Multilingual runtime | {clean_manifest['rows']} clean rows | ready",
         flush=True,
     )
     return final_manifest

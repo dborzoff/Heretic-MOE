@@ -20,6 +20,7 @@ from .range_work_queue import RangeWorkQueue
 from .utils import Prompt
 
 WorkerProgress = Callable[[str, int, int, int, int], None]
+FinalizeProgress = Callable[[int, int, str], None]
 
 
 def _sha256(path: Path) -> str:
@@ -140,6 +141,7 @@ def finalize_range_cache(
     *,
     metadata: dict[str, object],
     capture_fingerprint: str | None = None,
+    progress: FinalizeProgress | None = None,
 ) -> dict[str, Any]:
     """Verify every range and publish one canonical cache with manifest last."""
 
@@ -171,7 +173,8 @@ def finalize_range_cache(
         lambda: {"tasks": 0, "rows": 0}
     )
     try:
-        for record in records:
+        progress_total = len(records) + 2
+        for record_index, record in enumerate(records, start=1):
             if record.start != expected_start:
                 raise ValueError("range coverage is not contiguous")
             if record.part_file is None or record.sha256 is None or record.shape is None:
@@ -194,11 +197,17 @@ def finalize_range_cache(
             worker = record.worker_id or "unknown"
             worker_stats[worker]["tasks"] += 1
             worker_stats[worker]["rows"] += record.end - record.start
+            if progress is not None:
+                progress(record_index, progress_total, "verify")
         if expected_start != len(rows):
             raise ValueError("range coverage does not match row count")
 
+        if progress is not None:
+            progress(len(records), progress_total, "merge")
         residuals = torch.cat(tensors, dim=0).contiguous()
         save_file({"residuals": residuals}, str(temporary["residuals.safetensors"]))
+        if progress is not None:
+            progress(len(records) + 1, progress_total, "publish")
         _write_jsonl(temporary["row_index.jsonl"], text_free_row_index(rows))
         files = {
             name: {
@@ -229,6 +238,8 @@ def finalize_range_cache(
         temporary["residuals.safetensors"].replace(final["residuals.safetensors"])
         temporary["row_index.jsonl"].replace(final["row_index.jsonl"])
         temporary["manifest.json"].replace(final["manifest.json"])
+        if progress is not None:
+            progress(progress_total, progress_total, "complete")
         for record in records:
             if record.part_file is not None:
                 (parts_dir / record.part_file).unlink(missing_ok=True)

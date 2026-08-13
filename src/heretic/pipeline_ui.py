@@ -9,7 +9,6 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from rich.console import Console
-from rich.panel import Panel
 from rich.progress import (
     BarColumn,
     Progress,
@@ -19,7 +18,6 @@ from rich.progress import (
     TextColumn,
     TimeRemainingColumn,
 )
-from rich.table import Table
 
 _SENSITIVE_KEY_PARTS = ("prompt", "response", "answer", "text", "payload")
 
@@ -127,11 +125,13 @@ class PipelineUI:
         self._active = True
         self._workers = {}
         self._last_compact_update = 0.0
-        title = _clean_label(description, fallback=self._stage, max_length=120)
+        title = (
+            self._stage
+            if description is None
+            else _clean_label(description, fallback=self._stage, max_length=120)
+        )
         if self._rich:
-            self.console.print(
-                Panel.fit(title, title=f"[bold]{self._stage}[/]", border_style="cyan")
-            )
+            self.console.print(f"▶ {self._stage} | {title}", style="bold cyan")
             self._progress.start()
             self._overall = self._progress.add_task(
                 self._stage, total=int(total), rate=0.0
@@ -141,6 +141,13 @@ class PipelineUI:
             self._overall = None
         for worker in workers:
             self.add_worker(worker, total=int(total))
+
+    def note(self, message: object) -> None:
+        """Print one short text-private status without breaking the live display."""
+
+        self._require_active()
+        value = _clean_label(message, fallback="working", max_length=180)
+        self.console.print(f"  {value}", style="dim")
 
     def add_worker(
         self,
@@ -268,6 +275,7 @@ class PipelineUI:
             raise TypeError("stage summary must be a mapping")
         rows: list[tuple[str, str]] = []
         status = "PASS"
+        next_action: str | None = None
         for key, value in summary.items():
             if _sensitive_key(key):
                 continue
@@ -275,6 +283,8 @@ class PipelineUI:
             rendered = _public_value(value)
             if name.lower() == "status":
                 status = rendered.upper()
+            elif name.lower() == "next":
+                next_action = rendered
             else:
                 rows.append((name, rendered))
         elapsed = time.monotonic() - self._started
@@ -282,21 +292,23 @@ class PipelineUI:
         if self._rich:
             if self._progress.live.is_started:
                 self._progress.stop()
-            table = Table(show_header=True, header_style="bold cyan")
-            table.add_column("Metric")
-            table.add_column("Value", overflow="fold")
-            for name, rendered in rows:
-                table.add_row(name, rendered)
+            suffix = " | ".join(f"{name} {value}" for name, value in rows)
+            icon = "✓" if status == "PASS" else "✗"
+            line = f"{icon} {status} {self._stage}"
+            if suffix:
+                line += f" | {suffix}"
+            if next_action is not None:
+                line += f" → {next_action}"
             self.console.print(
-                Panel(
-                    table,
-                    title=f"[bold]{status}[/] {self._stage}",
-                    border_style="green" if status == "PASS" else "red",
-                )
+                line,
+                style="bold green" if status == "PASS" else "bold red",
             )
         else:
             suffix = " ".join(f"{name}={value}" for name, value in rows)
-            self.console.print(f"SUMMARY {self._stage} | {status} | {suffix}")
+            next_suffix = f" next={next_action}" if next_action is not None else ""
+            self.console.print(
+                f"SUMMARY {self._stage} | {status} | {suffix}{next_suffix}"
+            )
         self._active = False
         self._overall = None
         self._workers = {}

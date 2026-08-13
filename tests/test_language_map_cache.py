@@ -208,6 +208,37 @@ def test_model_residual_iterator_auto_batch_backs_off_without_reloading():
     assert model._adaptive_residual_batch_size == 2
 
 
+def test_model_residual_iterator_reports_auto_batch_probe_and_selection():
+    model = Model.__new__(Model)
+    model.settings = SimpleNamespace(max_batch_size=8)
+    model._adaptive_residual_batch_size = 0
+    events = []
+    model.set_batch_event_sink(events.append)
+
+    def fake_get_residuals(batch):
+        if len(batch) > 2:
+            raise torch.OutOfMemoryError("synthetic")
+        return torch.zeros((len(batch), 1, 1), dtype=torch.float32)
+
+    model.get_residuals = fake_get_residuals
+    model._release_failed_cuda_batch = lambda: None
+    prompts = [Prompt(system="", user=f"row {index}") for index in range(5)]
+
+    list(model.iter_residual_batches(prompts, batch_size=0))
+
+    assert events == [
+        {"event": "batch_probe", "mode": "residual", "batch_size": 5},
+        {
+            "event": "batch_backoff",
+            "mode": "residual",
+            "batch_size": 5,
+            "next_batch_size": 2,
+            "reason": "OOM",
+        },
+        {"event": "batch_selected", "mode": "residual", "batch_size": 2},
+    ]
+
+
 def test_model_residual_iterator_buckets_cached_token_lengths_and_restores_order():
     model = object.__new__(Model)
     model.settings = SimpleNamespace(max_batch_size=8)

@@ -85,17 +85,28 @@ def test_resident_workers_dynamically_share_ranges_and_merge_canonical_order(
 
     assert results[1]["tasks"] > results[0]["tasks"]
     assert sorted(slow.measured + fast.measured) == list(range(40))
+    merge_progress = []
     manifest = finalize_range_cache(
         rows,
         queue,
         parts,
         tmp_path / "cache",
         metadata={"mode": "test"},
+        progress=lambda completed, total, phase: merge_progress.append(
+            (completed, total, phase)
+        ),
     )
     index, residuals, loaded = load_residual_cache(tmp_path / "cache")
     assert manifest["rows"] == loaded["rows"] == len(index) == 40
     assert residuals[:, 0, 0].tolist() == list(range(40))
     assert manifest["capture"]["workers"]["gpu-1"]["tasks"] > 1
+    assert merge_progress[-1] == (22, 22, "complete")
+    assert {phase for _, _, phase in merge_progress} == {
+        "verify",
+        "merge",
+        "publish",
+        "complete",
+    }
 
 
 def test_one_range_contains_multiple_model_batches_but_writes_one_part(
@@ -143,4 +154,3 @@ def test_finalization_rejects_tampered_range_before_publishing_manifest(
         finalize_range_cache(rows, queue, parts, tmp_path / "cache", metadata={})
 
     assert not (tmp_path / "cache" / "manifest.json").exists()
-

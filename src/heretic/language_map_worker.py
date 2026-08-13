@@ -91,7 +91,28 @@ def run_worker_job(
     if fingerprint != job.get("fingerprint"):
         raise ValueError("geometry worker fingerprint mismatch")
     queue = RangeWorkQueue(job["queue_path"])
+    print(
+        json.dumps(
+            {"event": "worker_phase", "phase": "model_load", "worker_id": worker_id},
+            sort_keys=True,
+        ),
+        flush=True,
+    )
     model = (model_factory or _load_model)(job)
+    print(
+        json.dumps(
+            {"event": "worker_phase", "phase": "model_ready", "worker_id": worker_id},
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    if hasattr(model, "set_batch_event_sink"):
+        model.set_batch_event_sink(
+            lambda event: print(
+                json.dumps({**event, "worker_id": worker_id}, sort_keys=True),
+                flush=True,
+            )
+        )
     cache_prompts = [
         Prompt(system=str(job["system_prompt"]), user=row.prompt) for row in rows
     ]

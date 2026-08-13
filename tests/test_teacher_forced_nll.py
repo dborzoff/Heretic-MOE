@@ -6,6 +6,7 @@ import pytest
 import torch
 from torch import nn
 
+import heretic.model as model_module
 from heretic.model import Model
 from heretic.teacher_forced import per_row_conditional_nll
 from heretic.utils import Prompt
@@ -169,3 +170,38 @@ def test_conditional_nll_has_independent_adaptive_batch_with_oom_backoff() -> No
     assert wrapper._adaptive_nll_batch_size == 2
     assert 5 in wrapper.model.batch_sizes
     assert max(size for size in wrapper.model.batch_sizes if size <= 2) == 2
+
+
+def test_conditional_nll_retries_oom_raised_by_loss_materialization(
+    monkeypatch,
+) -> None:
+    wrapper = object.__new__(Model)
+    wrapper.model = _CausalModel()
+    wrapper.tokenizer = _Tokenizer()
+    wrapper.settings = type(
+        "Settings",
+        (),
+        {
+            "batch_size": 1,
+            "conditional_nll_batch_size": 0,
+            "max_batch_size": 4,
+        },
+    )()
+    wrapper._render_chat_prompts = lambda prompts: [prompt.user for prompt in prompts]
+    original = model_module.per_row_conditional_nll
+
+    def score(logits, labels):
+        if logits.shape[0] > 2:
+            raise torch.OutOfMemoryError("synthetic loss OOM")
+        return original(logits, labels)
+
+    monkeypatch.setattr(model_module, "per_row_conditional_nll", score)
+
+    values = wrapper.get_conditional_nll(
+        [Prompt(system="", user=str(index)) for index in range(4)],
+        [[3, 4] for _ in range(4)],
+    )
+
+    assert len(values) == 4
+    assert wrapper._adaptive_nll_batch_size == 2
+    assert wrapper.model.batch_sizes[:2] == [4, 2]

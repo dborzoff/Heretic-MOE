@@ -7,7 +7,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from collections.abc import Sequence
+import statistics
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ from .language_map_parallel import finalize_range_cache
 from .language_map_projection import write_projection_package
 from .language_map_report import write_interactive_geometry_report
 from .language_map_trajectory import initialize_trajectory_package
+from .pipeline_ui import PipelineUI
 from .range_work_queue import RangeWorkQueue
 
 
@@ -333,9 +335,9 @@ def _capture_parallel(
     ]
     exits = run_worker_processes(
         specifications,
-        stage_name="Direction geometry map",
+        stage_name="Direction capture",
         total_rows=len(rows),
-        next_action="Clean reference",
+        next_action="Merge + analysis",
     )
     failed = {
         worker_id: exit_code
@@ -351,19 +353,95 @@ def _capture_parallel(
         raise RuntimeError(
             f"Geometry queue incomplete: {stats.complete_rows}/{len(rows)} rows"
         )
-    manifest = finalize_range_cache(
-        rows,
-        queue,
-        parts_dir,
-        cache_dir,
-        metadata=metadata,
-        capture_fingerprint=fingerprint,
+    merge_total = stats.total_tasks + 2
+    merge_ui = PipelineUI()
+    merge_ui.stage(
+        "Direction merge",
+        total=merge_total,
+        workers=("cpu",),
+        description=f"Verifying and merging {stats.total_tasks} residual parts",
     )
+    last_phase = [""]
+
+    def merge_progress(completed: int, total: int, phase: str) -> None:
+        if phase != last_phase[0]:
+            labels = {
+                "verify": "Verifying part hashes and shapes...",
+                "merge": "Combining residual tensors...",
+                "publish": "Writing canonical cache...",
+                "complete": "Canonical cache published.",
+            }
+            merge_ui.note(labels.get(phase, phase))
+            last_phase[0] = phase
+        merge_ui.update_worker("cpu", completed=completed, total=total)
+
+    try:
+        manifest = finalize_range_cache(
+            rows,
+            queue,
+            parts_dir,
+            cache_dir,
+            metadata=metadata,
+            capture_fingerprint=fingerprint,
+            progress=merge_progress,
+        )
+        merge_ui.finish_stage(
+            {
+                "status": manifest["status"],
+                "parts": stats.total_tasks,
+                "rows": len(rows),
+                "next": "Direction analysis",
+            }
+        )
+    except BaseException as error:
+        merge_ui.fail_stage(error)
+        raise
+    finally:
+        merge_ui.close()
     job_path.unlink(missing_ok=True)
     return manifest
 
 
-def _analyze(cache_dir: Path, output_dir: Path, seed: int) -> dict[str, Any]:
+def _geometry_findings(
+    direction_manifest: Mapping[str, Any], report: Mapping[str, Any]
+) -> dict[str, object]:
+    bounds = [int(value) for value in direction_manifest["recommended_layer_bounds"]]
+    diagnostics = list(direction_manifest["diagnostics"]["layers"])
+    candidates = [
+        row for row in diagnostics if bounds[0] <= int(row["layer"]) <= bounds[1]
+    ]
+    strongest = sorted(
+        candidates,
+        key=lambda row: float(row["layer_reliability"]),
+        reverse=True,
+    )[:3]
+    stability = statistics.median(
+        float(row["cross_language_stability"]) for row in candidates
+    )
+    peak_separation = max(float(row["separation_strength"]) for row in candidates)
+    language_losses = {
+        str(language): float(value["direction_loss"])
+        for language, value in report["language_contributions"].items()
+    }
+    most_sensitive = max(language_losses, key=language_losses.__getitem__)
+    return {
+        "usable_layers": f"{bounds[0]}-{bounds[1]}",
+        "strongest_layers": ",".join(str(row["layer"]) for row in strongest),
+        "cross_lang_stability": f"{stability * 100:.1f}%",
+        "peak_separation": f"{peak_separation:.3f}",
+        "largest_language_loss": (
+            f"{most_sensitive} {language_losses[most_sensitive] * 100:.2f}%"
+        ),
+        "report": "analysis/report.html",
+    }
+
+
+def _analyze(
+    cache_dir: Path,
+    output_dir: Path,
+    seed: int,
+    progress: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
     index, residuals, manifest = load_residual_cache(cache_dir)
     languages = tuple(
         dict.fromkeys(str(row["language"]).lower() for row in index)
@@ -374,8 +452,15 @@ def _analyze(cache_dir: Path, output_dir: Path, seed: int) -> dict[str, Any]:
         languages=languages,
     )
     direction_manifest = write_direction_map_package(profile, output_dir)
+    if progress is not None:
+        progress(1, 3)
     report = analyze_geometry(index, residuals, seed=seed)
+    if progress is not None:
+        progress(2, 3)
     write_geometry_reports(report, output_dir)
+    if progress is not None:
+        progress(3, 3)
+    findings = _geometry_findings(direction_manifest, report)
     return {
         "status": report["status"],
         "mode": "analyze",
@@ -385,6 +470,7 @@ def _analyze(cache_dir: Path, output_dir: Path, seed: int) -> dict[str, Any]:
         "cache_status": manifest["status"],
         "directions_sha256": direction_manifest["package_sha256"],
         "output_dir": str(output_dir.resolve()),
+        "findings": findings,
     }
 
 
@@ -523,7 +609,30 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         return result
 
     _capture_parallel(rows, args, files)
-    result = _analyze(args.output_dir / "cache", args.output_dir / "analysis", args.seed)
+    analysis_ui = PipelineUI()
+    analysis_ui.stage(
+        "Direction analysis",
+        total=3,
+        workers=("analysis",),
+        description="Building directions, layer diagnostics and HTML report",
+    )
+    try:
+        result = _analyze(
+            args.output_dir / "cache",
+            args.output_dir / "analysis",
+            args.seed,
+            progress=lambda completed, total: analysis_ui.update_worker(
+                "analysis", completed=completed, total=total
+            ),
+        )
+        analysis_ui.finish_stage(
+            {"status": result["status"], **result["findings"], "next": "Clean reference"}
+        )
+    except BaseException as error:
+        analysis_ui.fail_stage(error)
+        raise
+    finally:
+        analysis_ui.close()
     result["mode"] = "run"
     print(json.dumps(result, sort_keys=True))
     return result

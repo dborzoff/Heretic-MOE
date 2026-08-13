@@ -6,7 +6,26 @@ from pathlib import Path
 import torch
 
 from heretic.language_map_data import GeometryRow
-from heretic.multilingual_reference_worker import run_worker_job
+from heretic.multilingual_reference_worker import (
+    _autotune_reference_batch,
+    run_worker_job,
+)
+
+
+def test_reference_worker_autotunes_zero_batch_before_generation() -> None:
+    calls = []
+
+    class FakeModel:
+        def autotune_generation_batch_size(self, prompts, *, expected_rows):
+            calls.append((list(prompts), expected_rows))
+            return {"status": "PASS", "batch_size": 8}
+
+    prompts = [object(), object(), object()]
+
+    result = _autotune_reference_batch(FakeModel(), prompts, 0)
+
+    assert result == {"status": "PASS", "batch_size": 8}
+    assert calls == [(prompts, 3)]
 
 
 def test_reference_worker_writes_only_its_contiguous_shard(

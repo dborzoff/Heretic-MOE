@@ -58,6 +58,24 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
         self.assertEqual(args.finalist_top_n, 6)
         self.assertEqual(args.keyword_near_gate_extra, 1)
 
+    def test_search_worker_batch_event_is_forwarded_as_human_status(self) -> None:
+        line = json.dumps(
+            {
+                "event": "batch_validation",
+                "mode": "generation",
+                "batch_size": 40,
+                "max_new_tokens": 100,
+            }
+        )
+
+        self.assertEqual(
+            controller.format_stage_worker_line("1", line),
+            "GPU 1 | Validating batch 40 with 100 generated tokens...",
+        )
+
+    def test_unrelated_worker_line_is_not_forwarded_as_status(self) -> None:
+        self.assertIsNone(controller.format_stage_worker_line("0", "ordinary output"))
+
     def test_git_provenance_counts_untracked_files_as_dirty(self) -> None:
         calls: list[list[str]] = []
 

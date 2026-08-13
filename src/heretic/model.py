@@ -171,6 +171,7 @@ class Model:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.needs_reload = False
+        self._batch_event_sink: Callable[[dict[str, object]], None] | None = None
         self._fused_experts_cache = {}
         self._last_edit_telemetry: dict[str, Any] = {"layers": [], "total": {}}
         self._edit_telemetry_accumulator: dict[
@@ -300,6 +301,18 @@ class Model:
         print("* Abliterable components:")
         for component, count in all_components.items():
             print(f"  * [bold]{component}[/]: [bold]{count}[/] modules total")
+
+    def set_batch_event_sink(
+        self, sink: Callable[[dict[str, object]], None] | None
+    ) -> None:
+        """Attach text-free batch-selection telemetry for a controller/worker."""
+
+        self._batch_event_sink = sink
+
+    def _emit_batch_event(self, event: str, mode: str, **values: object) -> None:
+        sink = getattr(self, "_batch_event_sink", None)
+        if sink is not None:
+            sink({"event": event, "mode": mode, **values})
 
     def _apply_lora(self):
         # Guard against calling this method at the wrong time.
@@ -1254,7 +1267,7 @@ class Model:
                 # Keep only one position per layer on-device. Moving each hook
                 # result to CPU here serializes the forward pass behind dozens
                 # of tiny device synchronizations. Stack first and transfer once.
-                captured[index] = value[:, -1, :].detach()
+                captured[index] = value[:, -1, :].detach().clone()
 
             return hook
 
@@ -1340,6 +1353,9 @@ class Model:
             raise ValueError("prompts must not be empty")
         configured = int(self.settings.batch_size)
         automatic = configured == 0
+        tuning = automatic and int(
+            getattr(self, "_adaptive_generation_batch_size", 0)
+        ) <= 0
         batch_size = (
             int(getattr(self, "_adaptive_generation_batch_size", 0))
             if automatic
@@ -1347,6 +1363,10 @@ class Model:
         )
         if batch_size <= 0:
             batch_size = min(int(self.settings.max_batch_size), len(prompts))
+        if tuning:
+            self._emit_batch_event(
+                "batch_probe", "generation", batch_size=batch_size
+            )
         # Similar lengths reduce left-padding without changing the row contract.
         if hasattr(self, "tokenizer"):
             prompt_lengths = [
@@ -1376,10 +1396,24 @@ class Model:
             except BaseException as error:
                 if not automatic or batch_size == 1 or not self._is_cuda_oom(error):
                     raise
-                batch_size = max(1, batch_size // 2)
+                next_batch_size = max(1, batch_size // 2)
+                if tuning:
+                    self._emit_batch_event(
+                        "batch_backoff",
+                        "generation",
+                        batch_size=batch_size,
+                        next_batch_size=next_batch_size,
+                        reason="OOM",
+                    )
+                batch_size = next_batch_size
                 self._adaptive_generation_batch_size = batch_size
                 self._release_failed_cuda_batch()
                 continue
+            if tuning:
+                self._emit_batch_event(
+                    "batch_selected", "generation", batch_size=batch_size
+                )
+                tuning = False
             for local, original in enumerate(selected):
                 responses[original] = batch_responses[local]
                 token_ids[original] = batch_token_ids[local]
@@ -1704,6 +1738,7 @@ class Model:
         candidate = max(1, candidate)
         probes: list[GenerationBatchProbe] = []
         best: GenerationBatchProbe | None = None
+        self._emit_batch_event("batch_probe", "generation", batch_size=candidate)
         while candidate <= maximum:
             try:
                 probe = self._probe_generation_batch(prompts, candidate)
@@ -1712,10 +1747,24 @@ class Model:
                     raise
                 self._release_failed_cuda_batch()
                 if best is None and candidate > 1:
-                    candidate = max(1, candidate // 2)
+                    next_candidate = max(1, candidate // 2)
+                    self._emit_batch_event(
+                        "batch_backoff",
+                        "generation",
+                        batch_size=candidate,
+                        next_batch_size=next_candidate,
+                        reason="OOM",
+                    )
+                    candidate = next_candidate
                     continue
                 break
             probes.append(probe)
+            self._emit_batch_event(
+                "batch_probe_result",
+                "generation",
+                batch_size=probe.batch_size,
+                free_gib=round(probe.free_bytes / 1024**3, 3),
+            )
             hard_reserve = max(
                 int(float(self.settings.batch_size_vram_headroom_gib) * 1024**3),
                 int(
@@ -1756,6 +1805,12 @@ class Model:
         validation: dict[str, object] | None = None
         validation_attempts: list[dict[str, object]] = []
         while True:
+            self._emit_batch_event(
+                "batch_validation",
+                "generation",
+                batch_size=candidate,
+                max_new_tokens=100,
+            )
             try:
                 validation = self.validate_generation_batch_size(
                     prompts,
@@ -1776,6 +1831,13 @@ class Model:
                 candidate = max(1, candidate // 2)
                 continue
             validation_attempts.append(dict(validation))
+            self._emit_batch_event(
+                "batch_validation_result",
+                "generation",
+                batch_size=candidate,
+                status=str(validation["status"]),
+                free_gib=round(int(validation["min_free_bytes"]) / 1024**3, 3),
+            )
             if validation["status"] == "PASS":
                 break
             if candidate == 1:
@@ -1784,6 +1846,9 @@ class Model:
                 )
             candidate = max(1, candidate // 2)
         self._adaptive_generation_batch_size = candidate
+        self._emit_batch_event(
+            "batch_selected", "generation", batch_size=candidate
+        )
         return {
             "status": "PASS",
             "batch_size": candidate,
@@ -1856,13 +1921,15 @@ class Model:
             )
         )
         automatic = configured == 0
-        batch_size = (
-            int(getattr(self, "_adaptive_nll_batch_size", 0))
-            if automatic
-            else configured
+        cached_batch_size = (
+            int(getattr(self, "_adaptive_nll_batch_size", 0)) if automatic else 0
         )
+        tuning = automatic and cached_batch_size <= 0
+        batch_size = cached_batch_size if automatic else configured
         if batch_size <= 0:
             batch_size = min(int(self.settings.max_batch_size), len(pairs))
+        if tuning:
+            self._emit_batch_event("batch_probe", "conditional NLL", batch_size=batch_size)
         values: list[float | None] = [None] * len(pairs)
         position = 0
         while position < len(order):
@@ -1921,6 +1988,7 @@ class Model:
             input_ids = cpu_input_ids.to(device, non_blocking=pin_memory)
             attention_mask = cpu_attention_mask.to(device, non_blocking=pin_memory)
             labels = cpu_labels.to(device, non_blocking=pin_memory)
+            outputs = None
             try:
                 with torch.inference_mode():
                     outputs = self.model(
@@ -1928,15 +1996,30 @@ class Model:
                         attention_mask=attention_mask,
                         use_cache=False,
                     )
+                batch_values = per_row_conditional_nll(outputs.logits, labels)
             except BaseException as error:
-                del input_ids, attention_mask, labels
+                del input_ids, attention_mask, labels, outputs
                 if not automatic or batch_size == 1 or not self._is_cuda_oom(error):
                     raise
-                batch_size = max(1, batch_size // 2)
+                next_batch_size = max(1, batch_size // 2)
+                if tuning:
+                    self._emit_batch_event(
+                        "batch_backoff",
+                        "conditional NLL",
+                        batch_size=batch_size,
+                        next_batch_size=next_batch_size,
+                        reason="OOM",
+                    )
+                batch_size = next_batch_size
                 self._adaptive_nll_batch_size = batch_size
                 self._release_failed_cuda_batch()
                 continue
-            batch_values = per_row_conditional_nll(outputs.logits, labels)
+            del input_ids, attention_mask, labels, outputs
+            if tuning:
+                self._emit_batch_event(
+                    "batch_selected", "conditional NLL", batch_size=batch_size
+                )
+                tuning = False
             for original, value in zip(selected, batch_values, strict=True):
                 values[original] = float(value)
             position += len(selected)
@@ -1962,7 +2045,7 @@ class Model:
                     raise ValueError(
                         f"residual hook {index} did not receive [batch,sequence,hidden]"
                     )
-                captured[index] = value[:, -1, :].detach()
+                captured[index] = value[:, -1, :].detach().clone()
 
             return hook
 
@@ -2015,9 +2098,19 @@ class Model:
         if batch_size < 0:
             raise ValueError("batch_size must be nonnegative")
         if automatic:
-            batch_size = int(getattr(self, "_adaptive_residual_batch_size", 0))
+            cached_batch_size = int(
+                getattr(self, "_adaptive_residual_batch_size", 0)
+            )
+            tuning = cached_batch_size <= 0
+            batch_size = cached_batch_size
             if batch_size <= 0:
                 batch_size = min(int(self.settings.max_batch_size), len(prompts))
+            if tuning:
+                self._emit_batch_event(
+                    "batch_probe", "residual", batch_size=batch_size
+                )
+        else:
+            tuning = False
         token_lengths = None
         if hasattr(self, "tokenizer"):
             token_lengths = [
@@ -2040,10 +2133,24 @@ class Model:
             except BaseException as error:
                 if not automatic or batch_size == 1 or not self._is_cuda_oom(error):
                     raise
-                batch_size = max(1, batch_size // 2)
+                next_batch_size = max(1, batch_size // 2)
+                if tuning:
+                    self._emit_batch_event(
+                        "batch_backoff",
+                        "residual",
+                        batch_size=batch_size,
+                        next_batch_size=next_batch_size,
+                        reason="OOM",
+                    )
+                batch_size = next_batch_size
                 self._adaptive_residual_batch_size = batch_size
                 self._release_failed_cuda_batch()
                 continue
+            if tuning:
+                self._emit_batch_event(
+                    "batch_selected", "residual", batch_size=batch_size
+                )
+                tuning = False
             if restore_order is not None:
                 residuals = residuals[restore_order]
             position += len(batch)

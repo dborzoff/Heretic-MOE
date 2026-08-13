@@ -5,13 +5,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import optuna
-from optuna.storages import JournalStorage
-from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 import pytest
 import torch
+from optuna.storages import JournalStorage
+from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 
-from heretic import cli
-from heretic import language_map_cli
+from heretic import cli, language_map_cli
 from heretic.language_map_cache import capture_residual_cache
 from heretic.language_map_data import LanguageFile, load_aligned_corpus
 from heretic.supervisor import GpuInfo
@@ -48,6 +47,44 @@ def test_cli_dispatches_geometry_map_without_supervisor(
     cli.main()
 
     assert received == [["analyze"]]
+
+
+def test_geometry_findings_summarize_layers_without_corpus_text() -> None:
+    findings = language_map_cli._geometry_findings(
+        {
+            "recommended_layer_bounds": [2, 4],
+            "diagnostics": {
+                "layers": [
+                    {
+                        "layer": layer,
+                        "layer_reliability": reliability,
+                        "cross_language_stability": stability,
+                        "separation_strength": separation,
+                    }
+                    for layer, reliability, stability, separation in (
+                        (2, 0.7, 0.8, 0.91),
+                        (3, 0.9, 0.9, 0.99),
+                        (4, 0.8, 0.85, 0.95),
+                    )
+                ]
+            },
+        },
+        {
+            "language_contributions": {
+                "en": {"direction_loss": 0.01},
+                "zh": {"direction_loss": 0.03},
+            }
+        },
+    )
+
+    assert findings == {
+        "usable_layers": "2-4",
+        "strongest_layers": "3,4,2",
+        "cross_lang_stability": "85.0%",
+        "peak_separation": "0.990",
+        "largest_language_loss": "zh 3.00%",
+        "report": "analysis/report.html",
+    }
 
 
 def test_dry_run_validates_without_loading_model(

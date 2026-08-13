@@ -16,6 +16,14 @@ for stream in (sys.stdout, sys.stderr):
 from .config import Settings
 
 
+def _normalize_legacy_positional_model_argv(argv: list[str]) -> list[str]:
+    """Keep only the unambiguous one-argument positional model shortcut."""
+
+    if len(argv) == 2 and not argv[1].startswith("-"):
+        return [argv[0], "--model", argv[1]]
+    return argv
+
+
 def _is_help_invocation() -> bool:
     args = sys.argv[1:]
     return "-h" in args or "--help" in args
@@ -43,6 +51,7 @@ import random
 import re
 import time
 import warnings
+from collections.abc import Callable
 from dataclasses import asdict
 from os.path import commonprefix
 from pathlib import Path
@@ -133,6 +142,33 @@ _ALWAYS_RUNTIME_FIELDS = (
     "trial_response_number_stride",
     "geometry_trial_number_offset",
 )
+
+
+def _study_is_finished(study: Any) -> bool:
+    """Treat controller-created empty journals as resumable unfinished studies."""
+
+    return bool(study.user_attrs.get("finished", False))
+
+
+def _study_has_saved_settings(study: Any) -> bool:
+    """Distinguish a real prior run from a controller-created empty journal."""
+
+    return isinstance(study.user_attrs.get("settings"), str)
+
+
+def _configure_supervised_model_events(
+    model: Any,
+    *,
+    supervised: bool,
+    sink: Callable[[dict[str, object]], None] | None = None,
+) -> None:
+    """Expose batch tuning phases to the one-console supervisor."""
+
+    if not supervised:
+        return
+    if sink is None:
+        sink = lambda event: print(json.dumps(event, sort_keys=True), flush=True)
+    model.set_batch_event_sink(sink)
 
 
 def _predict_next_batch_free_bytes(
@@ -396,19 +432,8 @@ def run():
         )
         print()
 
-    if (
-        # There is at least one argument (argv[0] is the program name).
-        len(sys.argv) > 1
-        # Heretic is being invoked in standard (model processing) mode.
-        and "--collect-reproducibles" not in sys.argv
-        and "--reproduce" not in sys.argv
-        # No model has been explicitly provided.
-        and "--model" not in sys.argv
-        # The last argument is a parameter value rather than a flag (such as "--help").
-        and not sys.argv[-1].startswith("-")
-    ):
-        # Assume the last argument is the model.
-        sys.argv.insert(-1, "--model")
+    if "--collect-reproducibles" not in sys.argv and "--reproduce" not in sys.argv:
+        sys.argv[:] = _normalize_legacy_positional_model_argv(sys.argv)
 
     # Work around the "model" argument being required
     # when Heretic is invoked in a non-processing mode.
@@ -532,12 +557,13 @@ def run():
 
     if (
         existing_study is not None
+        and _study_has_saved_settings(existing_study)
         and settings.evaluate_model is None
         and not reproduction_mode
     ):
         choices = []
 
-        if existing_study.user_attrs["finished"]:
+        if _study_is_finished(existing_study):
             if settings.checkpoint_action is None:
                 print()
                 print(
@@ -647,7 +673,12 @@ def run():
             storage = JournalStorage(backend)
 
     apply_multilingual_search_mode(settings)
+    if supervised:
+        print(json.dumps({"event": "worker_phase", "phase": "model_load"}))
     model = Model(settings)
+    _configure_supervised_model_events(model, supervised=supervised)
+    if supervised:
+        print(json.dumps({"event": "worker_phase", "phase": "model_ready"}))
     print()
     print_memory_usage()
 
@@ -903,6 +934,12 @@ def run():
         if settings.batch_size == 0:
             print()
             print("Selecting resident generation batch from VRAM...")
+            from .language_map_controller import format_worker_event
+
+            if not supervised:
+                model.set_batch_event_sink(
+                    lambda event: print(format_worker_event("*", event) or "")
+                )
             from .generation_batch_cache import (
                 GenerationBatchCacheContext,
                 build_cache_record,
@@ -1069,8 +1106,12 @@ def run():
                 f"{settings.generation_batch_target_headroom_fraction * 100:.0f}% "
                 "free VRAM)"
             )
+            if not supervised:
+                model.set_batch_event_sink(None)
         print()
         print("Prewarming resident generation backend...")
+        if supervised:
+            print(json.dumps({"event": "worker_phase", "phase": "prewarm"}))
         prewarm = model.prewarm_generation_backend(
             resident_prompts,
             expected_rows=(
@@ -1088,6 +1129,8 @@ def run():
             )
         else:
             print("* Dynamic eager backend; compile prewarm not required.")
+        if supervised:
+            print(json.dumps({"event": "worker_phase", "phase": "prewarm_ready"}))
 
     if settings.evaluate_model is not None:
         assert evaluator is not None

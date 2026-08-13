@@ -49,8 +49,33 @@ def test_tty_stage_workers_and_summary_render_rich() -> None:
     assert "8" in output
     assert "notes" in output
     assert "ok" in output
+    assert "Metric" not in output
+    assert "Value" not in output
     assert "secret" not in output
     assert "prompt_payload" not in output
+
+
+def test_tty_stage_summary_is_one_compact_result_line() -> None:
+    console, _ = _console(terminal=True)
+    ui = PipelineUI(console=console, non_tty_update_interval=0.0)
+
+    ui.stage("Direction map", total=10)
+    ui.finish_stage(
+        {
+            "status": "PASS",
+            "workers": 2,
+            "rows": 10_000,
+            "next": "Clean reference",
+        }
+    )
+    ui.close()
+
+    output = console.export_text(styles=False)
+    assert "PASS Direction map" in output
+    assert "workers 2" in output
+    assert "rows 10000" in output
+    assert "→ Clean reference" in output
+    assert "Metric" not in output
 
 
 def test_non_tty_fallback_is_compact_and_text_private() -> None:

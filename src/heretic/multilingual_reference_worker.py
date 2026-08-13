@@ -14,6 +14,12 @@ from typing import Any
 import tomllib
 
 
+def _autotune_reference_batch(model: Any, prompts: Sequence[Any], batch_size: int):
+    if batch_size != 0 or not hasattr(model, "autotune_generation_batch_size"):
+        return None
+    return model.autotune_generation_batch_size(prompts, expected_rows=len(prompts))
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hereticMOE clean-reference worker")
     parser.add_argument("--job", required=True, type=Path)
@@ -69,16 +75,36 @@ def run_worker_job(
     profile, direction_manifest = load_direction_map_package(
         Path(job["runtime_root"]) / "clean_map" / "directions"
     )
+    print(
+        json.dumps(
+            {"event": "worker_phase", "phase": "model_load", "worker_id": worker_id},
+            sort_keys=True,
+        ),
+        flush=True,
+    )
     model = model_factory(settings) if model_factory is not None else None
     if model is None:
         from .model import Model
 
         model = Model(settings)
-    shard_rows = bundle.trial_rows[start:end]
-    if hasattr(model, "prepare_prompt_cache"):
-        prepared = model.prepare_prompt_cache(
-            [Prompt(system="", user=row.prompt) for row in shard_rows]
+    print(
+        json.dumps(
+            {"event": "worker_phase", "phase": "model_ready", "worker_id": worker_id},
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    if hasattr(model, "set_batch_event_sink"):
+        model.set_batch_event_sink(
+            lambda event: print(
+                json.dumps({**event, "worker_id": worker_id}, sort_keys=True),
+                flush=True,
+            )
         )
+    shard_rows = bundle.trial_rows[start:end]
+    shard_prompts = [Prompt(system="", user=row.prompt) for row in shard_rows]
+    if hasattr(model, "prepare_prompt_cache"):
+        prepared = model.prepare_prompt_cache(shard_prompts)
         packed = None
         if hasattr(model, "pin_prompt_cache"):
             packed = model.pin_prompt_cache()
@@ -101,6 +127,7 @@ def run_worker_job(
             ),
             flush=True,
         )
+    _autotune_reference_batch(model, shard_prompts, int(job["batch_size"]))
     output_dir = Path(job["shards_root"]) / f"{start:08d}-{end:08d}"
 
     def progress(completed: int, total: int) -> None:
