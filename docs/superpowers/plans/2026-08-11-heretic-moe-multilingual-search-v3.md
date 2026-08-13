@@ -18,8 +18,25 @@
 - Final holdout recheck: the frozen 4,000+660 rows at 100-token cap. PPL preservation uses matching SAFE response-token IDs via conditional NLL; the legacy independent text-corpus PPL is not part of multilingual v3.
 - New metric contract never imports raw values from old 136-row or `-0.0088` studies.
 - Resume requires exact model, dataset, map, SRG, schedule, generation, metric and constraint hashes.
+- The only user-edited launch configuration is YAML. Generated TOML and component manifests remain internal immutable artifacts under the resolved run-root.
+- Incompatible contract policy is one of `archive` (default), `new_run`, `replace`, or `fail`; it always applies to the complete run-root, never to one journal.
 
 ---
+
+## Approved completion order (2026-08-13)
+
+- [ ] Add a strict public YAML schema and generate the existing internal TOML/controller arguments from it.
+- [ ] Connect the existing frozen run-contract builder to production startup and exact resume validation.
+- [ ] Implement safe whole-run handling for `archive`, `new_run`, `replace`, and `fail`, including legacy roots without a contract.
+- [ ] Remove legacy multilingual finalist flags for independent `64x1024` PPL, `2/136` Keywords, absolute SRG gates and selectable legacy ranking policy.
+- [ ] Add missing hard gates for empty/truncated output and SAFE `D -> R` regression.
+- [ ] Fix multilingual finalist defaults (`TOP-6`, Balanced removal fraction `0.8`) and stale SRG fixture tests.
+- [ ] Generalize fused-MoE detection to every architecture already supported by the editor.
+- [ ] Make batch selection verify the selected batch at the real 100-token length; prewarm ordinary, 4,000-row finalist and 660-row holdout shapes separately.
+- [ ] Wire the existing trajectory package and offline HTML renderer into the one-command search pipeline.
+- [ ] Add one-line aggregate N-GPU progress, worker heartbeat/lease recovery and controller-level duplicate-run locking.
+- [ ] Synchronize `config.default.toml`, active documentation, provenance including untracked files, lint and type checks for the production path.
+- [ ] Verify with unit tests, N=1/2/4 controller tests, crash/resume tests, a two-GPU 10-12-trial smoke and only then a 120/600 real search.
 
 ### Task 1: Symmetric PPL preservation metric
 

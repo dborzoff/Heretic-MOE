@@ -1,5 +1,34 @@
 # Heretic-MOE: мультиязычный поиск v3
 
+## Публичная конфигурация и несовместимые запуски
+
+Пользователь запускает новый pipeline через один `config.yaml`. YAML является
+единственным редактируемым входным конфигом и содержит модель, run-root,
+устройства, число exploration/total trials, frozen dataset/SRG sources,
+post-search mode и политику несовместимого контракта. Рабочие `config.toml`,
+очереди, manifests и служебные JSON Heretic-MOE генерирует внутри run-root;
+они не являются вторым пользовательским интерфейсом.
+
+Перед trial 0 Heretic-MOE создаёт единый `run_contract.json`, который связывает
+SHA-256 модели/tokenizer, dataset, direction map, SRG profile, schedule,
+generation, metric и constraint contracts. Точные component manifests
+сохраняются: единый контракт не заменяет их, а ссылается на их hashes и служит
+одним resume-gate.
+
+При несовпадении контракта применяется `run.incompatible_contract`:
+
+- `archive` (default): атомарно переименовать весь существующий run-root в
+  `<name>_archive_<UTC timestamp>_<old hash8>` и создать чистый run-root;
+- `new_run`: оставить существующий каталог и выбрать первый свободный
+  `<name>_v2`, `<name>_v3`, ...;
+- `replace`: удалить только распознанный Heretic-MOE run-root после проверки
+  маркера и абсолютного пути, затем создать его заново;
+- `fail`: остановиться без изменений.
+
+Нельзя переносить или удалять только Optuna journal: journal связан с картой,
+SRG, schedule, clean references, private response archive и winners. Модели,
+датасеты и файлы вне выбранного run-root никогда не архивируются и не удаляются.
+
 ## Статус документа
 
 Это основная спецификация следующего поискового режима Heretic-MOE. В части
