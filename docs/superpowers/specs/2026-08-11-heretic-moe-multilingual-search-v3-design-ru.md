@@ -115,28 +115,11 @@ trial_<lang>_unsafe_400.jsonl
 Один обычный trial использует ровно 800 строк: 400 SAFE и 400 UNSAFE, по одному
 переводу каждого canonical ID.
 
-### SRG search calibration
+### Встроенный SRG-профиль
 
-```text
-search_unsafe_en.jsonl  132
-search_unsafe_ru.jsonl  132
-search_unsafe_zh.jsonl  132
-search_unsafe_es.jsonl  132
-search_unsafe_fr.jsonl  132
-```
-
-Полные проверенные SHA-256:
-
-```text
-en 86aa74f57f309a2afed3a2542362fae7f01e3698b60eb99ca81aef504ddad081
-ru 6444759882ba24a99f199b7aa1d9a38aaa782532133891c858c16426cac58ce2
-zh cf34f8a62be94776bb4189576ea9ee8b6b68382b42e965a18337d781fd24391b
-es 7ddb7e00f60bb07a709975a39e33bef4c0cbf2ebfbcea457f5faa5ae07df187c
-fr a59b56b762522a576fca8ad0e3a3ba87ae902d25e348021ae78c92844f86abf0
-```
-
-Набор `search_unsafe_*` (внутренние base ID Q0001-Q0132) используется для создания и проверки SRG-шкалы. Он не
-участвует в ordinary trials и не является финальным доказательным holdout.
+У каждого запуска больше нет отдельного per-model SRG calibration прохода.
+Cross-model профиль и prototype bank поставляются внутри Heretic-MOE, а
+model-relative baseline и масштабы метрик берутся из clean reference.
 
 ### Независимый final holdout
 
@@ -158,8 +141,9 @@ es b9b1ca3e20b6074b64b41d72ed0bd8ffb1d20946577a5ae4e7ae60d00203865f
 fr a94a04c322db10ee2f26fb2133b8fa612f63b7ec6a507599c530acd04dd75179
 ```
 
-Набор `srg_calibration_*` (внутренние base ID R0001-R0132) остаётся независимым от настройки SRG и от Optuna. Он
-открывается для candidate-ответов только после фиксации TOP-6.
+Набор `srg_calibration_*` сохраняет историческое имя файла, но используется
+только как независимый final holdout после фиксации TOP-6. Калибровочным
+этапом production-пайплайна он больше не является.
 
 ### Целостность split
 

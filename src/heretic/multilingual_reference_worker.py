@@ -62,7 +62,7 @@ def run_worker_job(
         languages=tuple(contract.languages),
         direction_rows_per_cell=contract.direction_rows_per_cell,
         trial_rows_per_cell=contract.trial_rows_per_cell,
-        calibration_rows_per_language=contract.calibration_rows_per_language,
+        final_holdout_rows_per_language=contract.final_holdout_rows_per_language,
     )
     if not 0 <= start < end <= len(bundle.trial_rows):
         raise ValueError("clean-reference worker range is out of bounds")

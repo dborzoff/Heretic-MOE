@@ -2,22 +2,22 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import dataclass
-from hashlib import sha256
 import json
 import math
 import os
-from pathlib import Path
 import time
-from typing import Any, Iterator, Literal
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from hashlib import sha256
+from pathlib import Path
+from typing import Any, Literal
 
 import numpy as np
 import optuna
 from optuna.storages import JournalStorage
 from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 from safetensors.torch import load_file, save_file
-import torch
 from torch import Tensor
 
 from .language_map_projection import (
@@ -25,7 +25,6 @@ from .language_map_projection import (
     project_residuals,
     retained_shift_ratio,
 )
-
 
 CoordinateStatus = Literal["not_captured", "captured"]
 _PHASES = {"random", "sobol", "exploration", "tpe", "recheck", "finalist"}
@@ -150,6 +149,27 @@ def load_text_free_trial_timeline(journal: Path) -> list[TrialRecord]:
             )
         )
     return records
+
+
+def create_empty_trial_journal(journal: Path, *, study_name: str) -> None:
+    """Create the shared study before workers so geometry can bind to it."""
+
+    journal = Path(journal)
+    if journal.is_file():
+        return
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    storage = JournalStorage(
+        JournalFileBackend(
+            str(journal),
+            lock_obj=JournalFileOpenLock(str(journal)),
+        )
+    )
+    optuna.create_study(
+        storage=storage,
+        study_name=study_name,
+        directions=("maximize", "minimize"),
+        load_if_exists=True,
+    )
 
 
 def _stable_score(seed: int, *parts: object) -> str:
@@ -285,6 +305,101 @@ def initialize_trajectory_package(
     }
     _write_json_atomic(trajectory_manifest, manifest)
     return manifest
+
+
+def refresh_trial_timeline(package_dir: Path, journal: Path) -> dict[str, Any]:
+    """Refresh text-free trial metadata after search while keeping coordinates."""
+
+    package_dir = Path(package_dir)
+    with _package_lock(package_dir):
+        manifest_path = package_dir / "trajectory_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        captured = {
+            int(row["trial_number"])
+            for row in (
+                json.loads(line)
+                for line in (package_dir / "trial_index.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line
+            )
+        }
+        timeline = []
+        for record in load_text_free_trial_timeline(Path(journal)):
+            payload = record.to_public_dict()
+            if record.number in captured:
+                payload["coordinate_status"] = "captured"
+            timeline.append(payload)
+        timeline_path = package_dir / "journal_trials.jsonl"
+        _write_jsonl_atomic(timeline_path, timeline)
+        manifest["journal_sha256"] = _sha256(Path(journal))
+        manifest["trials"] = len(timeline)
+        manifest["files"][timeline_path.name] = {
+            "bytes": timeline_path.stat().st_size,
+            "sha256": _sha256(timeline_path),
+        }
+        _write_json_atomic(manifest_path, manifest)
+        return manifest
+
+
+def write_finalist_verdicts(
+    package_dir: Path,
+    winners: dict[str, dict[str, Any]],
+    *,
+    trial_number_offset: int,
+) -> dict[str, object]:
+    """Mark rechecked Balanced/Max anchor points without exposing corpus text."""
+
+    package_dir = Path(package_dir)
+    allowed_roles = {"Balanced", "Max"}
+    if not winners or set(winners) - allowed_roles:
+        raise ValueError("winner roles must be a nonempty subset of Balanced/Max")
+    if int(trial_number_offset) < 0:
+        raise ValueError("trial number offset must be nonnegative")
+    with _package_lock(package_dir):
+        anchors = json.loads(
+            (package_dir / "anchor_index.json").read_text(encoding="utf-8")
+        )
+        row_ids = [str(row["row_id"]) for row in anchors]
+        if not row_ids or len(set(row_ids)) != len(row_ids):
+            raise ValueError("anchor index must contain unique row IDs")
+        verdict_path = package_dir / "verdicts.jsonl"
+        existing = [
+            json.loads(line)
+            for line in verdict_path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        retained = [row for row in existing if not row.get("finalist")]
+        records = list(retained)
+        for role in ("Balanced", "Max"):
+            winner = winners.get(role)
+            if winner is None:
+                continue
+            trial_number = int(trial_number_offset) + int(winner["trial_number"])
+            records.extend(
+                {
+                    "trial_number": trial_number,
+                    "row_id": row_id,
+                    "status": "success",
+                    "confidence": 1.0,
+                    "finalist": role,
+                }
+                for row_id in row_ids
+            )
+        _write_jsonl_atomic(verdict_path, records)
+        manifest_path = package_dir / "trajectory_manifest.json"
+        if manifest_path.is_file():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest.setdefault("files", {})[verdict_path.name] = {
+                "bytes": verdict_path.stat().st_size,
+                "sha256": _sha256(verdict_path),
+            }
+            _write_json_atomic(manifest_path, manifest)
+        return {
+            "status": "PASS",
+            "roles": len(winners),
+            "rows": len(records) - len(retained),
+        }
 
 
 @contextmanager

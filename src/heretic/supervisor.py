@@ -398,13 +398,6 @@ def main(argv: list[str] | None = None) -> None:
             command.extend(
                 ("--data-root", str(Path(multilingual.dataset_root).resolve()))
             )
-        if multilingual.srg_calibration_source:
-            command.extend(
-                (
-                    "--srg-calibration-source",
-                    str(Path(multilingual.srg_calibration_source).resolve()),
-                )
-            )
         command.append(
             {
                 "export": "--finalize",

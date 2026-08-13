@@ -16,12 +16,11 @@ def test_frozen_row_summary_uses_actual_runtime_bundle_sizes() -> None:
     bundle = SimpleNamespace(
         direction_rows=tuple(range(40)),
         trial_rows=tuple(range(50)),
-        search_rows=tuple(range(10)),
         final_rows=tuple(range(10)),
     )
 
     assert _format_multilingual_frozen_rows(bundle) == (
-        "map 40, trial 50, SRG calibration 10, final holdout 10"
+        "map 40, trial 50, built-in SRG profile, final holdout 10"
     )
 
 

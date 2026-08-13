@@ -117,7 +117,6 @@ def _write_minimal_launch_config(path: Path, run_root: Path) -> None:
                 "data": {
                     "dataset_root": str(path.parent / "dataset"),
                     "split_root": str(path.parent / "dataset" / "split"),
-                    "srg_calibration_source": str(path.parent / "dataset" / "search"),
                 },
             },
             sort_keys=False,
@@ -303,7 +302,6 @@ def test_supervisor_controller_uses_public_config_mapping(
                 "devices": {"mode": "include", "include": ["0", "1"]},
                 "data": {
                     "dataset_root": str(tmp_path / "dataset"),
-                    "srg_calibration_source": str(tmp_path / "srg"),
                 },
             },
             sort_keys=False,
@@ -346,4 +344,4 @@ def test_supervisor_controller_uses_public_config_mapping(
     assert command[command.index("--devices") + 1] == "0,1"
     assert "--data-root" in command
     assert command[command.index("--data-root") + 1] == str(tmp_path / "dataset")
-    assert "--srg-calibration-source" in command
+    assert "--srg-calibration-source" not in command

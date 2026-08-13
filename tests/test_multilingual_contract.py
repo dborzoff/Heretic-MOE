@@ -76,12 +76,6 @@ def _build_fixture(root: Path) -> tuple[Path, Path]:
                 ),
             )
         _write_jsonl(
-            root / f"search_unsafe_{language}.jsonl",
-            _calibration_rows(
-                language=language, prefix="Q", prompt_prefix="search", count=2
-            ),
-        )
-        _write_jsonl(
             root / f"srg_calibration_{language}.jsonl",
             _calibration_rows(
                 language=language, prefix="R", prompt_prefix="final", count=2
@@ -101,17 +95,15 @@ def test_loads_text_free_frozen_contract_with_exact_pool_counts(tmp_path: Path):
         languages=("en", "ru"),
         direction_rows_per_cell=2,
         trial_rows_per_cell=1,
-        calibration_rows_per_language=2,
+        final_holdout_rows_per_language=2,
     )
 
     assert len(bundle.direction_rows) == 8
     assert len(bundle.trial_rows) == 4
-    assert len(bundle.search_rows) == 4
     assert len(bundle.final_rows) == 4
     assert bundle.manifest["counts"] == {
         "direction": 8,
         "trial": 4,
-        "srg_calibration": 4,
         "final_holdout": 4,
     }
     serialized = json.dumps(bundle.manifest, sort_keys=True)
@@ -124,7 +116,7 @@ def test_rejects_cross_pool_prompt_overlap(tmp_path: Path):
     root, split = _build_fixture(tmp_path)
     trial = split / "trial_en_safe_1.jsonl"
     rows = [json.loads(line) for line in trial.read_text(encoding="utf-8").splitlines()]
-    rows[0]["prompt"] = "search-en-1"
+    rows[0]["prompt"] = "final-en-1"
     _write_jsonl(trial, rows)
 
     with pytest.raises(ValueError, match="prompt overlap"):
@@ -134,13 +126,13 @@ def test_rejects_cross_pool_prompt_overlap(tmp_path: Path):
             languages=("en", "ru"),
             direction_rows_per_cell=2,
             trial_rows_per_cell=1,
-            calibration_rows_per_language=2,
+            final_holdout_rows_per_language=2,
         )
 
 
-def test_rejects_cross_language_calibration_id_order_drift(tmp_path: Path):
+def test_rejects_cross_language_final_holdout_id_order_drift(tmp_path: Path):
     root, split = _build_fixture(tmp_path)
-    path = root / "search_unsafe_ru.jsonl"
+    path = root / "srg_calibration_ru.jsonl"
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     _write_jsonl(path, list(reversed(rows)))
 
@@ -151,7 +143,7 @@ def test_rejects_cross_language_calibration_id_order_drift(tmp_path: Path):
             languages=("en", "ru"),
             direction_rows_per_cell=2,
             trial_rows_per_cell=1,
-            calibration_rows_per_language=2,
+            final_holdout_rows_per_language=2,
         )
 
 
@@ -163,7 +155,7 @@ def test_contract_sha_changes_when_a_source_file_changes(tmp_path: Path):
         languages=("en", "ru"),
         direction_rows_per_cell=2,
         trial_rows_per_cell=1,
-        calibration_rows_per_language=2,
+        final_holdout_rows_per_language=2,
     )
     manifest = root / "manifest.json"
     manifest.write_text('{"revision": 2}\n', encoding="utf-8")
@@ -173,7 +165,7 @@ def test_contract_sha_changes_when_a_source_file_changes(tmp_path: Path):
         languages=("en", "ru"),
         direction_rows_per_cell=2,
         trial_rows_per_cell=1,
-        calibration_rows_per_language=2,
+        final_holdout_rows_per_language=2,
     )
 
     assert first.manifest["contract_sha256"] != second.manifest["contract_sha256"]

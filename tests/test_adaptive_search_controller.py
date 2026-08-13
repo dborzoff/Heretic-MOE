@@ -123,7 +123,6 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
                 base_config=Path("config.toml"),
                 run_root=root / "run",
                 devices=["0", "1", "3"],
-                srg_source=Path("srg"),
             )
 
         self.assertIn("0,1,3", geometry)
@@ -168,7 +167,6 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
                     base_config=config_path,
                     run_root=root / "run",
                     devices=["0", "1"],
-                    srg_source=root / "srg",
                     dry_run=True,
                 )
 
@@ -496,6 +494,19 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
                 journal_has_trials=True,
                 remaining_trials=1,
             )
+        )
+
+    def test_worker_completion_counts_support_arbitrary_gpu_count(self) -> None:
+        records = [
+            SimpleNamespace(worker_id="gpu-0", state="complete"),
+            SimpleNamespace(worker_id="gpu-2", state="complete"),
+            SimpleNamespace(worker_id="gpu-2", state="claimed"),
+            SimpleNamespace(worker_id="gpu-7", state="complete"),
+        ]
+
+        self.assertEqual(
+            controller.worker_completion_counts(records),
+            {"gpu-0": 1, "gpu-2": 1, "gpu-7": 1},
         )
 
     def test_uninitialized_journal_does_not_require_constraint_backfill(self) -> None:

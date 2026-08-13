@@ -7,8 +7,9 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import torch
 from safetensors.torch import load_file, save_file
@@ -18,7 +19,7 @@ from .language_map_data import GeometryRow, text_free_row_index
 from .range_work_queue import RangeWorkQueue
 from .utils import Prompt
 
-WorkerProgress = Callable[[str, int, int], None]
+WorkerProgress = Callable[[str, int, int, int, int], None]
 
 
 def _sha256(path: Path) -> str:
@@ -112,7 +113,13 @@ def capture_claimed_ranges(
             completed_tasks += 1
             completed_rows += expected_rows
             if progress is not None:
-                progress(worker_id, queue.stats().complete_rows, len(rows))
+                progress(
+                    worker_id,
+                    completed_rows,
+                    len(rows),
+                    queue.stats().complete_rows,
+                    len(rows),
+                )
         except BaseException as error:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)

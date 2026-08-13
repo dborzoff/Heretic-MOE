@@ -242,17 +242,10 @@ class MultilingualSearchSettings(BaseModel):
         default=None,
         description="Frozen map/reference/SRG/schedule artifact root for workers.",
     )
-    srg_calibration_source: str | None = Field(
-        default=None,
-        description=(
-            "Completed 660-row clean-model calibration package used only by "
-            "the supervisor while freezing a new runtime."
-        ),
-    )
     languages: list[str] = Field(default_factory=lambda: ["en", "ru", "zh", "es", "fr"])
     direction_rows_per_cell: PositiveInt = 1000
     trial_rows_per_cell: PositiveInt = 400
-    calibration_rows_per_language: PositiveInt = 132
+    final_holdout_rows_per_language: PositiveInt = 132
     ordinary_max_new_tokens: PositiveInt = 100
     final_max_new_tokens: PositiveInt = 100
     evaluation_phase: Literal["search", "finalist"] = "search"
@@ -906,6 +899,24 @@ class Settings(BaseSettings):
         description=(
             "Capture one-token residuals for the prompts already used by normal "
             "trial evaluation when geometry_trajectory_package is configured."
+        ),
+        exclude=True,
+    )
+
+    geometry_trial_number_offset: NonNegativeInt = Field(
+        default=0,
+        description=(
+            "Internal namespace offset for trajectory trial IDs. Finalist rechecks "
+            "use a separate range so their measured points cannot replace search points."
+        ),
+        exclude=True,
+    )
+
+    geometry_render_html: bool = Field(
+        default=True,
+        description=(
+            "Render the text-private interactive geometry report after the "
+            "pipeline finishes."
         ),
         exclude=True,
     )

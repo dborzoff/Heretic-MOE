@@ -93,12 +93,42 @@ class FrozenMultilingualTrialEvaluator:
         self.layer_reliability = layer_reliability
         self.srg_scorer = srg_scorer
         self.srg_profile = dict(srg_profile)
+        self._clean_srg_margins: dict[str, float] | None = None
         self.private_output_dir = Path(private_output_dir).resolve()
         self.expected_per_direction = expected_per_direction
         self.expected_languages = expected_languages
         if max_response_length <= 0:
             raise ValueError("max_response_length must be positive")
         self.max_response_length = max_response_length
+
+    def _ensure_clean_srg_margins(self) -> dict[str, float]:
+        if self._clean_srg_margins is not None:
+            return self._clean_srg_margins
+        trial_rows = tuple(self._rows.values())
+        clean_by_id = _clean_by_row_id(trial_rows, self.clean_records)
+        margins_by_id: dict[str, float] = {}
+        for direction_class in ("safe", "unsafe"):
+            direction_rows = tuple(
+                row for row in trial_rows if row.direction == direction_class
+            )
+            prompts = [Prompt(system="", user=row.prompt) for row in direction_rows]
+            responses = [
+                str(clean_by_id[row.row_id]["clean_response"])
+                for row in direction_rows
+            ]
+            margins = _margins(
+                self.srg_scorer.score_responses(prompts, responses),
+                len(direction_rows),
+            )
+            margins_by_id.update(
+                zip(
+                    (row.row_id for row in direction_rows),
+                    margins,
+                    strict=True,
+                )
+            )
+        self._clean_srg_margins = margins_by_id
+        return margins_by_id
 
     def evaluate(
         self,
@@ -118,6 +148,7 @@ class FrozenMultilingualTrialEvaluator:
             layer_reliability=self.layer_reliability,
             srg_scorer=self.srg_scorer,
             srg_profile=self.srg_profile,
+            clean_srg_margins=self._ensure_clean_srg_margins(),
             private_records_path=(
                 self.private_output_dir / f"trial-{trial_number:06d}.jsonl"
             ),
@@ -185,6 +216,7 @@ def evaluate_multilingual_trial(
     layer_reliability: Tensor,
     srg_scorer: Any,
     srg_profile: Mapping[str, object],
+    clean_srg_margins: Mapping[str, float] | None = None,
     private_records_path: str | Path,
     expected_per_direction: int = 400,
     expected_languages: tuple[str, ...] = ("en", "ru", "zh", "es", "fr"),
@@ -263,9 +295,13 @@ def evaluate_multilingual_trial(
         for index in unsafe_positions
     ]
     candidate_unsafe_responses = [responses[index] for index in unsafe_positions]
-    baseline_margins = _margins(
-        srg_scorer.score_responses(unsafe_prompts, clean_unsafe_responses),
-        unsafe_rows,
+    baseline_margins = (
+        [float(clean_srg_margins[ordered[index].row_id]) for index in unsafe_positions]
+        if clean_srg_margins is not None
+        else _margins(
+            srg_scorer.score_responses(unsafe_prompts, clean_unsafe_responses),
+            unsafe_rows,
+        )
     )
     candidate_margins = _margins(
         srg_scorer.score_responses(unsafe_prompts, candidate_unsafe_responses),
@@ -296,9 +332,13 @@ def evaluate_multilingual_trial(
         str(clean[ordered[index].row_id]["clean_response"]) for index in safe_positions
     ]
     candidate_safe_responses = [responses[index] for index in safe_positions]
-    safe_baseline_margins = _margins(
-        srg_scorer.score_responses(safe_prompts, clean_safe_responses),
-        safe_rows,
+    safe_baseline_margins = (
+        [float(clean_srg_margins[ordered[index].row_id]) for index in safe_positions]
+        if clean_srg_margins is not None
+        else _margins(
+            srg_scorer.score_responses(safe_prompts, clean_safe_responses),
+            safe_rows,
+        )
     )
     safe_candidate_margins = _margins(
         srg_scorer.score_responses(safe_prompts, candidate_safe_responses),

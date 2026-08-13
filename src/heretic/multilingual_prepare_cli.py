@@ -8,7 +8,7 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--runtime-root", required=True, type=Path)
     parser.add_argument("--direction-source", required=True, type=Path)
-    parser.add_argument("--srg-source", required=True, type=Path)
     parser.add_argument("--model")
     parser.add_argument("--device", help="Legacy single-GPU shorthand.")
     parser.add_argument("--devices", default="0")
@@ -41,6 +40,60 @@ def _write_or_verify(path: Path, value: dict[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(payload, encoding="utf-8")
     os.replace(temporary, path)
+
+
+def build_clean_reference_worker_specs(
+    devices: Sequence[str],
+    *,
+    total_rows: int,
+    job_path: Path,
+    base_environment: Mapping[str, str] | None = None,
+    cpu_count: int | None = None,
+) -> tuple[list[Any], list[int]]:
+    """Build one contiguous worker shard per selected GPU."""
+
+    from .language_map_controller import GeometryWorkerSpec, worker_environment
+
+    if not devices:
+        raise ValueError("at least one preparation GPU is required")
+    if total_rows <= 0:
+        raise ValueError("clean reference must contain at least one row")
+    worker_count = min(len(devices), total_rows)
+    boundaries = [
+        total_rows * index // worker_count for index in range(worker_count + 1)
+    ]
+    threads = max(1, (cpu_count or os.cpu_count() or 4) // worker_count)
+    specifications = []
+    for index, device in enumerate(devices[:worker_count]):
+        start, end = boundaries[index], boundaries[index + 1]
+        specifications.append(
+            GeometryWorkerSpec(
+                device=str(device),
+                worker_id=f"gpu-{device}",
+                command=(
+                    sys.executable,
+                    "-u",
+                    "-c",
+                    "from heretic.multilingual_reference_worker import main; main()",
+                    "--job",
+                    str(job_path),
+                    "--device",
+                    str(device),
+                    "--worker-id",
+                    f"gpu-{device}",
+                    "--start",
+                    str(start),
+                    "--end",
+                    str(end),
+                ),
+                environment=worker_environment(
+                    base_environment,
+                    device=str(device),
+                    cpu_threads=threads,
+                ),
+            )
+        )
+    return specifications, boundaries
 
 
 def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
@@ -63,11 +116,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
 
     from .clean_reference_archive import merge_clean_reference_archives
     from .config import Settings, generation_runtime_contract
-    from .language_map_controller import (
-        GeometryWorkerSpec,
-        run_worker_processes,
-        worker_environment,
-    )
+    from .language_map_controller import run_worker_processes
     from .multilingual_contract import load_multilingual_dataset_bundle
     from .multilingual_prepare import (
         fingerprint_local_model,
@@ -100,12 +149,11 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         languages=tuple(contract.languages),
         direction_rows_per_cell=contract.direction_rows_per_cell,
         trial_rows_per_cell=contract.trial_rows_per_cell,
-        calibration_rows_per_language=contract.calibration_rows_per_language,
+        final_holdout_rows_per_language=contract.final_holdout_rows_per_language,
     )
     static_manifest = prepare_static_multilingual_runtime(
         bundle=bundle,
         direction_source=args.direction_source,
-        srg_source=args.srg_source,
         runtime_root=runtime_root,
         languages=tuple(contract.languages),
         schedule_seed=contract.schedule_seed,
@@ -146,11 +194,6 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     )
 
     shards_root = runtime_root / "clean_trial_reference_shards"
-    worker_count = min(len(devices), len(bundle.trial_rows))
-    boundaries = [
-        len(bundle.trial_rows) * index // worker_count
-        for index in range(worker_count + 1)
-    ]
     job_path = runtime_root / "clean_reference_job.json"
     _write_or_verify(
         job_path,
@@ -165,38 +208,19 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
             "max_response_length": int(contract.ordinary_max_new_tokens),
         },
     )
-    specifications = []
-    for index, device in enumerate(devices[:worker_count]):
-        start, end = boundaries[index], boundaries[index + 1]
-        command = (
-            sys.executable,
-            "-u",
-            "-c",
-            "from heretic.multilingual_reference_worker import main; main()",
-            "--job",
-            str(job_path),
-            "--device",
-            str(device),
-            "--worker-id",
-            f"gpu-{device}",
-            "--start",
-            str(start),
-            "--end",
-            str(end),
-        )
-        specifications.append(
-            GeometryWorkerSpec(
-                device=str(device),
-                worker_id=f"gpu-{device}",
-                command=command,
-                environment=worker_environment(
-                    os.environ,
-                    device=str(device),
-                    cpu_threads=max(1, (os.cpu_count() or 4) // worker_count),
-                ),
-            )
-        )
-    exits = run_worker_processes(specifications)
+    specifications, boundaries = build_clean_reference_worker_specs(
+        devices,
+        total_rows=len(bundle.trial_rows),
+        job_path=job_path,
+        base_environment=os.environ,
+    )
+    worker_count = len(specifications)
+    exits = run_worker_processes(
+        specifications,
+        stage_name="Clean reference",
+        total_rows=len(bundle.trial_rows),
+        next_action="Adaptive search",
+    )
     failures = {key: value for key, value in exits.items() if value != 0}
     if failures:
         raise RuntimeError(f"clean-reference worker failure(s): {failures}")
@@ -255,7 +279,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         "trial_pool_rows": len(bundle.trial_rows),
         "rows_per_trial": static_manifest["rows_per_trial"],
         "schedule_trials": static_manifest["schedule_trials"],
-        "srg_calibration_rows": len(bundle.search_rows),
+        "srg_profile": "builtin-cross-model",
         "final_holdout_rows": len(bundle.final_rows),
     }
     _write_or_verify(runtime_root / "manifest.json", final_manifest)

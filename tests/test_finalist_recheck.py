@@ -247,6 +247,7 @@ def test_multilingual_prepare_freezes_top_six_and_finalist_phase() -> None:
         assert (output / "top6_manifest.json").is_file()
         assert config_data["multilingual_search"]["evaluation_phase"] == "finalist"
         assert config_data["multilingual_search"]["runtime_root"] == runtime.as_posix()
+        assert config_data["geometry_trial_number_offset"] == 1_000_000
         assert len(prepared.trials) == 6
         assert all(trial.state == optuna.trial.TrialState.WAITING for trial in prepared.trials)
 
@@ -310,7 +311,7 @@ def test_final_holdout_prepare_command_is_bound_to_frozen_top_six() -> None:
         Path("F:/bin/hereticMOE.exe"),
         manifest,
         Path("F:/run/runtime"),
-        "1",
+        ["1", "3"],
     )
 
     assert command == [
@@ -322,8 +323,8 @@ def test_final_holdout_prepare_command_is_bound_to_frozen_top_six() -> None:
         "F:\\run\\runtime",
         "--top-six-manifest",
         "F:/run/top6_manifest.json",
-        "--device",
-        "1",
+        "--devices",
+        "1,3",
     ]
 
 

@@ -71,14 +71,6 @@ def parse_args() -> argparse.Namespace:
             "direction_unsafe.jsonl, search_unsafe.jsonl, and prototypes.jsonl."
         ),
     )
-    parser.add_argument(
-        "--srg-calibration-source",
-        type=Path,
-        help=(
-            "Completed clean-model 660-row SRG calibration package used only "
-            "to freeze the multilingual runtime."
-        ),
-    )
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument(
         "--heretic",
@@ -520,7 +512,6 @@ def multilingual_runtime_prepare_command(
     base_config: Path,
     run_root: Path,
     devices: list[str],
-    srg_source: Path,
 ) -> list[str]:
     """Build the N-GPU clean-reference preparation command."""
 
@@ -537,8 +528,6 @@ def multilingual_runtime_prepare_command(
         str((run_root / "runtime").resolve()),
         "--direction-source",
         str((run_root / "runtime_sources" / "direction_map" / "analysis").resolve()),
-        "--srg-source",
-        str(srg_source.resolve()),
         "--devices",
         ",".join(devices),
         "--batch-size",
@@ -572,7 +561,7 @@ def verify_prepared_multilingual_runtime(runtime_root: Path) -> dict[str, Any]:
     ):
         raise ValueError("multilingual runtime contains a non-PASS manifest")
     _, direction = load_direction_map_package(root / "clean_map" / "directions")
-    resolve_srg_runtime_contract(root / "srg_calibration")
+    resolve_srg_runtime_contract(root / "srg_profile")
     clean, _ = load_clean_reference_archive(root / "clean_trial_reference")
     schedule, _ = load_trial_language_schedule(root / "study" / "schedule")
     expected = {
@@ -705,10 +694,9 @@ def prepare_multilingual_run_runtime(
     base_config: Path,
     run_root: Path,
     devices: list[str],
-    srg_source: Path | None,
     dry_run: bool,
 ) -> dict[str, Any] | None:
-    """Prepare map, calibration, schedule and clean references before search."""
+    """Prepare map, schedule and clean references before search."""
 
     contract = config.get("multilingual_search")
     if not isinstance(contract, dict) or not contract.get("enabled"):
@@ -730,19 +718,6 @@ def prepare_multilingual_run_runtime(
         )
         return manifest
 
-    configured_source = contract.get("srg_calibration_source")
-    resolved_srg = (
-        srg_source.resolve()
-        if srg_source is not None
-        else Path(str(configured_source)).resolve()
-        if configured_source
-        else None
-    )
-    if resolved_srg is None:
-        raise ValueError(
-            "multilingual v3 requires --srg-calibration-source or "
-            "multilingual_search.srg_calibration_source"
-        )
     geometry_command = multilingual_geometry_command(
         config,
         executable=executable,
@@ -755,7 +730,6 @@ def prepare_multilingual_run_runtime(
         base_config=base_config,
         run_root=run_root,
         devices=devices,
-        srg_source=resolved_srg,
     )
     direction_package = (
         run_root.resolve() / "runtime_sources" / "direction_map" / "analysis"
@@ -785,6 +759,95 @@ def prepare_multilingual_run_runtime(
         return {"status": "DRY_RUN"}
     subprocess.run(prepare_command, check=True, cwd=Path(__file__).parents[2])
     return verify_prepared_multilingual_runtime(runtime_root)
+
+
+def prepare_geometry_trajectory(
+    config: dict[str, Any],
+    *,
+    executable: Path,
+    run_root: Path,
+    journal: Path,
+    dry_run: bool,
+) -> Path | None:
+    """Initialize the frozen 3D basis before workers capture trial movement."""
+
+    package_dir = run_root.resolve() / "runtime" / "geometry_3d"
+    configured = config.get("geometry_trajectory_package")
+    if not configured:
+        return None
+    if Path(str(configured)).resolve() != package_dir:
+        raise ValueError("geometry trajectory package must live inside the run runtime")
+    contract = config.get("multilingual_search")
+    if not isinstance(contract, dict) or not contract.get("enabled"):
+        return None
+    if (package_dir / "trajectory_manifest.json").is_file():
+        return package_dir
+    from heretic.geometry_pipeline import geometry_project_command
+    from heretic.language_map_trajectory import create_empty_trial_journal
+
+    split_root = Path(str(contract.get("split_root") or ""))
+    if not str(split_root):
+        split_root = Path(str(contract["dataset_root"])) / "operative_split_1000_400_v1"
+    command = geometry_project_command(
+        executable=executable,
+        split_root=split_root,
+        runtime_sources=run_root / "runtime_sources" / "direction_map",
+        journal=journal,
+        package_dir=package_dir,
+        languages=tuple(str(value) for value in contract["languages"]),
+        rows_per_cell=int(contract.get("direction_rows_per_cell", 1000)),
+        seed=int(config.get("seed") or 0),
+    )
+    if dry_run:
+        print(
+            json.dumps(
+                {"event": "geometry_trajectory_prepare", "command": command},
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return package_dir
+    create_empty_trial_journal(journal, study_name="heretic")
+    subprocess.run(command, check=True, cwd=Path(__file__).parents[2])
+    if not (package_dir / "trajectory_manifest.json").is_file():
+        raise RuntimeError("geometry projection produced no trajectory manifest")
+    return package_dir
+
+
+def render_geometry_trajectory(
+    config: dict[str, Any],
+    *,
+    executable: Path,
+    run_root: Path,
+    journal: Path,
+    dry_run: bool,
+) -> Path | None:
+    package_dir = run_root.resolve() / "runtime" / "geometry_3d"
+    if not config.get("geometry_trajectory_package") or not config.get(
+        "geometry_render_html", True
+    ):
+        return None
+    from heretic.geometry_pipeline import geometry_render_command
+    from heretic.language_map_trajectory import refresh_trial_timeline
+
+    if not dry_run:
+        refresh_trial_timeline(package_dir, journal)
+
+    command = geometry_render_command(executable=executable, package_dir=package_dir)
+    if dry_run:
+        print(
+            json.dumps(
+                {"event": "geometry_trajectory_render", "command": command},
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return package_dir / "report.html"
+    subprocess.run(command, check=True, cwd=Path(__file__).parents[2])
+    report = package_dir / "report.html"
+    if not report.is_file():
+        raise RuntimeError("geometry render produced no HTML report")
+    return report
 
 
 def stage_config(
@@ -1016,15 +1079,25 @@ def start_stage(
         errors="replace",
         bufsize=1,
     )
+    log_path = stage.directory / f"{effective_name}.console.log"
 
     def forward_output() -> None:
         assert process.stdout is not None
         prefix = f"GPU {effective_device} | "
-        for line in process.stdout:
-            print(
-                console_safe_text(prefix + line.rstrip("\r\n")),
-                flush=True,
-            )
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as log:
+            for line in process.stdout:
+                log.write(line)
+                log.flush()
+                lowered = line.lower()
+                if any(
+                    marker in lowered
+                    for marker in ("traceback", "error:", " exception", "failed with")
+                ):
+                    print(
+                        console_safe_text(prefix + line.rstrip("\r\n")),
+                        flush=True,
+                    )
 
     pump = threading.Thread(
         target=forward_output,
@@ -1144,120 +1217,168 @@ def _monitor_dynamic_workers(
 ) -> list[dict[str, Any]]:
     """Monitor queue workers concurrently and recover abandoned claims."""
 
-    active = workers
+    from heretic.pipeline_ui import PipelineUI
+
+    active = list(workers)
     recoveries: list[dict[str, Any]] = []
-    while active:
-        next_active: list[
-            tuple[Stage, subprocess.Popen, str, tuple[str, ...], int]
-        ] = []
-        changed = False
-        stale_workers = set(
-            queue.stale_claimed_workers(lease_timeout_seconds=lease_timeout_seconds)
-        )
-        for stage, process, worker_id, command_args, restart_count in active:
-            if worker_id in stale_workers and process.poll() is None:
-                process.terminate()
-                print(
-                    json.dumps(
-                        {
-                            "event": "worker_lease_expired",
-                            "worker_id": worker_id,
-                            "device": stage.device,
-                            "lease_timeout_seconds": lease_timeout_seconds,
-                        },
-                        sort_keys=True,
-                    ),
-                    flush=True,
+    ui = PipelineUI()
+    worker_ids = tuple(worker_id for _, _, worker_id, _, _ in workers)
+    ui.stage(
+        "Adaptive search",
+        total=expected_tasks,
+        workers=worker_ids,
+        description=f"Dynamic queue on {len(worker_ids)} resident GPU(s)",
+    )
+    try:
+        while active:
+            next_active: list[
+                tuple[Stage, subprocess.Popen, str, tuple[str, ...], int]
+            ] = []
+            changed = False
+            stale_workers = set(
+                queue.stale_claimed_workers(
+                    lease_timeout_seconds=lease_timeout_seconds
                 )
-            return_code = process.poll()
-            if return_code is None:
-                next_active.append(
-                    (stage, process, worker_id, command_args, restart_count)
-                )
-                continue
-
-            changed = True
-            finish_output_pump(process)
-            if return_code == 0:
-                print(
-                    json.dumps(
-                        {
-                            "event": "worker_complete",
-                            "worker_id": worker_id,
-                            "device": stage.device,
-                            "restarts": restart_count,
-                        },
-                        sort_keys=True,
-                    ),
-                    flush=True,
-                )
-                continue
-
-            orphaned_trials = fail_running_trials_for_worker(
-                stage.journal,
-                worker_id,
             )
-            released_tasks = queue.release_worker(worker_id)
-            recovery = {
-                "event": "worker_failure",
-                "worker_id": worker_id,
-                "device": stage.device,
-                "exit_code": return_code,
-                "orphaned_trials_failed": orphaned_trials,
-                "released_tasks": released_tasks,
-                "restart_count": restart_count,
-            }
-            recoveries.append(recovery)
-            print(json.dumps(recovery, sort_keys=True), flush=True)
-
-            queue_stats = queue.stats()
-            unfinished = queue_stats.pending or queue_stats.claimed
-            if unfinished and restart_count < max_restarts_per_gpu:
-                replacement = start_stage(
-                    stage,
-                    executable,
-                    dry_run=False,
-                    display_name=stage.name,
-                    device=stage.device,
-                    command_args=command_args,
-                    visible_worker_window=visible_worker_window,
-                )
-                next_active.append(
-                    (
-                        stage,
-                        replacement,
-                        worker_id,
-                        command_args,
-                        restart_count + 1,
+            for stage, process, worker_id, command_args, restart_count in active:
+                if worker_id in stale_workers and process.poll() is None:
+                    process.terminate()
+                    print(
+                        json.dumps(
+                            {
+                                "event": "worker_lease_expired",
+                                "worker_id": worker_id,
+                                "device": stage.device,
+                                "lease_timeout_seconds": lease_timeout_seconds,
+                            },
+                            sort_keys=True,
+                        ),
+                        flush=True,
                     )
-                )
-                print(
-                    json.dumps(
-                        {
-                            "event": "worker_restarted",
-                            "worker_id": worker_id,
-                            "device": stage.device,
-                            "restart_count": restart_count + 1,
-                        },
-                        sort_keys=True,
-                    ),
-                    flush=True,
-                )
+                return_code = process.poll()
+                if return_code is None:
+                    next_active.append(
+                        (stage, process, worker_id, command_args, restart_count)
+                    )
+                    continue
 
-        active[:] = next_active
-        stats = queue.stats()
-        if not active and (
-            stats.pending
-            or stats.claimed
-            or stats.failed
-            or stats.complete != expected_tasks
-        ):
-            raise RuntimeError(
-                f"All dynamic workers exited before the queue completed: {stats}"
-            )
-        if active and not changed:
-            time.sleep(0.25)
+                changed = True
+                finish_output_pump(process)
+                if return_code == 0:
+                    print(
+                        json.dumps(
+                            {
+                                "event": "worker_complete",
+                                "worker_id": worker_id,
+                                "device": stage.device,
+                                "restarts": restart_count,
+                            },
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
+                    continue
+
+                orphaned_trials = fail_running_trials_for_worker(
+                    stage.journal,
+                    worker_id,
+                )
+                released_tasks = queue.release_worker(worker_id)
+                recovery = {
+                    "event": "worker_failure",
+                    "worker_id": worker_id,
+                    "device": stage.device,
+                    "exit_code": return_code,
+                    "orphaned_trials_failed": orphaned_trials,
+                    "released_tasks": released_tasks,
+                    "restart_count": restart_count,
+                }
+                recoveries.append(recovery)
+                print(json.dumps(recovery, sort_keys=True), flush=True)
+
+                queue_stats = queue.stats()
+                unfinished = queue_stats.pending or queue_stats.claimed
+                if unfinished and restart_count < max_restarts_per_gpu:
+                    replacement = start_stage(
+                        stage,
+                        executable,
+                        dry_run=False,
+                        display_name=stage.name,
+                        device=stage.device,
+                        command_args=command_args,
+                        visible_worker_window=visible_worker_window,
+                    )
+                    next_active.append(
+                        (
+                            stage,
+                            replacement,
+                            worker_id,
+                            command_args,
+                            restart_count + 1,
+                        )
+                    )
+                    print(
+                        json.dumps(
+                            {
+                                "event": "worker_restarted",
+                                "worker_id": worker_id,
+                                "device": stage.device,
+                                "restart_count": restart_count + 1,
+                            },
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
+
+            active = next_active
+            stats = queue.stats()
+            counts = worker_completion_counts(queue.task_records())
+            for worker_id in worker_ids:
+                ui.update_worker(
+                    worker_id,
+                    completed=counts.get(worker_id, 0),
+                    total=expected_tasks,
+                )
+            ui.update_overall(completed=stats.complete, total=expected_tasks)
+            if not active and (
+                stats.pending
+                or stats.claimed
+                or stats.failed
+                or stats.complete != expected_tasks
+            ):
+                raise RuntimeError(
+                    f"All dynamic workers exited before the queue completed: {stats}"
+                )
+            if active and not changed:
+                time.sleep(0.25)
+    except BaseException as error:
+        ui.fail_stage(error)
+        ui.close()
+        raise
+    else:
+        ui.finish_stage(
+            {
+                "status": "PASS",
+                "trials": expected_tasks,
+                "workers": len(worker_ids),
+                "recoveries": len(recoveries),
+                "next": "TOP-6 finalist recheck",
+            }
+        )
+        ui.close()
     return recoveries
+
+
+def worker_completion_counts(records: list[Any]) -> dict[str, int]:
+    """Count durable completed permits per worker for the shared progress UI."""
+
+    counts: dict[str, int] = {}
+    for record in records:
+        worker_id = getattr(record, "worker_id", None)
+        if getattr(record, "state", None) != "complete" or not worker_id:
+            continue
+        counts[str(worker_id)] = counts.get(str(worker_id), 0) + 1
+    return counts
 
 
 def wait_dynamic_workers(
@@ -2935,6 +3056,22 @@ def finalize_and_export(
             flush=True,
         )
     winners = winners_report.get("winners", {})
+    geometry_package = root / "runtime" / "geometry_3d"
+    if geometry_package.is_dir():
+        from heretic.language_map_trajectory import write_finalist_verdicts
+
+        geometry_summary = write_finalist_verdicts(
+            geometry_package,
+            winners,
+            trial_number_offset=1_000_000,
+        )
+        print(
+            json.dumps(
+                {"event": "geometry_finalists_marked", **geometry_summary},
+                sort_keys=True,
+            ),
+            flush=True,
+        )
 
     if not export_models:
         print(
@@ -2963,6 +3100,24 @@ def finalize_and_export(
         if collapsed_roles
         else (("Balanced", devices[0]), ("Max", devices[-1]))
     )
+    from heretic.pipeline_ui import PipelineUI
+
+    export_ui = PipelineUI()
+    export_ui.stage(
+        "Export winners",
+        total=len(export_assignments),
+        description=(
+            "One shared physical model for Balanced/Max"
+            if collapsed_roles
+            else "Balanced and Max physical models"
+        ),
+    )
+    for variant, device in export_assignments:
+        export_ui.add_worker(
+            f"{variant}-gpu-{device}",
+            total=1,
+            label=f"GPU {device} · {variant}",
+        )
     for variant, device in export_assignments:
         output = export_root / variant.lower()
         winner = winners[variant]
@@ -2979,8 +3134,11 @@ def finalize_and_export(
                 ),
                 flush=True,
             )
+            export_ui.update_worker(f"{variant}-gpu-{device}", completed=1)
             continue
         if output.exists() and any(output.iterdir()):
+            export_ui.fail_stage(FileExistsError())
+            export_ui.close()
             raise FileExistsError(
                 f"Refusing to overwrite incomplete {variant} export: {output}"
             )
@@ -3025,6 +3183,8 @@ def finalize_and_export(
         if len(devices) == 1:
             return_code = process.wait()
             if return_code != 0:
+                export_ui.fail_stage(RuntimeError())
+                export_ui.close()
                 raise RuntimeError(
                     f"Export failure: {variant} on GPU {device}: exit {return_code}"
                 )
@@ -3048,6 +3208,7 @@ def finalize_and_export(
                 ),
                 flush=True,
             )
+            export_ui.update_worker(f"{variant}-gpu-{device}", completed=1)
             export_jobs.pop()
 
     export_failures: list[str] = []
@@ -3076,8 +3237,21 @@ def finalize_and_export(
             ),
             flush=True,
         )
+        export_ui.update_worker(f"{variant}-gpu-{device}", completed=1)
     if export_failures:
+        export_ui.fail_stage(RuntimeError())
+        export_ui.close()
         raise RuntimeError("Export failure(s): " + "; ".join(export_failures))
+    export_ui.finish_stage(
+        {
+            "status": "PASS",
+            "physical_exports": len(export_assignments),
+            "release_roles": 2,
+            "shared_weights": collapsed_roles,
+            "next": "write workflow manifest",
+        }
+    )
+    export_ui.close()
 
     if collapsed_roles:
         alias_variant = "Max"
@@ -3263,7 +3437,6 @@ def main() -> None:
         base_config=base_config,
         run_root=root,
         devices=devices,
-        srg_source=args.srg_calibration_source,
         dry_run=args.dry_run,
     )
     freeze_prepared_run_contract(
@@ -3325,6 +3498,13 @@ def main() -> None:
         dry_run=args.dry_run,
         allowed_config_updates=frozenset({"n_trials"}) | scorer_updates,
         preserve_existing_config=preserve_search_provenance,
+    )
+    prepare_geometry_trajectory(
+        base,
+        executable=executable,
+        run_root=root,
+        journal=shared_stage.journal,
+        dry_run=args.dry_run,
     )
     manifest_stages = [shared_stage]
     if random_stage is not None and sobol_stage is not None:
@@ -3671,6 +3851,13 @@ def main() -> None:
                 stages=manifest_stages,
                 status=post_search_completion_status(args.post_search_mode),
             )
+    render_geometry_trajectory(
+        base,
+        executable=executable,
+        run_root=root,
+        journal=shared_stage.journal,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ dataset_root = "dataset"
 languages = ["en", "ru", "zh", "es", "fr"]
 direction_rows_per_cell = 1000
 trial_rows_per_cell = 400
-calibration_rows_per_language = 132
+final_holdout_rows_per_language = 132
 """.strip(),
         encoding="utf-8",
     )

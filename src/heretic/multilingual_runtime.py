@@ -12,12 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .clean_reference_archive import load_clean_reference_archive
-from .config import (
-    DatasetSpecification,
-    SelectionPolicy,
-    Settings,
-    generation_runtime_contract,
-)
+from .config import SelectionPolicy, Settings, generation_runtime_contract
 from .language_map_data import GeometryRow
 from .language_map_directions import DirectionMapProfile, load_direction_map_package
 from .multilingual_contract import (
@@ -73,26 +68,22 @@ def resolve_srg_runtime_contract(
     *,
     expected_prompt_rows: int | None = None,
 ) -> dict[str, Any]:
-    """Resolve pinned calibration scorer inputs and optionally enforce size."""
+    """Resolve the portable external-only SRG scorer and profile inputs."""
 
     root = Path(runtime_dir).resolve()
     manifest_path = root / "manifest.json"
     if not manifest_path.is_file():
         raise FileNotFoundError(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    prompt_rows = int(manifest.get("prompt_rows", -1))
-    if manifest.get("status") != "PASS" or prompt_rows <= 0:
-        raise ValueError("SRG runtime manifest is not a completed prompt contract")
-    if expected_prompt_rows is not None and prompt_rows != expected_prompt_rows:
-        raise ValueError(
-            "SRG runtime prompt rows differ from the configured contract: "
-            f"{prompt_rows} != {expected_prompt_rows}"
-        )
+    if manifest.get("status") != "PASS" or not manifest.get("external_only"):
+        raise ValueError("SRG runtime manifest is not an external-only contract")
+    if expected_prompt_rows is not None:
+        raise ValueError("external-only SRG has no fixed prompt row count")
     prototype_path = Path(str(manifest.get("prototype_path", ""))).resolve()
-    prompt_path = Path(str(manifest.get("prompt_path", ""))).resolve()
+    profile_path = Path(str(manifest.get("profile_path", ""))).resolve()
     for label, path, expected in (
         ("prototype", prototype_path, manifest.get("prototype_sha256")),
-        ("prompt", prompt_path, manifest.get("prompt_sha256")),
+        ("profile", profile_path, manifest.get("profile_sha256")),
     ):
         if not path.is_file() or _file_sha256(path) != expected:
             raise ValueError(f"SRG runtime {label} file hash mismatch")
@@ -103,9 +94,9 @@ def resolve_srg_runtime_contract(
     return {
         "prototype_path": prototype_path,
         "prototype_sha256": str(manifest["prototype_sha256"]),
-        "prompt_path": prompt_path,
-        "prompt_sha256": str(manifest["prompt_sha256"]),
-        "prompt_rows": prompt_rows,
+        "profile_path": profile_path,
+        "profile_sha256": str(manifest["profile_sha256"]),
+        "external_only": True,
         "top_k": int(manifest["top_k"]),
         "min_df": int(manifest["min_df"]),
         "max_response_length": int(manifest["max_response_length"]),
@@ -118,7 +109,7 @@ def build_multilingual_srg_scorer(
     model: Any,
     runtime_root: str | Path,
 ) -> Any:
-    """Initialize the sparse scorer from the completed v3 calibration contract."""
+    """Initialize the sparse scorer from the built-in cross-model profile."""
 
     from .scorer import Context
     from .scorers.sparse_refusal_geometry import (
@@ -128,21 +119,13 @@ def build_multilingual_srg_scorer(
         SparseRefusalGeometry,
     )
 
-    expected_prompt_rows = (
-        len(settings.multilingual_search.languages)
-        * settings.multilingual_search.calibration_rows_per_language
-    )
     contract = resolve_srg_runtime_contract(
-        Path(runtime_root).resolve() / "srg_calibration",
-        expected_prompt_rows=expected_prompt_rows,
+        Path(runtime_root).resolve() / "srg_profile",
     )
     scorer_settings = SparseSettings(
         prototypes=str(contract["prototype_path"]),
         prototypes_sha256=str(contract["prototype_sha256"]),
-        prompts=DatasetSpecification(
-            dataset=str(contract["prompt_path"]),
-            column="prompt",
-        ),
+        prompts=None,
         top_k=int(contract["top_k"]),
         min_df=int(contract["min_df"]),
         validate_prompt_alignment=False,
@@ -176,7 +159,7 @@ def load_multilingual_worker_runtime(
         languages=tuple(contract.languages),
         direction_rows_per_cell=contract.direction_rows_per_cell,
         trial_rows_per_cell=contract.trial_rows_per_cell,
-        calibration_rows_per_language=contract.calibration_rows_per_language,
+        final_holdout_rows_per_language=contract.final_holdout_rows_per_language,
     )
     prompt_cache_stats: dict[str, Any] | None = None
     if hasattr(model, "prepare_prompt_cache"):
@@ -294,7 +277,7 @@ def _load_profile(path: Path) -> dict[str, Any]:
         or not isinstance(profile.get("group_scale"), dict)
         or not isinstance(profile.get("group_weight"), dict)
     ):
-        raise ValueError("SRG calibration profile is invalid")
+        raise ValueError("built-in SRG profile is invalid")
     return profile
 
 
@@ -321,7 +304,7 @@ def load_multilingual_search_evaluator(
     clean_manifest, clean_records = load_clean_reference_archive(
         root / "clean_trial_reference"
     )
-    srg_profile_path = root / "srg_calibration" / "calibration_profile.json"
+    srg_profile_path = root / "srg_profile" / "calibration_profile.json"
     srg_profile = _load_profile(srg_profile_path)
 
     dataset_sha = str(bundle.manifest.get("contract_sha256", ""))
@@ -410,7 +393,7 @@ def load_multilingual_finalist_evaluator(
     final_manifest, final_records = load_final_holdout_archive(
         root / "final_holdout_reference"
     )
-    srg_profile_path = root / "srg_calibration" / "calibration_profile.json"
+    srg_profile_path = root / "srg_profile" / "calibration_profile.json"
     srg_profile = _load_profile(srg_profile_path)
     if clean_manifest.get("dataset_contract_sha256") != bundle.manifest.get(
         "contract_sha256"

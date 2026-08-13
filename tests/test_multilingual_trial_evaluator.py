@@ -214,6 +214,7 @@ def test_trial_rejects_language_imbalance_even_when_direction_counts_match(
 def test_frozen_evaluator_resolves_global_trial_schedule(tmp_path: Path) -> None:
     rows = _rows(tmp_path)
     model = _FakeModel(rows)
+    scorer = _FakeSRG()
     clean_records = _clean_records(rows)
     clean_records.append(
         {
@@ -233,7 +234,7 @@ def test_frozen_evaluator_resolves_global_trial_schedule(tmp_path: Path) -> None
         clean_records=clean_records,
         refusal_direction=torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
         layer_reliability=torch.ones(2),
-        srg_scorer=_FakeSRG(),
+        srg_scorer=scorer,
         srg_profile=_profile(),
         private_output_dir=tmp_path / "trials",
         expected_per_direction=4,
@@ -241,8 +242,12 @@ def test_frozen_evaluator_resolves_global_trial_schedule(tmp_path: Path) -> None
     )
 
     measurement = evaluator.evaluate(17)
+    evaluator.evaluate(17)
 
     assert measurement.trial_number == 17
+    # Two clean-reference passes are cached at construction. Each trial then
+    # scores only the candidate SAFE and UNSAFE responses.
+    assert scorer.calls == 6
     assert (tmp_path / "trials" / "trial-000017.jsonl").is_file()
     with pytest.raises(KeyError, match="18"):
         evaluator.evaluate(18)

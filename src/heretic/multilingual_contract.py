@@ -30,7 +30,6 @@ class CalibrationRow:
 class MultilingualDatasetBundle:
     direction_rows: tuple[GeometryRow, ...]
     trial_rows: tuple[GeometryRow, ...]
-    search_rows: tuple[CalibrationRow, ...]
     final_rows: tuple[CalibrationRow, ...]
     manifest: dict[str, Any]
 
@@ -295,9 +294,9 @@ def load_multilingual_dataset_bundle(
     languages: tuple[str, ...] = ("en", "ru", "zh", "es", "fr"),
     direction_rows_per_cell: int = 1000,
     trial_rows_per_cell: int = 400,
-    calibration_rows_per_language: int = 132,
+    final_holdout_rows_per_language: int = 132,
 ) -> MultilingualDatasetBundle:
-    """Load all four frozen pools and return a prompt-free public manifest."""
+    """Load direction, rotating trial and independent final-holdout pools."""
 
     root = Path(dataset_root).resolve()
     split = (
@@ -314,7 +313,7 @@ def load_multilingual_dataset_bundle(
         min(
             direction_rows_per_cell,
             trial_rows_per_cell,
-            calibration_rows_per_language,
+            final_holdout_rows_per_language,
         )
         <= 0
     ):
@@ -348,23 +347,16 @@ def load_multilingual_dataset_bundle(
         normalized_languages,
         trial_rows_per_cell,
     )
-    search_rows = _load_calibration_pool(
-        root,
-        filename_prefix="search_unsafe",
-        languages=normalized_languages,
-        expected_rows=calibration_rows_per_language,
-    )
     final_rows = _load_calibration_pool(
         root,
         filename_prefix="srg_calibration",
         languages=normalized_languages,
-        expected_rows=calibration_rows_per_language,
+        expected_rows=final_holdout_rows_per_language,
     )
     _assert_pool_prompt_disjoint(
         {
             "direction": direction_rows,
             "trial": trial_rows,
-            "srg_calibration": search_rows,
             "final_holdout": final_rows,
         }
     )
@@ -392,7 +384,6 @@ def load_multilingual_dataset_bundle(
                 ids=ids,
             )
     for pool, prefix, rows in (
-        ("srg_calibration", "search_unsafe", search_rows),
         ("final_holdout", "srg_calibration", final_rows),
     ):
         for language in normalized_languages:
@@ -401,7 +392,7 @@ def load_multilingual_dataset_bundle(
             file_records[path.name] = _file_record(
                 path,
                 relative_to=root,
-                rows=calibration_rows_per_language,
+                rows=final_holdout_rows_per_language,
                 pool=pool,
                 language=language,
                 ids=ids,
@@ -420,14 +411,12 @@ def load_multilingual_dataset_bundle(
         "counts": {
             "direction": len(direction_rows),
             "trial": len(trial_rows),
-            "srg_calibration": len(search_rows),
             "final_holdout": len(final_rows),
         },
         "rows_per_cell": {
             "direction": direction_rows_per_cell,
             "trial": trial_rows_per_cell,
-            "srg_calibration": calibration_rows_per_language,
-            "final_holdout": calibration_rows_per_language,
+            "final_holdout": final_holdout_rows_per_language,
         },
         "source_manifests": source_manifests,
         "files": dict(sorted(file_records.items())),
@@ -437,7 +426,6 @@ def load_multilingual_dataset_bundle(
     return MultilingualDatasetBundle(
         direction_rows=tuple(direction_rows),
         trial_rows=tuple(trial_rows),
-        search_rows=tuple(search_rows),
         final_rows=tuple(final_rows),
         manifest=manifest,
     )

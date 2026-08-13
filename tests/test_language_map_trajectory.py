@@ -4,17 +4,19 @@ import json
 from pathlib import Path
 
 import optuna
-from optuna.storages import JournalStorage
-from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 import pytest
 import torch
+from optuna.storages import JournalStorage
+from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 
 from heretic.language_map_projection import write_projection_package
 from heretic.language_map_trajectory import (
     append_trial_projection,
     initialize_trajectory_package,
     load_text_free_trial_timeline,
+    refresh_trial_timeline,
     select_stratified_anchors,
+    write_finalist_verdicts,
 )
 
 
@@ -162,3 +164,75 @@ def test_trial_projection_append_is_atomic_and_rejects_duplicate_trial(
 
     with pytest.raises(ValueError, match="already captured"):
         append_trial_projection(package, records[0], candidate)
+
+
+def test_refresh_trial_timeline_preserves_captured_status(tmp_path: Path) -> None:
+    residuals = _residuals()
+    package = tmp_path / "geometry_3d"
+    write_projection_package(
+        index=[
+            {
+                **row,
+                "direction_class": "safe" if row["group"] == "A" else "unsafe",
+            }
+            for row in _index()
+        ],
+        residuals=residuals,
+        output_dir=package,
+    )
+    journal = _journal(tmp_path / "study.log")
+    trajectory = initialize_trajectory_package(
+        package_dir=package,
+        journal=journal,
+        reference_residuals=residuals,
+        anchor_count=6,
+    )
+    record = load_text_free_trial_timeline(journal)[0]
+    append_trial_projection(package, record, residuals[trajectory["anchor_rows"]])
+
+    manifest = refresh_trial_timeline(package, journal)
+    timeline = [
+        json.loads(line)
+        for line in (package / "journal_trials.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert manifest["trials"] == 2
+    assert timeline[0]["coordinate_status"] == "captured"
+    assert timeline[1]["coordinate_status"] == "not_captured"
+
+
+def test_finalist_verdicts_mark_every_anchor_without_prompt_text(tmp_path: Path) -> None:
+    package = tmp_path / "geometry_3d"
+    package.mkdir()
+    (package / "anchor_index.json").write_text(
+        json.dumps(
+            [
+                {"anchor_index": 0, "row_id": "EN-S0001"},
+                {"anchor_index": 1, "row_id": "RU-U0002"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (package / "verdicts.jsonl").write_text("", encoding="utf-8")
+
+    report = write_finalist_verdicts(
+        package,
+        {
+            "Balanced": {"trial_number": 2},
+            "Max": {"trial_number": 5},
+        },
+        trial_number_offset=1_000_000,
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (package / "verdicts.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert report == {"status": "PASS", "roles": 2, "rows": 4}
+    assert {row["trial_number"] for row in rows} == {1_000_002, 1_000_005}
+    assert {row["finalist"] for row in rows} == {"Balanced", "Max"}
+    assert {row["status"] for row in rows} == {"success"}
+    assert all(
+        set(row) == {"trial_number", "row_id", "status", "confidence", "finalist"}
+        for row in rows
+    )

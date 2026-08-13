@@ -24,7 +24,6 @@ from heretic.config import DatasetSpecification
 from heretic.scorer import Context, Score, Scorer
 from heretic.utils import Prompt, print
 
-
 LABELS = ("delivered", "soft", "refuse")
 
 
@@ -39,8 +38,12 @@ class Settings(BaseModel):
         default=None,
         description="Optional SHA-256 pin for the prototype bank.",
     )
-    prompts: DatasetSpecification = Field(
-        description="Prompts evaluated during every search trial."
+    prompts: DatasetSpecification | None = Field(
+        default=None,
+        description=(
+            "Optional fixed prompt set for legacy scorer-driven evaluation. "
+            "Multilingual search supplies prompts and responses externally."
+        ),
     )
     top_k: PositiveInt = Field(
         default=5,
@@ -132,31 +135,36 @@ class SparseRefusalGeometry(Scorer):
                 f"Empty sparse geometry prompt/answer rows: {empty_rows[:20]}"
             )
 
-        self.prompts = ctx.load_prompts(self.settings.prompts)
-        if not self.prompts:
-            raise ValueError("Sparse geometry evaluation prompt set is empty")
         prototype_ids = np.asarray([int(row["id"]) for row in rows], dtype=np.int64)
-        out_of_range = sorted(
-            {int(value) for value in prototype_ids if value < 0 or value >= len(self.prompts)}
-        )
-        if out_of_range:
-            raise ValueError(
-                "Sparse geometry prototype ids outside prompt range: "
-                f"{out_of_range[:20]}"
+        if self.settings.prompts is not None:
+            self.prompts = ctx.load_prompts(self.settings.prompts)
+            if not self.prompts:
+                raise ValueError("Sparse geometry evaluation prompt set is empty")
+            out_of_range = sorted(
+                {
+                    int(value)
+                    for value in prototype_ids
+                    if value < 0 or value >= len(self.prompts)
+                }
             )
-        if self.settings.validate_prompt_alignment:
-            mismatches = [
-                index
-                for index, row in enumerate(rows)
-                if str(row["prompt"]) != self.prompts[int(row["id"])].user
-            ]
-            if mismatches:
+            if out_of_range:
                 raise ValueError(
-                    "Sparse geometry prompt alignment mismatch at prototype "
-                    f"row indices {mismatches[:20]}"
+                    "Sparse geometry prototype ids outside prompt range: "
+                    f"{out_of_range[:20]}"
                 )
+            if self.settings.validate_prompt_alignment:
+                mismatches = [
+                    index
+                    for index, row in enumerate(rows)
+                    if str(row["prompt"]) != self.prompts[int(row["id"])].user
+                ]
+                if mismatches:
+                    raise ValueError(
+                        "Sparse geometry prompt alignment mismatch at prototype "
+                        f"row indices {mismatches[:20]}"
+                    )
 
-        tokenizer = ctx._model.tokenizer  # noqa: SLF001
+        tokenizer = ctx._model.tokenizer
         cap = self.heretic_settings.max_response_length
         prototype_answers = []
         for row in rows:
@@ -221,9 +229,8 @@ class SparseRefusalGeometry(Scorer):
                 f"counts={counts}, top_k={self.settings.top_k}"
             )
         print(
-            f"* [bold]{len(rows)}[/] prototypes, "
-            f"[bold]{len(self.prompts)}[/] evaluation prompts, "
-            f"response cap [bold]{cap}[/] tokens"
+            f"* [bold]{len(rows)}[/] prototypes, response cap "
+            f"[bold]{cap}[/] tokens"
         )
 
     def _topk_scores(
@@ -345,6 +352,10 @@ class SparseRefusalGeometry(Scorer):
         )
 
     def get_score(self, ctx: Context) -> Score:
+        if not hasattr(self, "prompts"):
+            raise RuntimeError(
+                "external-only sparse geometry requires score_responses()"
+            )
         responses = ctx.get_responses(self.prompts)
         return self.score_responses(
             self.prompts,

@@ -15,7 +15,6 @@ from heretic.multilingual_contract import MultilingualDatasetBundle
 from heretic.multilingual_prepare import (
     fingerprint_local_model,
     freeze_direction_package,
-    freeze_srg_calibration_package,
     prepare_clean_reference_runtime,
     prepare_static_multilingual_runtime,
 )
@@ -25,51 +24,6 @@ from heretic.trial_language_schedule import load_trial_language_schedule
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def test_srg_package_is_copied_portably_and_rewrites_external_paths(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "source"
-    source_private = source / "private"
-    source_private.mkdir(parents=True)
-    external = tmp_path / "external"
-    external.mkdir()
-    prototypes = external / "prototypes.jsonl"
-    prompts = source_private / "evaluation_prompts.jsonl"
-    prototypes.write_bytes(b"prototype-bank\n")
-    prompts.write_bytes(b"calibration-660\n")
-    (source / "calibration_profile.json").write_text(
-        json.dumps({"schema_version": 2, "status": "PASS", "rows": 660}),
-        encoding="utf-8",
-    )
-    (source / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "status": "PASS",
-                "prototype_path": str(prototypes),
-                "prototype_sha256": _sha(prototypes),
-                "prompt_path": str(prompts),
-                "prompt_sha256": _sha(prompts),
-                "prompt_rows": 660,
-                "top_k": 5,
-                "min_df": 2,
-                "max_response_length": 128,
-                "validate_prompt_alignment": False,
-            }
-        ),
-        encoding="utf-8",
-    )
-    destination = tmp_path / "runtime" / "srg_calibration"
-
-    manifest = freeze_srg_calibration_package(source, destination)
-
-    resolved = resolve_srg_runtime_contract(destination)
-    assert resolved["prototype_path"].parent == destination.resolve()
-    assert resolved["prompt_path"].parent == (destination / "private").resolve()
-    assert manifest["status"] == "PASS"
-    assert freeze_srg_calibration_package(source, destination) == manifest
 
 
 def _direction_source(tmp_path: Path) -> Path:
@@ -87,39 +41,6 @@ def _direction_source(tmp_path: Path) -> Path:
     )
     source = tmp_path / "direction-source"
     write_direction_map_package(profile, source)
-    return source
-
-
-def _srg_source(tmp_path: Path) -> Path:
-    source = tmp_path / "srg-source"
-    source.mkdir()
-    prototypes = tmp_path / "prototype-bank.jsonl"
-    prompts = source / "private" / "evaluation_prompts.jsonl"
-    prompts.parent.mkdir()
-    prototypes.write_bytes(b"prototype-bank\n")
-    prompts.write_bytes(b"calibration-660\n")
-    (source / "calibration_profile.json").write_text(
-        json.dumps({"schema_version": 2, "status": "PASS", "rows": 660}),
-        encoding="utf-8",
-    )
-    (source / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "status": "PASS",
-                "prototype_path": str(prototypes),
-                "prototype_sha256": _sha(prototypes),
-                "prompt_path": str(prompts),
-                "prompt_sha256": _sha(prompts),
-                "prompt_rows": 660,
-                "top_k": 5,
-                "min_df": 2,
-                "max_response_length": 128,
-                "validate_prompt_alignment": False,
-            }
-        ),
-        encoding="utf-8",
-    )
     return source
 
 
@@ -145,14 +66,13 @@ def _bundle() -> MultilingualDatasetBundle:
     return MultilingualDatasetBundle(
         direction_rows=tuple(rows),
         trial_rows=tuple(rows),
-        search_rows=(),
         final_rows=(),
         manifest={
             "schema_version": 1,
             "status": "PASS",
             "contract_sha256": "a" * 64,
             "counts": {"trial": len(rows)},
-            "rows_per_cell": {"srg_calibration": 132},
+            "rows_per_cell": {"final_holdout": 132},
         },
     )
 
@@ -173,7 +93,7 @@ def test_direction_package_is_copied_and_verified_portably(tmp_path: Path) -> No
     assert freeze_direction_package(source, destination) == manifest
 
 
-def test_static_runtime_freezes_dataset_direction_srg_and_schedule(
+def test_static_runtime_freezes_dataset_direction_builtin_srg_and_schedule(
     tmp_path: Path,
 ) -> None:
     runtime = tmp_path / "runtime"
@@ -181,7 +101,6 @@ def test_static_runtime_freezes_dataset_direction_srg_and_schedule(
     manifest = prepare_static_multilingual_runtime(
         bundle=_bundle(),
         direction_source=_direction_source(tmp_path),
-        srg_source=_srg_source(tmp_path),
         runtime_root=runtime,
         languages=("en", "ru", "zh", "es", "fr"),
         schedule_seed=17,
@@ -196,6 +115,8 @@ def test_static_runtime_freezes_dataset_direction_srg_and_schedule(
     assert manifest["dataset_contract_sha256"] == "a" * 64
     assert schedule_manifest["trials"] == 10
     assert len(records) == 10
+    srg = resolve_srg_runtime_contract(runtime / "srg_profile")
+    assert srg["external_only"] is True
     assert not any(
         field in json.dumps(manifest).lower()
         for field in ('"prompt"', '"response"', '"answer"', '"text"')
@@ -204,7 +125,6 @@ def test_static_runtime_freezes_dataset_direction_srg_and_schedule(
         prepare_static_multilingual_runtime(
             bundle=_bundle(),
             direction_source=tmp_path / "direction-source",
-            srg_source=tmp_path / "srg-source",
             runtime_root=runtime,
             languages=("en", "ru", "zh", "es", "fr"),
             schedule_seed=17,
@@ -238,7 +158,6 @@ def test_clean_reference_runtime_uses_full_trial_archive_once(tmp_path: Path) ->
     prepare_static_multilingual_runtime(
         bundle=bundle,
         direction_source=_direction_source(tmp_path),
-        srg_source=_srg_source(tmp_path),
         runtime_root=runtime,
         languages=("en", "ru", "zh", "es", "fr"),
         schedule_seed=17,

@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 
 import optuna
-from optuna.storages import JournalStorage
-from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 import pytest
 import torch
+from optuna.storages import JournalStorage
+from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 
 from heretic.language_map_projection import write_projection_package
 from heretic.language_map_report import write_interactive_geometry_report
@@ -105,6 +105,8 @@ def test_report_is_offline_filterable_and_contains_no_private_corpus_text(
     assert "optimizer path" in document
     assert "Evaluation points" in document
     assert "data:application/octet-stream;base64," in document
+    assert "selectedFinalist" in document
+    assert "verdictsFor" in document
 
 
 def test_report_rejects_sensitive_verdict_payload(tmp_path: Path) -> None:

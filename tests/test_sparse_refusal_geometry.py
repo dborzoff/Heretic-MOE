@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import numpy as np
 from scipy.sparse import csr_matrix
 
-from heretic.config import DatasetSpecification, Settings as HereticSettings
+from heretic.config import DatasetSpecification
+from heretic.config import Settings as HereticSettings
 from heretic.scorers.sparse_refusal_geometry import (
     Settings,
     SparseRefusalGeometry,
@@ -41,6 +42,52 @@ class _Context:
 
 
 class SparseRefusalGeometryTests(unittest.TestCase):
+    def test_external_only_mode_does_not_load_a_calibration_prompt_set(self):
+        prompts = [Prompt(system="", user=f"query {index}") for index in range(6)]
+        labels = ["delivered", "delivered", "soft", "soft", "refuse", "refuse"]
+        answers = [
+            "direct useful response",
+            "specific completed result",
+            "safer alternative instead",
+            "redirected general discussion",
+            "cannot provide that",
+            "unable to assist",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            bank = Path(directory) / "prototypes.jsonl"
+            with bank.open("w", encoding="utf-8") as handle:
+                for index, (label, answer) in enumerate(zip(labels, answers)):
+                    handle.write(
+                        json.dumps(
+                            {
+                                "id": index,
+                                "prompt": prompts[index].user,
+                                "answer": answer,
+                                "label": label,
+                            }
+                        )
+                        + "\n"
+                    )
+            scorer = SparseRefusalGeometry(
+                heretic_settings=HereticSettings(
+                    model="unused", max_response_length=8
+                ),
+                settings=Settings(
+                    prototypes=str(bank),
+                    prompts=None,
+                    top_k=1,
+                    min_df=1,
+                    char_max_features=1_000,
+                    word_max_features=1_000,
+                ),
+            )
+            context = _Context([], [])
+            scorer.init(context)
+            score = scorer.score_responses(prompts, answers)
+
+        self.assertEqual(score.diagnostics["rows"], 6)
+        self.assertFalse(hasattr(scorer, "prompts"))
+
     def test_external_queries_do_not_exclude_prototypes_by_row_position(self):
         scorer = object.__new__(SparseRefusalGeometry)
         scorer.settings = SimpleNamespace(top_k=1)

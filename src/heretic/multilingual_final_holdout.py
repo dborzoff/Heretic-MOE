@@ -9,9 +9,10 @@ import json
 import math
 import os
 import tempfile
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any
 
 import torch
 from torch import Tensor
@@ -21,7 +22,6 @@ from .multilingual_contract import CalibrationRow
 from .srg_calibration import relative_group_summary, relative_score
 from .trial_geometry_metrics import evaluate_trial_geometry
 from .utils import Prompt
-
 
 _FORBIDDEN_PUBLIC_KEYS = {"prompt", "response", "answer", "text"}
 
@@ -163,6 +163,7 @@ def build_final_holdout_archive(
     top_six_contract_sha256: str,
     max_response_length: int,
     generation_contract: Mapping[str, object] | None = None,
+    progress: Callable[[int, int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Generate the clean R reference once, after TOP-6 membership is frozen."""
 
@@ -198,11 +199,14 @@ def build_final_holdout_archive(
         return manifest
 
     prompts = [Prompt(system="", user=row.prompt) for row in ordered]
+    generation_options: dict[str, object] = {"skip_special_tokens": True}
+    if progress is not None:
+        generation_options["progress"] = progress
     with _generation_length(model, max_response_length):
         responses, token_ids, residuals = (
             model.get_response_artifacts_with_prefill_residuals_batched(
                 prompts,
-                skip_special_tokens=True,
+                **generation_options,
             )
         )
     if (
@@ -289,6 +293,89 @@ def load_final_holdout_archive(
     if len(records) != int(manifest.get("rows", -1)):
         raise ValueError("final-holdout archive row count mismatch")
     return manifest, records
+
+
+def merge_final_holdout_archives(
+    *,
+    shard_dirs: Sequence[str | Path],
+    rows: Sequence[CalibrationRow],
+    refusal_direction: Tensor,
+    srg_profile: Mapping[str, object],
+    output_dir: str | Path,
+    dataset_contract_sha256: str,
+    model_fingerprint: str,
+    top_six_contract_sha256: str,
+    max_response_length: int,
+    generation_contract: Mapping[str, object] | None = None,
+) -> dict[str, Any]:
+    """Merge contiguous GPU shards into one canonical final-holdout archive."""
+
+    ordered = tuple(rows)
+    if not ordered or not shard_dirs:
+        raise ValueError("final-holdout rows and shards must be non-empty")
+    direction = refusal_direction.detach().to(torch.float32).cpu().contiguous()
+    expected_generation = _generation_contract(generation_contract)
+    records: list[dict[str, Any]] = []
+    manifests: list[dict[str, Any]] = []
+    for shard_dir in shard_dirs:
+        manifest, shard_records = load_final_holdout_archive(shard_dir)
+        manifests.append(manifest)
+        records.extend(shard_records)
+    if [record.get("row_id") for record in records] != [
+        row.row_id for row in ordered
+    ]:
+        raise ValueError("final-holdout shards do not reconstruct canonical order")
+    expected_common = {
+        "dataset_contract_sha256": dataset_contract_sha256,
+        "model_fingerprint": model_fingerprint,
+        "top_six_contract_sha256": top_six_contract_sha256,
+        "max_response_length": int(max_response_length),
+        "direction_sha256": _tensor_sha256(direction),
+        "generation_contract": expected_generation,
+    }
+    for manifest in manifests:
+        if any(manifest.get(key) != value for key, value in expected_common.items()):
+            raise ValueError("final-holdout shard contract differs")
+    contract = {
+        "schema_version": 2,
+        **expected_common,
+        "row_contract_sha256": _canonical_sha256(_row_contract(ordered)),
+    }
+    contract_sha256 = _canonical_sha256(contract)
+    destination = Path(output_dir).resolve()
+    manifest_path = destination / "manifest.json"
+    private_path = destination / "private" / "clean_records.jsonl"
+    if manifest_path.is_file():
+        existing, _ = load_final_holdout_archive(destination)
+        if existing.get("archive_contract_sha256") != contract_sha256:
+            raise ValueError("existing final-holdout archive contract differs")
+        return existing
+    payload = "".join(
+        json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        for record in records
+    ).encode("utf-8")
+    _atomic_write(private_path, payload)
+    margins = [float(record["clean_margin"]) for record in records]
+    groups = [(row.language, row.category_id) for row in ordered]
+    baseline = relative_score(margins, margins, dict(srg_profile), groups=groups)
+    manifest = {
+        **contract,
+        "status": "PASS",
+        "archive_contract_sha256": contract_sha256,
+        "rows": len(records),
+        "layers": int(direction.shape[0]),
+        "hidden_size": int(direction.shape[1]),
+        "shards": len(manifests),
+        "clean_baseline_srg_gain": float(baseline["srg_gain"]),
+        "clean_baseline_r_gain": float(baseline["r_gain"]),
+        "private_records_sha256": _sha256(private_path),
+    }
+    _assert_text_free(manifest)
+    _atomic_write(
+        manifest_path,
+        (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+    )
+    return manifest
 
 
 def evaluate_final_holdout(

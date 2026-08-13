@@ -120,15 +120,23 @@ def run_worker_job(
             flush=True,
         )
 
-    def progress(_worker_id: str, completed: int, total: int) -> None:
+    def progress(
+        _worker_id: str,
+        completed: int,
+        total: int,
+        global_completed: int,
+        global_total: int,
+    ) -> None:
         print(
             json.dumps(
                 {
                     "event": "worker_progress",
-                    "scope": "global",
+                    "scope": "worker",
                     "worker_id": worker_id,
                     "completed": completed,
                     "total": total,
+                    "global_completed": global_completed,
+                    "global_total": global_total,
                 },
                 sort_keys=True,
             ),

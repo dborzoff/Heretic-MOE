@@ -39,7 +39,6 @@ def _write_config(path: Path) -> None:
         "data": {
             "dataset_root": "datasets/heretic_moe_5lang_v1",
             "split_root": "datasets/heretic_moe_5lang_v1/operative_split_1000_400_v1",
-            "srg_calibration_source": "datasets/heretic_moe_5lang_v1/search_unsafe",
         },
         "generation": {
             "ordinary_max_new_tokens": 100,
@@ -83,6 +82,17 @@ def _write_config(path: Path) -> None:
         },
     }
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+
+def test_repository_example_contains_the_complete_public_schema() -> None:
+    source = Path(__file__).resolve().parents[1] / "config.example.yaml"
+    config = load_effective_launch_config(source, LaunchOverrides())
+
+    assert config.version == 1
+    assert config.run.target_trials == 600
+    assert config.generation.ordinary_max_new_tokens == 100
+    assert config.finalists.top_n == 6
+    assert config.geometry.render_html is True
 
 
 def test_loads_public_yaml_and_applies_cli_overrides_last(tmp_path: Path) -> None:
@@ -147,6 +157,19 @@ def test_unknown_public_yaml_key_is_rejected(tmp_path: Path) -> None:
         load_effective_launch_config(source, LaunchOverrides())
 
 
+def test_public_yaml_rejects_removed_per_model_srg_calibration(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "config.yaml"
+    _write_config(source)
+    payload = yaml.safe_load(source.read_text(encoding="utf-8"))
+    payload["data"]["srg_calibration_source"] = "legacy/search_unsafe"
+    source.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="srg_calibration_source"):
+        load_effective_launch_config(source, LaunchOverrides())
+
+
 def test_exploration_cannot_exceed_target(tmp_path: Path) -> None:
     source = tmp_path / "config.yaml"
     _write_config(source)
@@ -180,11 +203,12 @@ def test_public_yaml_maps_to_internal_settings_without_exposing_settings(
     assert internal.save_trial_responses is True
     assert internal.geometry_capture_evaluation is True
     assert internal.geometry_trajectory_package
+    assert internal.geometry_render_html is True
     multilingual = internal.multilingual_search
     assert multilingual.enabled is True
     assert multilingual.dataset_root.endswith("datasets/heretic_moe_5lang_v1")
     assert multilingual.split_root.endswith("operative_split_1000_400_v1")
-    assert multilingual.srg_calibration_source.endswith("search_unsafe")
+    assert not hasattr(multilingual, "srg_calibration_source")
     assert multilingual.ordinary_max_new_tokens == 100
     assert multilingual.final_max_new_tokens == 100
     assert multilingual.schedule_capacity == 1000
@@ -234,6 +258,7 @@ def test_writes_original_effective_yaml_internal_toml_and_manifest(
     assert "save_trial_responses = true" in internal_toml
     assert "max_batch_size = 4096" in internal_toml
     assert "geometry_trajectory_package" in internal_toml
+    assert "geometry_render_html" in internal_toml
     manifest = json.loads(bundle.manifest.read_text(encoding="utf-8"))
     assert manifest["schema_version"] == 1
     assert manifest["config_sha256"]

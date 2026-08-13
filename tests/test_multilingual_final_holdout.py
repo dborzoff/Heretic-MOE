@@ -12,6 +12,7 @@ from heretic.multilingual_final_holdout import (
     build_final_holdout_archive,
     evaluate_final_holdout,
     load_final_holdout_archive,
+    merge_final_holdout_archives,
 )
 
 
@@ -52,7 +53,11 @@ class _Model:
 class _Scorer:
     def score_responses(self, prompts, responses):
         clean = all(response.startswith("clean") for response in responses)
-        margins = [1.0, -1.0, 1.0, -1.0] if clean else [-1.0] * 4
+        margins = (
+            [1.0 if index % 2 == 0 else -1.0 for index in range(len(prompts))]
+            if clean
+            else [-1.0] * len(prompts)
+        )
         return SimpleNamespace(diagnostics={"margins": margins})
 
 
@@ -177,3 +182,42 @@ def test_final_holdout_rejects_wrong_clean_order(tmp_path: Path) -> None:
             private_records_path=tmp_path / "candidate.jsonl",
             max_response_length=1024,
         )
+
+
+def test_final_holdout_shards_merge_in_canonical_order(tmp_path: Path) -> None:
+    rows = _rows(tmp_path)
+    direction = torch.ones((2, 2))
+    shard_dirs = []
+    for index, shard_rows in enumerate((rows[:2], rows[2:])):
+        shard = tmp_path / f"shard-{index}"
+        build_final_holdout_archive(
+            model=_Model(),
+            rows=shard_rows,
+            refusal_direction=direction,
+            srg_scorer=_Scorer(),
+            srg_profile=_profile(),
+            output_dir=shard,
+            dataset_contract_sha256="a" * 64,
+            model_fingerprint="model-v1",
+            top_six_contract_sha256="b" * 64,
+            max_response_length=100,
+        )
+        shard_dirs.append(shard)
+
+    output = tmp_path / "merged"
+    manifest = merge_final_holdout_archives(
+        shard_dirs=shard_dirs,
+        rows=rows,
+        refusal_direction=direction,
+        srg_profile=_profile(),
+        output_dir=output,
+        dataset_contract_sha256="a" * 64,
+        model_fingerprint="model-v1",
+        top_six_contract_sha256="b" * 64,
+        max_response_length=100,
+    )
+    _, records = load_final_holdout_archive(output)
+
+    assert manifest["status"] == "PASS"
+    assert manifest["shards"] == 2
+    assert [record["row_id"] for record in records] == [row.row_id for row in rows]

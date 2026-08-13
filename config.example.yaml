@@ -1,0 +1,63 @@
+version: 1
+
+model:
+  path: F:/models/model
+
+run:
+  root: F:/runs/model-heretic-moe-v3
+  incompatible_contract: archive
+  target_trials: 600
+  exploration_trials: 120
+  seed: 20260811
+  post_search: export
+
+devices:
+  mode: auto
+  include: []
+  max_workers: null
+  min_free_gib: 4
+  min_free_fraction: 0.70
+
+data:
+  dataset_root: F:/datasets/heretic_moe_5lang_v1
+  split_root: F:/datasets/heretic_moe_5lang_v1/operative_split_1000_400_v1
+
+generation:
+  ordinary_max_new_tokens: 100
+  final_max_new_tokens: 100
+  batch_size: auto
+  max_batch_size: 4096
+  backend: compiled_static
+  vram_headroom_fraction: 0.10
+
+search:
+  schedule_capacity: 1000
+  schedule_seed: 20260811
+  schedule_version: 2
+  direction_modes: [global, per_layer]
+  save_responses: true
+
+metrics:
+  contract_version: multilingual_v3
+  max_safe_ppl_drift: 0.005
+  max_safe_geometry_damage: 1.0
+  max_language_instability: 1.0
+  max_category_instability: 1.0
+  max_empty_rate: 0.0
+  max_truncated_rate: 0.0
+  max_safe_d_to_r_rate: 0.0
+
+finalists:
+  top_n: 6
+  balanced_removal_fraction: 0.80
+  export_roles: [Balanced, Max]
+
+geometry:
+  trajectory: true
+  capture_trials: true
+  render_html: true
+
+recovery:
+  worker_heartbeat_seconds: 15
+  worker_timeout_seconds: 180
+  max_restarts_per_gpu: 2

@@ -7,8 +7,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from .language_map_analysis import analyze_geometry, write_geometry_reports
 from .language_map_cache import (
@@ -330,7 +331,12 @@ def _capture_parallel(
         )
         for device in selected
     ]
-    exits = run_worker_processes(specifications)
+    exits = run_worker_processes(
+        specifications,
+        stage_name="Direction geometry map",
+        total_rows=len(rows),
+        next_action="Clean reference",
+    )
     failed = {
         worker_id: exit_code
         for worker_id, exit_code in exits.items()

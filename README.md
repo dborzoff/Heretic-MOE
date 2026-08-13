@@ -32,6 +32,10 @@ parts that made modern architectures hard to search or reproduce:
 Heretic-MOE 1.5 can run the complete multi-GPU workflow unattended from one
 command:
 
+Copy `config.example.yaml` to `config.yaml` and change the model, run, and
+dataset paths. Every persistent setting lives in that YAML; the command-line
+options below are temporary overrides and never rewrite it.
+
 ```powershell
 hereticMOE --config config.yaml --model F:/models/my-model --run-root F:/runs/my-model-heretic-moe --devices 0,1 --target-trials 600 --exploration-trials 120 --post-search export --incompatible-contract archive
 ```
@@ -60,8 +64,10 @@ writing into the same journal.
 
 Set `data.dataset_root` in `config.yaml` to remove machine-specific prompt
 paths. The directory is local-only and stores the frozen multilingual v3
-corpus: `direction_{lang}_{safe,unsafe}.jsonl`,
-`search_unsafe_{lang}.jsonl`, and `srg_calibration_{lang}.jsonl`.
+direction/trial pools (including `direction_{lang}_{safe,unsafe}.jsonl`) plus
+the independent final holdout. The built-in cross-model SRG profile and its
+prototypes ship with Heretic-MOE; there is no separate per-model
+SRG calibration stage.
 Set `data.split_root` to the operative split containing
 `direction_*_1000.jsonl` and `trial_*_400.jsonl`. Prompt payloads are not
 committed to this repository.

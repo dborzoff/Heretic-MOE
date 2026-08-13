@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
-import pytest
 import torch
 
+from heretic.builtin_srg import materialize_builtin_srg_runtime
 from heretic.clean_reference_archive import build_clean_reference_archive
 from heretic.config import SelectionPolicy, Settings
 from heretic.language_map_data import GeometryRow, text_free_row_index
@@ -21,7 +20,6 @@ from heretic.multilingual_runtime import (
     apply_multilingual_search_mode,
     load_multilingual_finalist_evaluator,
     load_multilingual_search_evaluator,
-    resolve_srg_runtime_contract,
 )
 from heretic.multilingual_search_evaluator import MultilingualConstraintContract
 from heretic.trial_language_schedule import materialize_trial_language_schedule
@@ -85,7 +83,6 @@ def _prepare_runtime(tmp_path: Path) -> tuple[MultilingualDatasetBundle, Path]:
     bundle = MultilingualDatasetBundle(
         direction_rows=(),
         trial_rows=tuple(rows),
-        search_rows=(),
         final_rows=(),
         manifest={"status": "PASS", "contract_sha256": dataset_sha},
     )
@@ -123,23 +120,7 @@ def _prepare_runtime(tmp_path: Path) -> tuple[MultilingualDatasetBundle, Path]:
         max_response_length=512,
         batch_size=2,
     )
-    calibration_dir = runtime_root / "srg_calibration"
-    calibration_dir.mkdir(parents=True)
-    (calibration_dir / "calibration_profile.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "status": "PASS",
-                "rows": 660,
-                "scale": [1.0] * 660,
-                "weight": [1.0] * 660,
-                "global_scale": 1.0,
-                "group_scale": {},
-                "group_weight": {},
-            }
-        ),
-        encoding="utf-8",
-    )
+    materialize_builtin_srg_runtime(runtime_root / "srg_profile")
     return bundle, runtime_root
 
 
@@ -234,67 +215,6 @@ def test_multilingual_mode_cannot_fall_back_to_legacy_136_objectives(tmp_path: P
     assert settings.response_prefix == ""
 
 
-def test_srg_runtime_contract_uses_only_pinned_660_files(tmp_path: Path) -> None:
-    root = tmp_path / "srg_calibration"
-    private = root / "private"
-    private.mkdir(parents=True)
-    prototypes = root / "prototypes.jsonl"
-    prompts = private / "evaluation_prompts.jsonl"
-    prototypes.write_bytes(b"prototype-bank\n")
-    prompts.write_bytes(b"calibration-660\n")
-    manifest = {
-        "status": "PASS",
-        "prototype_path": str(prototypes),
-        "prototype_sha256": hashlib.sha256(prototypes.read_bytes()).hexdigest(),
-        "prompt_path": str(prompts),
-        "prompt_sha256": hashlib.sha256(prompts.read_bytes()).hexdigest(),
-        "prompt_rows": 660,
-        "top_k": 5,
-        "min_df": 2,
-        "max_response_length": 128,
-        "validate_prompt_alignment": False,
-    }
-    (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-
-    resolved = resolve_srg_runtime_contract(root)
-
-    assert resolved["prompt_rows"] == 660
-    assert resolved["prototype_path"] == prototypes.resolve()
-    assert resolved["prompt_path"] == prompts.resolve()
-    assert resolved["validate_prompt_alignment"] is False
-
-
-def test_srg_runtime_contract_accepts_and_checks_configured_prompt_rows(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "srg_calibration"
-    private = root / "private"
-    private.mkdir(parents=True)
-    prototypes = root / "prototypes.jsonl"
-    prompts = private / "evaluation_prompts.jsonl"
-    prototypes.write_bytes(b"prototype-bank\n")
-    prompts.write_bytes(b"calibration-custom\n")
-    manifest = {
-        "status": "PASS",
-        "prototype_path": str(prototypes),
-        "prototype_sha256": hashlib.sha256(prototypes.read_bytes()).hexdigest(),
-        "prompt_path": str(prompts),
-        "prompt_sha256": hashlib.sha256(prompts.read_bytes()).hexdigest(),
-        "prompt_rows": 12,
-        "top_k": 5,
-        "min_df": 2,
-        "max_response_length": 100,
-        "validate_prompt_alignment": False,
-    }
-    (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-
-    resolved = resolve_srg_runtime_contract(root, expected_prompt_rows=12)
-
-    assert resolved["prompt_rows"] == 12
-    with pytest.raises(ValueError, match="prompt rows"):
-        resolve_srg_runtime_contract(root, expected_prompt_rows=15)
-
-
 def test_finalist_runtime_uses_full_pool_and_frozen_r_archive(tmp_path: Path) -> None:
     bundle, runtime_root = _prepare_runtime(tmp_path)
     final_rows = (
@@ -306,13 +226,12 @@ def test_finalist_runtime_uses_full_pool_and_frozen_r_archive(tmp_path: Path) ->
     bundle = MultilingualDatasetBundle(
         direction_rows=bundle.direction_rows,
         trial_rows=bundle.trial_rows,
-        search_rows=bundle.search_rows,
         final_rows=final_rows,
         manifest=bundle.manifest,
     )
     profile, _ = load_direction_map_package(runtime_root / "clean_map" / "directions")
     srg_profile = json.loads(
-        (runtime_root / "srg_calibration" / "calibration_profile.json").read_text(encoding="utf-8")
+        (runtime_root / "srg_profile" / "calibration_profile.json").read_text(encoding="utf-8")
     )
     build_final_holdout_archive(
         model=_ReferenceModel(), rows=final_rows,

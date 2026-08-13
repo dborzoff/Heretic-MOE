@@ -11,11 +11,11 @@ import os
 import re
 import subprocess
 import threading
-import tomllib
 from pathlib import Path
 from typing import Any
 
 import optuna
+import tomllib
 from optuna.storages import JournalStorage
 from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 from optuna.trial import FrozenTrial, TrialState
@@ -198,18 +198,18 @@ def multilingual_trial_metrics(trial: FrozenTrial) -> dict[str, Any]:
     _, record = score_value(trial, "Removal")
     public = record.get("diagnostics")
     if not isinstance(public, dict):
-        raise RuntimeError(f"Trial {trial.number} has no multilingual diagnostics")
+        raise TypeError(f"Trial {trial.number} has no multilingual diagnostics")
     metrics = public.get("metrics")
     diagnostics = public.get("diagnostics")
     if not isinstance(metrics, dict) or not isinstance(diagnostics, dict):
-        raise RuntimeError(f"Trial {trial.number} has incomplete multilingual diagnostics")
+        raise TypeError(f"Trial {trial.number} has incomplete multilingual diagnostics")
     final = diagnostics.get("final_holdout")
     trial_groups = diagnostics.get("srg_groups")
     if not isinstance(final, dict) or not isinstance(trial_groups, dict):
-        raise RuntimeError(f"Trial {trial.number} has no independent final holdout")
+        raise TypeError(f"Trial {trial.number} has no independent final holdout")
     final_groups = final.get("groups")
     if not isinstance(final_groups, dict):
-        raise RuntimeError(f"Trial {trial.number} final holdout has no group summary")
+        raise TypeError(f"Trial {trial.number} final holdout has no group summary")
     worst_language = min(
         float(trial_groups["worst_language"]),
         float(final_groups["worst_language"]),
@@ -245,7 +245,7 @@ def final_holdout_prepare_command(
     heretic: Path,
     manifest: dict[str, Any],
     runtime_root: Path,
-    device: str,
+    devices: list[str],
 ) -> list[str]:
     return [
         str(heretic),
@@ -256,8 +256,8 @@ def final_holdout_prepare_command(
         str(runtime_root),
         "--top-six-manifest",
         str(manifest["top_six_manifest"]),
-        "--device",
-        str(device),
+        "--devices",
+        ",".join(str(device) for device in devices),
     ]
 
 
@@ -293,13 +293,13 @@ def _multilingual_final_holdout_sha256(settings: dict[str, Any]) -> str:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     files = manifest.get("files")
     if not isinstance(files, dict):
-        raise RuntimeError("multilingual dataset manifest has no files mapping")
+        raise TypeError("multilingual dataset manifest has no files mapping")
     records = []
     for language in ("en", "ru", "zh", "es", "fr"):
         name = f"srg_calibration_{language}.jsonl"
         record = files.get(name)
         if not isinstance(record, dict):
-            raise RuntimeError(f"multilingual dataset manifest is missing {name}")
+            raise TypeError(f"multilingual dataset manifest is missing {name}")
         records.append(
             {
                 "name": name,
@@ -405,6 +405,7 @@ def prepare_multilingual(
             "optimization_only": True,
             "checkpoint_action": "continue",
             "leaderboard_size": 6,
+            "geometry_trial_number_offset": 1_000_000,
             "study_checkpoint_dir": str(checkpoints).replace("\\", "/"),
             "multilingual_search": multilingual,
         }
@@ -417,6 +418,7 @@ def prepare_multilingual(
         ("optimization_only", "true"),
         ("checkpoint_action", '"continue"'),
         ("leaderboard_size", "6"),
+        ("geometry_trial_number_offset", "1000000"),
         ("study_checkpoint_dir", json.dumps(str(checkpoints).replace("\\", "/"))),
     ):
         config_text = replace_top_level(config_text, key, value)
@@ -944,6 +946,8 @@ def worker_text_options() -> dict[str, object]:
 
 
 def run(args: argparse.Namespace) -> None:
+    from heretic.pipeline_ui import PipelineUI
+
     output = args.output_dir.resolve()
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     devices = args.devices or [str(device) for device in manifest["devices"]]
@@ -963,13 +967,13 @@ def run(args: argparse.Namespace) -> None:
                 args.heretic,
                 manifest,
                 runtime_root,
-                str(devices[0]),
+                [str(device) for device in devices],
             )
             print(
                 json.dumps(
                     {
                         "event": "final_holdout_reference_start",
-                        "device": str(devices[0]),
+                        "devices": [str(device) for device in devices],
                         "rows": runtime_pool_rows(runtime_root, "final_holdout"),
                     }
                 ),
@@ -991,6 +995,17 @@ def run(args: argparse.Namespace) -> None:
     lock = threading.Lock()
     processes: list[tuple[str, subprocess.Popen[str], Any]] = []
     readers: list[threading.Thread] = []
+    progress = PipelineUI()
+    worker_ids = tuple(f"gpu-{device}" for device in devices[:workers])
+    progress.stage(
+        "TOP-6 finalist recheck",
+        total=waiting,
+        description=f"Full trial pool + independent holdout on {workers} GPU(s)",
+    )
+    budget_by_worker = dict(zip(worker_ids, budgets, strict=True))
+    for worker_id in worker_ids:
+        progress.add_worker(worker_id, total=budget_by_worker[worker_id])
+    completed_by_worker = {worker_id: 0 for worker_id in worker_ids}
 
     def stream(device: str, process: subprocess.Popen[str], log_handle: Any) -> None:
         assert process.stdout is not None
@@ -998,7 +1013,30 @@ def run(args: argparse.Namespace) -> None:
             log_handle.write(line)
             log_handle.flush()
             with lock:
-                print(f"[GPU {device}] {line}", end="")
+                worker_id = f"gpu-{device}"
+                try:
+                    event = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    event = None
+                if isinstance(event, dict) and event.get("event") == "trial_complete":
+                    completed_by_worker[worker_id] += 1
+                    progress.update_worker(
+                        worker_id,
+                        completed=min(
+                            completed_by_worker[worker_id], budget_by_worker[worker_id]
+                        ),
+                        total=budget_by_worker[worker_id],
+                    )
+                    progress.update_overall(
+                        completed=min(sum(completed_by_worker.values()), waiting),
+                        total=waiting,
+                    )
+                lowered = line.lower()
+                if any(
+                    marker in lowered
+                    for marker in ("traceback", "error:", " exception", "failed with")
+                ):
+                    print(f"[GPU {device}] {line}", end="")
 
     for worker, (device, budget) in enumerate(zip(devices[:workers], budgets, strict=True)):
         log_handle = (output / f"gpu{device}.log").open("a", encoding="utf-8")
@@ -1056,8 +1094,30 @@ def run(args: argparse.Namespace) -> None:
     for _, _, log_handle in processes:
         log_handle.close()
     if failures:
+        progress.finish_stage({"status": "FAIL", "failures": len(failures)})
+        progress.close()
         raise RuntimeError(f"Recheck worker failure(s): {failures}")
-    finalize(output)
+    for worker_id, budget in zip(worker_ids, budgets, strict=True):
+        completed_by_worker[worker_id] = budget
+        progress.update_worker(
+            worker_id,
+            completed=budget,
+            total=budget,
+        )
+    progress.update_overall(completed=waiting, total=waiting)
+    report = finalize(output)
+    winners = report["winners"]
+    progress.finish_stage(
+        {
+            "status": "PASS",
+            "finalists": waiting,
+            "workers": workers,
+            "Balanced": f"T{winners['Balanced']['source_trial_number']}",
+            "Max": f"T{winners['Max']['source_trial_number']}",
+            "next": "export selected models",
+        }
+    )
+    progress.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -1067,7 +1127,7 @@ def parse_args() -> argparse.Namespace:
     prepare_parser.add_argument("--source-journal", type=Path, required=True)
     prepare_parser.add_argument("--base-config", type=Path, required=True)
     prepare_parser.add_argument("--output-dir", type=Path, required=True)
-    prepare_parser.add_argument("--top-n", type=int, default=5)
+    prepare_parser.add_argument("--top-n", type=int, default=6)
     prepare_parser.add_argument(
         "--selection-policy",
         choices=[policy.value for policy in SelectionPolicy],
@@ -1076,7 +1136,7 @@ def parse_args() -> argparse.Namespace:
     prepare_parser.add_argument("--trial-indices", type=int, nargs="+")
     prepare_parser.add_argument("--ppl-chunks", type=int, default=64)
     prepare_parser.add_argument("--ppl-window", type=int, default=1024)
-    prepare_parser.add_argument("--devices", nargs="+", default=["0", "1"])
+    prepare_parser.add_argument("--devices", nargs="+", default=["0"])
     prepare_parser.add_argument("--max-ppl-drift", type=float, default=0.005)
     prepare_parser.add_argument("--max-keywords", type=int, default=2)
     prepare_parser.add_argument("--keyword-total", type=int, default=136)
@@ -1084,7 +1144,7 @@ def parse_args() -> argparse.Namespace:
     prepare_parser.add_argument("--balanced-srg-gate", type=float)
     prepare_parser.add_argument("--baseline-srg", type=float)
     prepare_parser.add_argument(
-        "--balanced-removal-fraction", type=float, default=0.0
+        "--balanced-removal-fraction", type=float, default=0.8
     )
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--output-dir", type=Path, required=True)

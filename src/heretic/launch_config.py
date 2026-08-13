@@ -88,7 +88,6 @@ class DataSettings(BaseModel):
 
     dataset_root: Path
     split_root: Path | None = None
-    srg_calibration_source: Path | None = None
 
 
 class GenerationSettings(BaseModel):
@@ -362,7 +361,7 @@ def _resolve_config_relative_paths(config: LaunchConfig, source: Path) -> Launch
     if not root.is_absolute():
         payload["run"]["root"] = str((source.parent / root).resolve())
     data = dict(payload.get("data") or {})
-    for key in ("dataset_root", "split_root", "srg_calibration_source"):
+    for key in ("dataset_root", "split_root"):
         if key in data:
             data[key] = _resolve_optional_path(data[key], source)
     payload["data"] = data
@@ -427,7 +426,6 @@ def build_internal_settings(config: LaunchConfig) -> Settings:
         dataset_root=_path_to_text(config.data.dataset_root),
         split_root=_path_to_text(config.data.split_root),
         runtime_root=runtime_root.as_posix(),
-        srg_calibration_source=_path_to_text(config.data.srg_calibration_source),
         ordinary_max_new_tokens=config.generation.ordinary_max_new_tokens,
         final_max_new_tokens=config.generation.final_max_new_tokens,
         schedule_seed=config.search.schedule_seed,
@@ -471,6 +469,7 @@ def build_internal_settings(config: LaunchConfig) -> Settings:
             "save_trial_responses": config.search.save_responses,
             "geometry_trajectory_package": geometry_package,
             "geometry_capture_evaluation": config.geometry.capture_trials,
+            "geometry_render_html": config.geometry.render_html,
         }
     )
     return Settings(**settings_payload)
@@ -507,6 +506,8 @@ def _internal_settings_payload(config: LaunchConfig) -> dict[str, Any]:
             "save_trial_responses": settings.save_trial_responses,
             "geometry_trajectory_package": settings.geometry_trajectory_package,
             "geometry_capture_evaluation": settings.geometry_capture_evaluation,
+            "geometry_trial_number_offset": settings.geometry_trial_number_offset,
+            "geometry_render_html": settings.geometry_render_html,
         }
     )
     return {key: value for key, value in payload.items() if value is not None}

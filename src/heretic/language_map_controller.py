@@ -4,15 +4,17 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
-import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock, Thread
+
+from .pipeline_ui import PipelineUI
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,9 @@ def run_worker_processes(
     specifications: Sequence[GeometryWorkerSpec],
     *,
     line_sink: Callable[[str], None] = print,
+    stage_name: str = "GPU work",
+    total_rows: int | None = None,
+    next_action: str | None = None,
 ) -> dict[str, int]:
     if not specifications:
         raise ValueError("at least one worker specification is required")
@@ -75,6 +80,14 @@ def run_worker_processes(
     progress_by_worker: dict[str, tuple[int, int]] = {}
     progress_started = time.monotonic()
     progress_lock = Lock()
+    ui = PipelineUI() if line_sink is print and total_rows is not None else None
+    if ui is not None:
+        ui.stage(
+            stage_name,
+            total=total_rows,
+            workers=tuple(specification.worker_id for specification in specifications),
+            description=f"Resident workers: {len(specifications)} GPU(s)",
+        )
 
     def stream(specification: GeometryWorkerSpec, process: subprocess.Popen[str]) -> None:
         assert process.stdout is not None
@@ -88,11 +101,24 @@ def run_worker_processes(
             if isinstance(event, dict) and event.get("event") in {
                 "worker_progress",
                 "reference_worker_progress",
+                "final_holdout_worker_progress",
             }:
                 completed = int(event["completed"])
                 total = int(event["total"])
                 with progress_lock:
                     progress_by_worker[specification.worker_id] = (completed, total)
+                    if ui is not None:
+                        ui.update_worker(
+                            specification.worker_id,
+                            completed=completed,
+                            total=total,
+                        )
+                        if "global_completed" in event:
+                            ui.update_overall(
+                                completed=int(event["global_completed"]),
+                                total=int(event["global_total"]),
+                            )
+                        continue
                     if event.get("scope") == "global":
                         global_completed = max(
                             value[0] for value in progress_by_worker.values()
@@ -156,8 +182,21 @@ def run_worker_processes(
         if progress_by_worker and line_sink is print:
             sys.stdout.write("\n")
             sys.stdout.flush()
+        if ui is not None:
+            summary: dict[str, object] = {
+                "status": "PASS" if not any(exits.values()) else "FAIL",
+                "workers": len(specifications),
+                "rows": total_rows,
+            }
+            if next_action is not None and not any(exits.values()):
+                summary["next"] = next_action
+            ui.finish_stage(summary)
+            ui.close()
         return exits
     except BaseException:
+        if ui is not None:
+            ui.finish_stage({"status": "FAIL", "error": "worker stage failed"})
+            ui.close()
         for _, process in processes:
             if process.poll() is None:
                 process.terminate()

@@ -36,15 +36,14 @@ class ScorerConfigTests(unittest.TestCase):
 
     def test_rejects_whitespace_in_instance_name(self) -> None:
         for instance_name in ["small name", "small\tname", "small\nname"]:
-            with self.subTest(instance_name=instance_name):
-                with self.assertRaisesRegex(
-                    ValidationError, "whitespace is not allowed"
-                ):
-                    ScorerConfig(
-                        plugin="heretic.scorers.keyword_rate.KeywordRate",
-                        optimization="minimize",
-                        instance_name=instance_name,
-                    )
+            with self.subTest(instance_name=instance_name), self.assertRaisesRegex(
+                ValidationError, "whitespace is not allowed"
+            ):
+                ScorerConfig(
+                    plugin="heretic.scorers.keyword_rate.KeywordRate",
+                    optimization="minimize",
+                    instance_name=instance_name,
+                )
 
     def test_rejects_dot_in_instance_name(self) -> None:
         with self.assertRaisesRegex(ValidationError, "'\\.' is not allowed"):
@@ -94,7 +93,7 @@ class SearchSettingsTests(unittest.TestCase):
         self.assertEqual(contract.languages, ["en", "ru", "zh", "es", "fr"])
         self.assertEqual(contract.direction_rows_per_cell, 1000)
         self.assertEqual(contract.trial_rows_per_cell, 400)
-        self.assertEqual(contract.calibration_rows_per_language, 132)
+        self.assertEqual(contract.final_holdout_rows_per_language, 132)
         self.assertEqual(contract.ordinary_max_new_tokens, 100)
         self.assertEqual(contract.final_max_new_tokens, 100)
         self.assertEqual(contract.evaluation_phase, "search")
@@ -174,14 +173,13 @@ class SearchSettingsTests(unittest.TestCase):
         self.assertEqual(settings.seed_selection, SeedSelection.SPREAD)
 
     def test_conditional_components_require_grouped_tpe(self) -> None:
-        with patch("sys.argv", ["test"]):
-            with self.assertRaisesRegex(
-                ValidationError, "conditional_components requires tpe_group=true"
-            ):
-                Settings(
-                    model="example/model",
-                    conditional_components=True,
-                )
+        with patch("sys.argv", ["test"]), self.assertRaisesRegex(
+            ValidationError, "conditional_components requires tpe_group=true"
+        ):
+            Settings(
+                model="example/model",
+                conditional_components=True,
+            )
 
     def test_grouped_tpe_allows_conditional_components(self) -> None:
         with patch("sys.argv", ["test"]):

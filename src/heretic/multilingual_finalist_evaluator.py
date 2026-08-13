@@ -14,7 +14,13 @@ from torch import Tensor
 from .language_map_data import GeometryRow
 from .multilingual_contract import CalibrationRow
 from .multilingual_final_holdout import evaluate_final_holdout
-from .multilingual_trial_evaluator import TrialMeasurement, evaluate_multilingual_trial
+from .multilingual_trial_evaluator import (
+    TrialMeasurement,
+    _clean_by_row_id,
+    _margins,
+    evaluate_multilingual_trial,
+)
+from .utils import Prompt
 
 
 class MultilingualFinalistEvaluator:
@@ -46,6 +52,29 @@ class MultilingualFinalistEvaluator:
         self.layer_reliability = layer_reliability
         self.srg_scorer = srg_scorer
         self.srg_profile = dict(srg_profile)
+        clean_by_id = _clean_by_row_id(self.trial_rows, self.clean_trial_records)
+        self.clean_trial_srg_margins: dict[str, float] = {}
+        for direction_class in ("safe", "unsafe"):
+            direction_rows = tuple(
+                row for row in self.trial_rows if row.direction == direction_class
+            )
+            margins = _margins(
+                self.srg_scorer.score_responses(
+                    [Prompt(system="", user=row.prompt) for row in direction_rows],
+                    [
+                        str(clean_by_id[row.row_id]["clean_response"])
+                        for row in direction_rows
+                    ],
+                ),
+                len(direction_rows),
+            )
+            self.clean_trial_srg_margins.update(
+                zip(
+                    (row.row_id for row in direction_rows),
+                    margins,
+                    strict=True,
+                )
+            )
         self.private_output_dir = Path(private_output_dir).resolve()
         self.expected_per_direction = expected_per_direction
         self.expected_languages = expected_languages
@@ -61,6 +90,7 @@ class MultilingualFinalistEvaluator:
             layer_reliability=self.layer_reliability,
             srg_scorer=self.srg_scorer,
             srg_profile=self.srg_profile,
+            clean_srg_margins=self.clean_trial_srg_margins,
             private_records_path=(
                 self.private_output_dir
                 / "trial_pool"

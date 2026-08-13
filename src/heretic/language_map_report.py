@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import base64
-from hashlib import sha256
 import json
 import os
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-
 
 _SENSITIVE_KEYS = {"prompt", "response", "answer", "question", "text"}
 _VERDICT_KEYS = {"trial_number", "row_id", "status", "confidence", "finalist"}
@@ -163,7 +162,10 @@ def write_interactive_geometry_report(
     languages = sorted({str(row["language"]) for row in base_index})
     groups = sorted({str(row["group"]) for row in base_index})
     categories = sorted({str(row["category_id"]) for row in base_index})
-    phases = sorted({str(row.get("phase", "search")) for row in timeline})
+    phases = sorted(
+        {str(row.get("phase", "search")) for row in timeline}
+        | {str(row.get("phase", "search")) for row in trial_index}
+    )
     finalists = sorted(
         {
             str(verdict["finalist"])
@@ -241,14 +243,14 @@ function addChecks(id,values){const root=byId(id);for(const value of values){con
 addChecks('language-filters',META.languages);addChecks('group-filters',META.groups);addChecks('category-filters',META.categories);addChecks('phase-filters',META.phases);
 for(const value of META.finalists){const o=document.createElement('option');o.value=o.textContent=value;byId('finalist-filter').append(o)}
 function checked(id){return new Set([...byId(id).querySelectorAll('input:checked')].map(x=>x.value))}function currentTrial(){return captured[+trial.value]??null}function coord(array,row,l){const p=(row*META.layers+l)*3;return[array[p],array[p+1],array[p+2]]}
-function verdict(t,row){const hit=META.verdicts.find(v=>v.trial_number===t&&v.row_id===row);return hit?.status||'unknown'}
+ function verdictsFor(t,row){return META.verdicts.filter(v=>v.trial_number===t&&v.row_id===row)}function selectedFinalist(){return byId('finalist-filter').value}function verdict(t,row){const hits=verdictsFor(t,row),selected=selectedFinalist(),hit=selected==='all'?hits[0]:hits.find(v=>v.finalist===selected);return hit?.status||'unknown'}
 function visible(row,langs,groups,cats){return langs.has(row.language)&&groups.has(row.group)&&cats.has(row.category_id)}
 function rotate(p){const cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch);const x=p[0]*cy-p[2]*sy,z=p[0]*sy+p[2]*cy;return[x,z*sp+p[1]*cp,z*cp-p[1]*sp]}
 function resize(){const d=devicePixelRatio||1,w=canvas.clientWidth,h=canvas.clientHeight;if(canvas.width!==w*d||canvas.height!==h*d){canvas.width=w*d;canvas.height=h*d;ctx.setTransform(d,0,0,d,0,0)}}
 function render(){resize();const w=canvas.clientWidth,h=canvas.clientHeight,l=+layer.value,t=currentTrial(),langs=checked('language-filters'),groups=checked('group-filters'),cats=checked('category-filters'),phases=checked('phase-filters'),stage=byId('stage-filter').value,vfilter=byId('verdict-filter').value,arrows=byId('arrow-filter').value,size=+byId('point-size').value,alpha=+byId('opacity').value;ctx.clearRect(0,0,w,h);byId('layer-value').textContent=`Layer ${l+1} / ${META.layers}`;byId('trial-value').textContent=t===null?'No captured trials':`Trial ${t}`;
 let scale=55*zoom,ox=w/2+panX,oy=h/2+panY;const project=p=>{const q=rotate(p);return[ox+q[0]*scale,oy-q[1]*scale,q[2]]};const basePoints=[],trialPoints=[];
 if(stage==='all'||stage==='original')for(let i=0;i<META.rows;i++){const row=META.base_index[i];if(visible(row,langs,groups,cats)){const q=project(coord(BASE,i,l));basePoints.push({q,color:row.group==='A'?'#4d9cff':'#ff5364',row})}}
-const entry=META.trial_index.find(x=>x.trial_number===t),phase=entry?.phase||META.timeline.find(x=>x.trial_number===t)?.phase||'search';if(t!==null&&TRIALS[t]&&phases.has(phase)&&(stage==='all'||stage==='trials')){const arr=TRIALS[t];for(let a=0;a<META.anchor_rows.length;a++){const baseRow=META.anchor_rows[a],row=META.base_index[baseRow];if(!visible(row,langs,groups,cats))continue;const status=verdict(t,row.row_id);if(vfilter!=='all'&&status!==vfilter)continue;const from=project(coord(BASE,baseRow,l)),to=project(coord(arr,a,l));trialPoints.push({from,to,row,status,color:status==='success'?'#35df8d':'#f3c84b'});}}
+ const entry=META.trial_index.find(x=>x.trial_number===t),phase=entry?.phase||META.timeline.find(x=>x.trial_number===t)?.phase||'search',isFinalist=META.verdicts.some(v=>v.trial_number===t&&v.finalist),stageVisible=stage==='all'||stage==='trials'||(stage==='finalists'&&isFinalist),selected=selectedFinalist();if(t!==null&&TRIALS[t]&&phases.has(phase)&&stageVisible){const arr=TRIALS[t];for(let a=0;a<META.anchor_rows.length;a++){const baseRow=META.anchor_rows[a],row=META.base_index[baseRow];if(!visible(row,langs,groups,cats))continue;if(selected!=='all'&&!verdictsFor(t,row.row_id).some(v=>v.finalist===selected))continue;const status=verdict(t,row.row_id);if(vfilter!=='all'&&status!==vfilter)continue;const from=project(coord(BASE,baseRow,l)),to=project(coord(arr,a,l));trialPoints.push({from,to,row,status,color:status==='success'?'#35df8d':'#f3c84b'});}}
 if(t!==null&&EVALUATIONS[t]&&byId('show-evaluation').checked&&phases.has(phase)&&(stage==='all'||stage==='trials')){const arr=EVALUATIONS[t],rows=META.evaluation_indexes[t]||[];for(let i=0;i<rows.length;i++){const status=verdict(t,rows[i].prompt_sha256);if(vfilter!=='all'&&status!==vfilter)continue;const to=project(coord(arr,i,l));trialPoints.push({from:to,to,row:{row_id:rows[i].prompt_sha256},status,color:status==='success'?'#35df8d':'#f3c84b',evaluation:true})}}
 ctx.globalAlpha=.45;if(arrows==='all'||arrows==='centroids'){ctx.setLineDash([]);for(const p of trialPoints){if(p.evaluation)continue;ctx.strokeStyle=p.color;ctx.beginPath();ctx.moveTo(p.from[0],p.from[1]);ctx.lineTo(p.to[0],p.to[1]);ctx.stroke()}}
 if((arrows==='path'||arrows==='centroids')&&captured.length>1){ctx.setLineDash([6,5]);ctx.strokeStyle='#d8dfef';ctx.beginPath();let first=true;for(const n of captured){const e=META.trial_index.find(x=>x.trial_number===n);if(!phases.has(e?.phase||'search'))continue;const arr=TRIALS[n];let c=[0,0,0];for(let a=0;a<META.anchor_rows.length;a++){const p=coord(arr,a,l);c[0]+=p[0];c[1]+=p[1];c[2]+=p[2]}c=c.map(x=>x/META.anchor_rows.length);const q=project(c);first?(ctx.moveTo(q[0],q[1]),first=false):ctx.lineTo(q[0],q[1])}ctx.stroke();ctx.setLineDash([])}

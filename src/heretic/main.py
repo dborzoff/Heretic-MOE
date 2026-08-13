@@ -35,16 +35,7 @@ if _is_version_invocation():
 if _is_help_invocation():
     Settings.from_cli()
 
-# FIXME: Rich progress bars are currently disabled because of rendering issues
-#        when used from multiple threads in parallel (e.g. by huggingface_hub).
-"""
-from .progress import patch_tqdm
-
-# This patches tqdm class definitions, which must happen
-# before any other module imports tqdm.
-patch_tqdm()
-"""
-
+import json
 import logging
 import math
 import os
@@ -140,6 +131,7 @@ _ALWAYS_RUNTIME_FIELDS = (
     "trial_responses_file",
     "trial_response_number_offset",
     "trial_response_number_stride",
+    "geometry_trial_number_offset",
 )
 
 
@@ -287,8 +279,7 @@ def _format_multilingual_frozen_rows(bundle: Any) -> str:
     return (
         f"map {len(bundle.direction_rows)}, "
         f"trial {len(bundle.trial_rows)}, "
-        f"SRG calibration {len(bundle.search_rows)}, "
-        f"final holdout {len(bundle.final_rows)}"
+        f"built-in SRG profile, final holdout {len(bundle.final_rows)}"
     )
 
 
@@ -1255,10 +1246,11 @@ def run():
         print("* Abliterating...")
         model.abliterate(residual_directions, direction_index, parameters)
         edit_telemetry = model.get_last_edit_telemetry()
+        geometry_trial_number = settings.geometry_trial_number_offset + trial.number
         geometry_session = (
             TrialGeometrySession(
                 Path(settings.geometry_trajectory_package),
-                trial_number=trial.number,
+                trial_number=geometry_trial_number,
             )
             if settings.geometry_trajectory_package is not None
             else None
@@ -1340,7 +1332,7 @@ def run():
             geometry_entry = geometry_session.finalize(
                 model,
                 TrialRecord(
-                    number=trial.number,
+                    number=geometry_trial_number,
                     state="complete",
                     phase=(
                         "recheck"
@@ -1367,6 +1359,18 @@ def run():
                 f"[bold]{geometry_entry['shape'][0]}[/] anchors, "
                 f"[bold]{geometry_entry.get('evaluation_count', 0)}[/] evaluation points"
             )
+
+        print(
+            json.dumps(
+                {
+                    "event": "trial_complete",
+                    "trial_number": trial.number,
+                    "worker_id": settings.worker_id,
+                },
+                sort_keys=True,
+            ),
+            markup=False,
+        )
 
         return objective_values
 
