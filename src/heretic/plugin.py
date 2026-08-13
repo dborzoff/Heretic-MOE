@@ -1,20 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2025-2026  Philipp Emanuel Weidmann <pew@worldwidemann.com> + contributors
 
+import hashlib
 import importlib
 import importlib.util
-import hashlib
 import inspect
 import sqlite3
 import sys
+import time
 import types
+from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
 from types import ModuleType
 from typing import (
     Annotated,
     Any,
-    Callable,
     TypeVar,
     Union,
     get_args,
@@ -32,6 +33,20 @@ from .config import Settings as HereticSettings
 from .model import Model
 
 T = TypeVar("T")
+
+
+def _enable_sqlite_wal(database: sqlite3.Connection, *, timeout_seconds: float) -> None:
+    """Enable WAL without losing the startup race between parallel workers."""
+
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            database.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error).lower() or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
 
 
 def get_plugin_namespace(
@@ -198,9 +213,7 @@ class Context:
             self._archive_responses(prompts, self._responses_cache[key])
         return self._responses_cache[key]
 
-    def _archive_responses(
-        self, prompts: list[Prompt], responses: list[str]
-    ) -> None:
+    def _archive_responses(self, prompts: list[Prompt], responses: list[str]) -> None:
         if not self._settings.save_trial_responses:
             return
         archive_file = self._settings.trial_responses_file
@@ -220,23 +233,23 @@ class Context:
         destination = Path(archive_file)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(archive_id, int):
-            trial_number = (
-                getattr(self._settings, "trial_response_number_offset", 0)
-                + archive_id
-                * getattr(self._settings, "trial_response_number_stride", 1)
-            )
+            trial_number = getattr(
+                self._settings, "trial_response_number_offset", 0
+            ) + archive_id * getattr(self._settings, "trial_response_number_stride", 1)
             trial_id = f"trial:{trial_number}"
         else:
             trial_id = str(archive_id)
             trial_number = None
 
-        with closing(sqlite3.connect(destination, timeout=60.0)) as database:
-            with database:
-                database.execute("PRAGMA journal_mode=WAL")
-                database.execute("PRAGMA synchronous=NORMAL")
-                database.execute("PRAGMA foreign_keys=ON")
-                database.executescript(
-                    """
+        with (
+            closing(sqlite3.connect(destination, timeout=60.0)) as database,
+            database,
+        ):
+            _enable_sqlite_wal(database, timeout_seconds=60.0)
+            database.execute("PRAGMA synchronous=NORMAL")
+            database.execute("PRAGMA foreign_keys=ON")
+            database.executescript(
+                """
                     CREATE TABLE IF NOT EXISTS prompt_batches (
                         batch_hash TEXT PRIMARY KEY,
                         prompt_count INTEGER NOT NULL
@@ -283,47 +296,47 @@ class Context:
                         JOIN trial_answers USING (batch_hash, prompt_index)
                         GROUP BY prompts.batch_hash, prompts.prompt_index;
                     """
-                )
-                database.execute(
-                    "INSERT OR IGNORE INTO prompt_batches VALUES (?, ?)",
-                    (batch_hash, len(prompts)),
-                )
-                database.executemany(
-                    """
+            )
+            database.execute(
+                "INSERT OR IGNORE INTO prompt_batches VALUES (?, ?)",
+                (batch_hash, len(prompts)),
+            )
+            database.executemany(
+                """
                     INSERT OR IGNORE INTO prompts (
                         batch_hash, prompt_index, system_prompt, question, prompt_sha256
                     ) VALUES (?, ?, ?, ?, ?)
                     """,
-                    [
-                        (
-                            batch_hash,
-                            index,
-                            prompt.system,
-                            prompt.user,
-                            prompt_hashes[index],
-                        )
-                        for index, prompt in enumerate(prompts)
-                    ],
-                )
-                database.executemany(
-                    """
+                [
+                    (
+                        batch_hash,
+                        index,
+                        prompt.system,
+                        prompt.user,
+                        prompt_hashes[index],
+                    )
+                    for index, prompt in enumerate(prompts)
+                ],
+            )
+            database.executemany(
+                """
                     INSERT OR IGNORE INTO trial_answers (
                         batch_hash, prompt_index, trial_id, trial_number,
                         answer, answer_sha256
                     ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    [
-                        (
-                            batch_hash,
-                            index,
-                            trial_id,
-                            trial_number,
-                            response,
-                            hashlib.sha256(response.encode("utf-8")).hexdigest(),
-                        )
-                        for index, response in enumerate(responses)
-                    ],
-                )
+                [
+                    (
+                        batch_hash,
+                        index,
+                        trial_id,
+                        trial_number,
+                        response,
+                        hashlib.sha256(response.encode("utf-8")).hexdigest(),
+                    )
+                    for index, response in enumerate(responses)
+                ],
+            )
 
     def get_logits(self, prompts: list[Prompt]) -> Tensor:
         return self._model.get_logits_batched(prompts)
@@ -453,4 +466,4 @@ class Plugin:
         Override this in subclasses to do one-time setup (e.g. load prompts, compute
         baselines).
         """
-        return None
+        return

@@ -3,7 +3,7 @@
 
 import gc
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -1488,6 +1488,116 @@ class Model:
             "shapes": [[size, width] for size, width, _sample in shapes],
         }
 
+    def validate_generation_batch_size(
+        self,
+        prompts: Sequence[Prompt],
+        *,
+        batch_size: int,
+        expected_rows: int,
+    ) -> dict[str, object]:
+        """Run one short real 100-token batch to prove the tuned shape fits."""
+
+        if not prompts or expected_rows <= 0:
+            raise ValueError("generation batch validation requires prompts and rows")
+        validation_size = min(int(batch_size), int(expected_rows), len(prompts))
+        if validation_size <= 0:
+            raise ValueError("validation batch size must be positive")
+        # Keep this probe conservative and stable across runtime response limits:
+        # it proves that the selected batch can sustain the v3 100-token contract.
+        max_new_tokens = 100
+        prompt_rows = self._cached_prompt_token_ids(prompts)
+        longest = sorted(
+            range(len(prompts)),
+            key=lambda index: int(prompt_rows[index].numel()),
+            reverse=True,
+        )
+        sample = [prompts[longest[index % len(longest)]] for index in range(validation_size)]
+        widths = [int(row.numel()) for row in self._cached_prompt_token_ids(sample)]
+        width = max(widths)
+        bucket_multiple = int(
+            getattr(self.settings, "generation_prompt_bucket_multiple", 0)
+        )
+        if bucket_multiple > 0:
+            width = math.ceil(width / bucket_multiple) * bucket_multiple
+        baseline_free, baseline_total, _baseline_peak = self._cuda_memory_snapshot()
+        torch.cuda.reset_peak_memory_stats()
+        inputs = outputs = None
+        measured_free = measured_total = measured_peak = 0
+        validation_error: BaseException | None = None
+        try:
+            inputs, outputs = self.generate(
+                sample,
+                max_new_tokens=max_new_tokens,
+                min_new_tokens=max_new_tokens,
+            )
+            sequences = outputs.sequences if hasattr(outputs, "sequences") else outputs
+            input_ids = inputs.get("input_ids") if isinstance(inputs, Mapping) else None
+            if (
+                not isinstance(sequences, Tensor)
+                or sequences.ndim != 2
+                or int(sequences.shape[0]) != validation_size
+            ):
+                raise ValueError("validation generation returned an invalid batch shape")
+            if input_ids is not None and (
+                not isinstance(input_ids, Tensor)
+                or input_ids.ndim != 2
+                or int(input_ids.shape[0]) != validation_size
+            ):
+                raise ValueError("validation collation returned an invalid batch shape")
+            if input_ids is not None:
+                generated_width = int(sequences.shape[1]) - int(input_ids.shape[1])
+                if generated_width != max_new_tokens:
+                    raise ValueError(
+                        "validation generation returned "
+                        f"{generated_width} new tokens; expected {max_new_tokens} new tokens"
+                    )
+            torch.cuda.synchronize()
+            measured_free, measured_total, measured_peak = self._cuda_memory_snapshot()
+        except BaseException as error:  # noqa: BLE001 - restore CUDA cache before OOM propagation
+            validation_error = error
+        finally:
+            del inputs, outputs
+            self._release_generation_probe_cache()
+        recovered_free, recovered_total, _recovered_peak = self._cuda_memory_snapshot()
+        if baseline_total != recovered_total or (
+            validation_error is None and baseline_total != measured_total
+        ):
+            raise RuntimeError("CUDA device memory total changed during batch validation")
+        tolerance = (
+            int(getattr(self.settings, "generation_batch_recovery_tolerance_mib", 256))
+            * 1024**2
+        )
+        if recovered_free + tolerance < baseline_free:
+            leaked = (baseline_free - recovered_free) / 1024**2
+            raise RuntimeError(
+                "generation batch validation did not release its CUDA cache "
+                f"({leaked:.0f} MiB still resident)"
+            )
+        if validation_error is not None:
+            raise validation_error.with_traceback(validation_error.__traceback__)
+        required_free = max(
+            int(float(self.settings.batch_size_vram_headroom_gib) * 1024**3),
+            int(
+                float(self.settings.batch_size_vram_headroom_fraction)
+                * measured_total
+            ),
+        )
+        status = "PASS" if measured_free >= required_free else "INSUFFICIENT_HEADROOM"
+        return {
+            "status": status,
+            "batch_size": validation_size,
+            "rows": validation_size,
+            "expected_rows": int(expected_rows),
+            "max_new_tokens": max_new_tokens,
+            "prompt_width": int(width),
+            "baseline_free_bytes": int(baseline_free),
+            "min_free_bytes": int(measured_free),
+            "working_set_bytes": int(max(0, baseline_free - measured_free)),
+            "required_free_bytes": int(required_free),
+            "recovered_free_bytes": int(recovered_free),
+            "peak_allocated_bytes": int(measured_peak),
+        }
+
     def _probe_generation_batch(
         self,
         prompts: Sequence[Prompt],
@@ -1569,8 +1679,9 @@ class Model:
             if "_cache" in vars(module):
                 module._cache = None
         gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
     @staticmethod
     def _cuda_memory_snapshot() -> tuple[int, int, int]:
@@ -1641,10 +1752,41 @@ class Model:
             raise RuntimeError(
                 "no generation batch candidate satisfies the CUDA VRAM reserve"
             )
-        self._adaptive_generation_batch_size = best.batch_size
+        candidate = best.batch_size
+        validation: dict[str, object] | None = None
+        validation_attempts: list[dict[str, object]] = []
+        while True:
+            try:
+                validation = self.validate_generation_batch_size(
+                    prompts,
+                    batch_size=candidate,
+                    expected_rows=expected_rows,
+                )
+            except BaseException as error:
+                if not self._is_cuda_oom(error):
+                    raise
+                validation_attempts.append(
+                    {"batch_size": candidate, "status": "OOM"}
+                )
+                self._release_failed_cuda_batch()
+                if candidate == 1:
+                    raise RuntimeError(
+                        "real 100-token validation OOM at batch size 1"
+                    ) from error
+                candidate = max(1, candidate // 2)
+                continue
+            validation_attempts.append(dict(validation))
+            if validation["status"] == "PASS":
+                break
+            if candidate == 1:
+                raise RuntimeError(
+                    "real 100-token validation misses the CUDA VRAM reserve at batch size 1"
+                )
+            candidate = max(1, candidate // 2)
+        self._adaptive_generation_batch_size = candidate
         return {
             "status": "PASS",
-            "batch_size": best.batch_size,
+            "batch_size": candidate,
             "probes": [
                 {
                     "batch_size": probe.batch_size,
@@ -1655,6 +1797,8 @@ class Model:
                 }
                 for probe in probes
             ],
+            "validation": validation,
+            "validation_attempts": validation_attempts,
         }
 
     def get_responses_with_prefill_residuals_batched(

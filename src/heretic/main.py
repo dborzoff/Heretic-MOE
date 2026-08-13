@@ -884,24 +884,182 @@ def run():
         evaluator = Evaluator(settings, model)
 
     if multilingual_worker_runtime is not None and not direct_trial_save:
+        evaluation_phase = settings.multilingual_search.evaluation_phase
         resident_prompts = [
             Prompt(system="", user=row.prompt)
             for row in multilingual_worker_runtime.bundle.trial_rows
         ]
-        resident_rows = 2 * settings.multilingual_search.trial_rows_per_cell
+        if evaluation_phase == "finalist":
+            resident_prompts.extend(
+                Prompt(system="", user=row.prompt)
+                for row in multilingual_worker_runtime.bundle.final_rows
+            )
+            resident_rows = max(
+                len(multilingual_worker_runtime.bundle.trial_rows),
+                len(multilingual_worker_runtime.bundle.final_rows),
+            )
+        else:
+            resident_rows = 2 * settings.multilingual_search.trial_rows_per_cell
         if settings.batch_size == 0:
             print()
             print("Selecting resident generation batch from VRAM...")
-            tuning = model.autotune_generation_batch_size(
-                resident_prompts,
-                expected_rows=resident_rows,
+            from .generation_batch_cache import (
+                GenerationBatchCacheContext,
+                build_cache_record,
+                build_generation_batch_key,
+                current_gpu_identity,
+                load_generation_batch_cache,
+                row_shape_sha256,
+                store_generation_batch_cache,
+                tokenizer_fingerprint,
             )
-            for probe in tuning["probes"]:
+
+            cache_context: GenerationBatchCacheContext | None = None
+            try:
+                runtime_root = Path(
+                    str(settings.multilingual_search.runtime_root)
+                ).resolve()
+                model_manifest = json.loads(
+                    (runtime_root / "model" / "manifest.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                model_fingerprint = str(model_manifest.get("model_fingerprint", ""))
+                if not model_fingerprint:
+                    raise ValueError("runtime model fingerprint is missing")
+                token_widths = [
+                    int(row.numel())
+                    for row in model._cached_prompt_token_ids(resident_prompts)
+                ]
+                gpu = current_gpu_identity()
+                current_free_bytes = int(gpu.get("free_bytes", 0))
+                current_total_bytes = int(gpu["total_bytes"])
+                required_free_bytes = max(
+                    int(settings.batch_size_vram_headroom_gib * 1024**3),
+                    int(
+                        settings.batch_size_vram_headroom_fraction
+                        * current_total_bytes
+                    ),
+                )
+                backend = getattr(
+                    settings,
+                    "generation_backend",
+                    "dynamic_eager",
+                )
+                cache_key = build_generation_batch_key(
+                    model_fingerprint=model_fingerprint,
+                    tokenizer_fingerprint=tokenizer_fingerprint(model.tokenizer),
+                    gpu=gpu,
+                    dtype=str(model.dtype),
+                    generation_backend=str(
+                        backend.value if hasattr(backend, "value") else backend
+                    ),
+                    generation_compile_mode=str(
+                        getattr(settings, "generation_compile_mode", "default")
+                    ),
+                    prompt_bucket_multiple=int(
+                        getattr(settings, "generation_prompt_bucket_multiple", 0)
+                    ),
+                    mode=f"resident_{evaluation_phase}",
+                    expected_rows=resident_rows,
+                    row_shape_sha256=row_shape_sha256(
+                        token_widths,
+                        bucket_multiple=int(
+                            getattr(settings, "generation_prompt_bucket_multiple", 0)
+                        ),
+                    ),
+                    max_response_length=int(settings.max_response_length),
+                )
+                cache_context = GenerationBatchCacheContext(
+                    runtime_root=runtime_root,
+                    key=cache_key,
+                    required_free_bytes=required_free_bytes,
+                    current_free_bytes=current_free_bytes,
+                    current_total_bytes=current_total_bytes,
+                    maximum_batch_size=min(int(settings.max_batch_size), resident_rows),
+                )
+            except Exception as error:  # noqa: BLE001 - cache is an optimization, never fail the run
+                print(f"* Resident batch cache disabled: {type(error).__name__}")
+
+            cached = (
+                load_generation_batch_cache(cache_context)
+                if cache_context is not None
+                else None
+            )
+            if cached is not None:
+                try:
+                    revalidation = model.validate_generation_batch_size(
+                        resident_prompts,
+                        batch_size=int(cached["batch_size"]),
+                        expected_rows=resident_rows,
+                    )
+                    if revalidation.get("status") != "PASS":
+                        cached = None
+                    elif cache_context is not None:
+                        cached = build_cache_record(
+                            cache_context.key,
+                            {
+                                "status": "PASS",
+                                "batch_size": int(cached["batch_size"]),
+                                "validation": revalidation,
+                            },
+                        )
+                        store_generation_batch_cache(cache_context, cached)
+                except Exception as error:  # noqa: BLE001 - stale cache must retune safely
+                    if not model._is_cuda_oom(error):
+                        print(
+                            "* Resident batch cache revalidation failed: "
+                            f"{type(error).__name__}; retuning"
+                        )
+                    cached = None
+            if cached is not None:
+                model._adaptive_generation_batch_size = int(cached["batch_size"])
+                tuning = {
+                    "status": "PASS",
+                    "batch_size": int(cached["batch_size"]),
+                    "probes": [],
+                    "validation": cached["validation"],
+                    "cache": "reused",
+                    "cache_sha256": cached["contract_sha256"],
+                }
                 print(
-                    "* VRAM probe: "
-                    f"batch [bold]{probe['batch_size']}[/], "
-                    f"free [bold]{probe['free_gib']:.2f}[/] GiB, "
-                    f"recovered [bold]{probe['recovered_free_gib']:.2f}[/] GiB"
+                    "* Resident batch reused from runtime cache: "
+                    f"[bold]{cached['batch_size']}[/] "
+                    f"(contract {str(cached['contract_sha256'])[:12]}…)"
+                )
+            else:
+                tuning = model.autotune_generation_batch_size(
+                    resident_prompts,
+                    expected_rows=resident_rows,
+                )
+                if cache_context is not None:
+                    try:
+                        record = build_cache_record(cache_context.key, tuning)
+                        cache_path = store_generation_batch_cache(cache_context, record)
+                        tuning["cache"] = "written"
+                        tuning["cache_sha256"] = record["contract_sha256"]
+                        print(
+                            "* Resident batch cache written: "
+                            f"[bold]{cache_path.name}[/]"
+                        )
+                    except Exception as error:  # noqa: BLE001 - cache is an optimization, never fail the run
+                        print(
+                            "* Resident batch cache not written: "
+                            f"{type(error).__name__}"
+                        )
+                for probe in tuning["probes"]:
+                    print(
+                        "* VRAM probe: "
+                        f"batch [bold]{probe['batch_size']}[/], "
+                        f"free [bold]{probe['free_gib']:.2f}[/] GiB, "
+                        f"recovered [bold]{probe['recovered_free_gib']:.2f}[/] GiB"
+                    )
+                validation = tuning["validation"]
+                print(
+                    "* Real 100-token validation: "
+                    f"batch [bold]{validation['batch_size']}[/], "
+                    f"free [bold]{validation['min_free_bytes'] / 1024**3:.2f}[/] GiB, "
+                    f"required [bold]{validation['required_free_bytes'] / 1024**3:.2f}[/] GiB"
                 )
             print(
                 "* Resident batch selected: "

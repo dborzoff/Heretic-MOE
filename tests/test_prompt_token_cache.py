@@ -283,15 +283,32 @@ def test_compiled_batch_autotune_measures_every_eight_rows_to_40() -> None:
         return probes[batch_size]
 
     wrapper._probe_generation_batch = probe
+    validated: list[int] = []
+
+    def validation(_prompts, *, batch_size, expected_rows):
+        del expected_rows
+        validated.append(batch_size)
+        return {
+            "status": "PASS",
+            "batch_size": batch_size,
+            "rows": batch_size,
+            "max_new_tokens": 100,
+            "min_free_bytes": 0,
+            "required_free_bytes": 0,
+            "recovered_free_bytes": 0,
+        }
+
+    wrapper.validate_generation_batch_size = validation
     result = wrapper.autotune_generation_batch_size(prompts, expected_rows=800)
 
     assert calls == [8, 16, 24, 32, 40]
+    assert validated == [40]
     assert result["status"] == "PASS"
     assert result["batch_size"] == 40
     assert wrapper._adaptive_generation_batch_size == 40
 
 
-def test_batch_autotune_is_memory_only_even_when_trial_has_a_tail() -> None:
+def test_batch_autotune_runs_exactly_one_short_validation_batch(monkeypatch) -> None:
     wrapper = _wrapper()
     wrapper.settings.generation_backend = "compiled_static"
     wrapper.settings.max_batch_size = 8
@@ -300,6 +317,7 @@ def test_batch_autotune_is_memory_only_even_when_trial_has_a_tail() -> None:
     wrapper.settings.batch_size_vram_headroom_fraction = 0.05
     wrapper.settings.batch_size_vram_headroom_gib = 1.0
     wrapper.settings.generation_batch_target_headroom_fraction = 0.10
+    wrapper.settings.max_response_length = 100
     gib = 1024**3
     wrapper._probe_generation_batch = lambda _prompts, _batch: GenerationBatchProbe(
         8,
@@ -307,18 +325,43 @@ def test_batch_autotune_is_memory_only_even_when_trial_has_a_tail() -> None:
         24 * gib,
         16 * gib,
     )
+    calls: list[dict[str, object]] = []
 
-    def reject_generation(*_args, **_kwargs):
-        raise AssertionError("autotune must not run a full response generation")
+    def generate(batch, **kwargs):
+        calls.append({"rows": len(batch), **kwargs})
+        inputs = {"input_ids": torch.zeros((len(batch), 1), dtype=torch.long)}
+        outputs = torch.ones(
+            (len(batch), 1 + int(kwargs["max_new_tokens"])),
+            dtype=torch.long,
+        )
+        return inputs, outputs
 
-    wrapper.get_response_artifacts_with_prefill_residuals = reject_generation
+    wrapper.generate = generate
+    snapshots = iter(
+        [
+            (20 * gib, 24 * gib, 0),
+            (8 * gib, 24 * gib, 16 * gib),
+            (20 * gib, 24 * gib, 0),
+        ]
+    )
+    wrapper._cuda_memory_snapshot = lambda: next(snapshots)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
 
     result = wrapper.autotune_generation_batch_size(
-        [Prompt(system="", user="row")],
+        [Prompt(system="", user="row") for _index in range(80)],
         expected_rows=803,
     )
 
     assert result["batch_size"] == 8
+    assert result["validation"]["status"] == "PASS"
+    assert result["validation"]["max_new_tokens"] == 100
+    assert result["validation"]["working_set_bytes"] == 12 * gib
+    assert result["validation"]["baseline_free_bytes"] == 20 * gib
+    assert calls == [
+        {"rows": 8, "max_new_tokens": 100, "min_new_tokens": 100}
+    ]
 
 
 def test_batch_autotune_backs_off_below_probe_start_when_reserve_is_too_low() -> None:
@@ -343,6 +386,15 @@ def test_batch_autotune_backs_off_below_probe_start_when_reserve_is_too_low() ->
         return probes[batch_size]
 
     wrapper._probe_generation_batch = probe
+    wrapper.validate_generation_batch_size = lambda _prompts, *, batch_size, expected_rows: {
+        "status": "PASS",
+        "batch_size": batch_size,
+        "rows": batch_size,
+        "max_new_tokens": 100,
+        "min_free_bytes": 0,
+        "required_free_bytes": 0,
+        "recovered_free_bytes": 0,
+    }
 
     result = wrapper.autotune_generation_batch_size(
         [Prompt(system="", user="row")],
@@ -351,6 +403,151 @@ def test_batch_autotune_backs_off_below_probe_start_when_reserve_is_too_low() ->
 
     assert calls == [8, 4, 2]
     assert result["batch_size"] == 2
+
+
+
+
+def test_validation_checks_batch_shape_without_decoding_generated_text(monkeypatch) -> None:
+    wrapper = _wrapper()
+    wrapper.settings.generation_backend = "compiled_static"
+    wrapper.settings.max_response_length = 100
+    gib = 1024**3
+    prompts = [Prompt(system="", user="row") for _index in range(8)]
+
+    def bad_generate(batch, **kwargs):
+        del kwargs
+        inputs = {"input_ids": torch.zeros((len(batch), 1), dtype=torch.long)}
+        outputs = torch.ones((len(batch) + 1, 2), dtype=torch.long)
+        return inputs, outputs
+
+    wrapper.generate = bad_generate
+    snapshots = iter(
+        [
+            (20 * gib, 24 * gib, 0),
+            (20 * gib, 24 * gib, 0),
+        ]
+    )
+    wrapper._cuda_memory_snapshot = lambda: next(snapshots)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+
+    with pytest.raises(ValueError, match="invalid batch shape"):
+        wrapper.validate_generation_batch_size(prompts, batch_size=8, expected_rows=800)
+
+
+def test_validation_rejects_early_eos_that_undermeasures_memory(monkeypatch) -> None:
+    wrapper = _wrapper()
+    wrapper.settings.generation_backend = "compiled_static"
+    wrapper.settings.max_response_length = 100
+    gib = 1024**3
+    prompts = [Prompt(system="", user="row") for _index in range(8)]
+
+    def early_eos_generate(batch, **kwargs):
+        assert kwargs == {"max_new_tokens": 100, "min_new_tokens": 100}
+        inputs = {"input_ids": torch.zeros((len(batch), 1), dtype=torch.long)}
+        outputs = torch.ones((len(batch), 2), dtype=torch.long)
+        return inputs, outputs
+
+    wrapper.generate = early_eos_generate
+    snapshots = iter(
+        [
+            (20 * gib, 24 * gib, 0),
+            (20 * gib, 24 * gib, 0),
+        ]
+    )
+    wrapper._cuda_memory_snapshot = lambda: next(snapshots)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+
+    with pytest.raises(ValueError, match="expected 100 new tokens"):
+        wrapper.validate_generation_batch_size(prompts, batch_size=8, expected_rows=800)
+
+
+def test_validation_always_measures_100_tokens_even_with_a_lower_runtime_limit(
+    monkeypatch,
+) -> None:
+    wrapper = _wrapper()
+    wrapper.settings.generation_backend = "compiled_static"
+    wrapper.settings.max_response_length = 99
+    wrapper.settings.batch_size_vram_headroom_fraction = 0.05
+    wrapper.settings.batch_size_vram_headroom_gib = 1.0
+    gib = 1024**3
+    prompts = [Prompt(system="", user="row") for _index in range(8)]
+    calls: list[dict[str, int]] = []
+
+    def generate(batch, **kwargs):
+        calls.append(kwargs)
+        inputs = {"input_ids": torch.zeros((len(batch), 1), dtype=torch.long)}
+        outputs = torch.ones((len(batch), 101), dtype=torch.long)
+        return inputs, outputs
+
+    wrapper.generate = generate
+    snapshots = iter(
+        [
+            (20 * gib, 24 * gib, 0),
+            (8 * gib, 24 * gib, 16 * gib),
+            (20 * gib, 24 * gib, 0),
+        ]
+    )
+    wrapper._cuda_memory_snapshot = lambda: next(snapshots)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+
+    result = wrapper.validate_generation_batch_size(
+        prompts,
+        batch_size=8,
+        expected_rows=800,
+    )
+
+    assert result["max_new_tokens"] == 100
+    assert calls == [{"max_new_tokens": 100, "min_new_tokens": 100}]
+
+def test_batch_autotune_validation_oom_reduces_batch_and_retries() -> None:
+    wrapper = _wrapper()
+    wrapper.settings.generation_backend = "compiled_static"
+    wrapper.settings.max_batch_size = 256
+    wrapper.settings.generation_batch_probe_start = 8
+    wrapper.settings.generation_batch_granularity = 8
+    wrapper.settings.batch_size_vram_headroom_fraction = 0.05
+    wrapper.settings.batch_size_vram_headroom_gib = 1.0
+    wrapper.settings.generation_batch_target_headroom_fraction = 0.10
+    gib = 1024**3
+    wrapper._probe_generation_batch = lambda _prompts, _batch: GenerationBatchProbe(
+        8,
+        8 * gib,
+        24 * gib,
+        16 * gib,
+    )
+    attempts: list[int] = []
+
+    def validation(_prompts, *, batch_size, expected_rows):
+        del expected_rows
+        attempts.append(batch_size)
+        if batch_size == 8:
+            raise torch.OutOfMemoryError("CUDA out of memory")
+        return {
+            "status": "PASS",
+            "batch_size": batch_size,
+            "rows": batch_size,
+            "max_new_tokens": 100,
+            "min_free_bytes": 8 * gib,
+            "required_free_bytes": 2 * gib,
+            "recovered_free_bytes": 20 * gib,
+        }
+
+    wrapper.validate_generation_batch_size = validation
+    result = wrapper.autotune_generation_batch_size(
+        [Prompt(system="", user="row")],
+        expected_rows=800,
+    )
+
+    assert attempts == [8, 4]
+    assert result["batch_size"] == 4
+    assert result["validation_attempts"][0]["status"] == "OOM"
+    assert wrapper._adaptive_generation_batch_size == 4
 
 
 def test_memory_probe_presizes_cache_for_full_trial_but_decodes_one_token(

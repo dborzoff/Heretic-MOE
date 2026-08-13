@@ -95,6 +95,16 @@ def test_run_lock_lives_beside_run_root_and_does_not_create_it(
     assert lock.path.read_bytes().startswith(b"pid=")
 
 
+def test_run_lock_busy_has_specific_type(tmp_path: Path) -> None:
+    run_root = tmp_path / "planned-run"
+    with (
+        supervisor.AdaptiveRunLock(run_root),
+        pytest.raises(supervisor.RunLockBusyError),
+        supervisor.AdaptiveRunLock(run_root),
+    ):
+        pytest.fail("a second supervisor acquired the run lock")
+
+
 def test_gpu_probe_reports_unavailable_numeric_fields_cleanly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

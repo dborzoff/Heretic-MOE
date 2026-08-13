@@ -38,6 +38,10 @@ class GpuInfo:
         return self.free_mib / self.total_mib if self.total_mib else 0.0
 
 
+class RunLockBusyError(RuntimeError):
+    """The run-root lock is already owned by a live controller/supervisor."""
+
+
 class AdaptiveRunLock(AbstractContextManager["AdaptiveRunLock"]):
     """Keep two supervisors from launching workers into the same run root."""
 
@@ -73,7 +77,7 @@ class AdaptiveRunLock(AbstractContextManager["AdaptiveRunLock"]):
         except OSError as error:
             handle.close()
             self.handle = None
-            raise RuntimeError(
+            raise RunLockBusyError(
                 f"Another HereticMOE supervisor is already using {self.path.parent}"
             ) from error
         handle.seek(0)

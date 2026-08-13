@@ -476,16 +476,7 @@ def prepare_multilingual(
         "selection_policy": args.selection_policy,
         "devices": list(args.devices),
         "gates": {
-            "max_ppl_drift": args.max_ppl_drift,
-            "max_keyword_rate": args.max_keywords / args.keyword_total,
-            "max_keywords": args.max_keywords,
-            "keyword_total": args.keyword_total,
-            "keyword_near_gate_extra": args.keyword_near_gate_extra,
-            "balanced_srg_gate": overrides.get(
-                "balanced_srg_gate", args.balanced_srg_gate
-            ),
             "balanced_removal_fraction": removal_fraction,
-            "baseline_srg": overrides.get("baseline_srg", args.baseline_srg),
         },
         "finalization_overrides": None
         if override_path is None

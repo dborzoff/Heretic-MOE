@@ -20,6 +20,8 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -305,7 +307,7 @@ def git_provenance(repository: Path) -> tuple[str | None, bool | None]:
         ).stdout.strip()
         dirty = bool(
             subprocess.run(
-                ["git", "status", "--porcelain", "--untracked-files=no"],
+                ["git", "status", "--porcelain", "--untracked-files=all"],
                 cwd=repository,
                 check=True,
                 stdout=subprocess.PIPE,
@@ -316,6 +318,35 @@ def git_provenance(repository: Path) -> tuple[str | None, bool | None]:
         return revision or None, dirty
     except (FileNotFoundError, subprocess.CalledProcessError):
         return None, None
+
+
+class ControllerRunLockError(RuntimeError):
+    """A direct controller lost the run-root write lock to another controller."""
+
+
+@contextmanager
+def controller_run_lock(
+    run_root: Path,
+    *,
+    supervised: bool,
+    dry_run: bool,
+) -> Iterator[None]:
+    """Serialize direct controller writers; supervisor children are reentrant."""
+
+    if supervised or dry_run:
+        yield
+        return
+    from heretic.supervisor import AdaptiveRunLock, RunLockBusyError
+
+    lock = AdaptiveRunLock(run_root)
+    try:
+        lock.__enter__()
+    except RunLockBusyError as error:
+        raise ControllerRunLockError(str(error)) from error
+    try:
+        yield
+    finally:
+        lock.__exit__(None, None, None)
 
 
 def sanitized_model_name(model: str) -> str:
@@ -1954,10 +1985,14 @@ def write_run_manifest(
         "finalization_contract_sha256": getattr(
             args, "finalization_contract_sha256", None
         ),
-        "recheck_ppl": {
-            "chunks": args.recheck_ppl_chunks,
-            "window": args.recheck_ppl_window,
-        },
+        "recheck_ppl": (
+            None
+            if getattr(args, "multilingual_v3_enabled", False)
+            else {
+                "chunks": args.recheck_ppl_chunks,
+                "window": args.recheck_ppl_window,
+            }
+        ),
         "export_root": getattr(
             args,
             "resolved_export_root",
@@ -2403,17 +2438,11 @@ def build_finalization_contract(
             args.balanced_removal_fraction,
         )
     )
-    return {
-        "schema_version": 1,
-        "source_journal_sha256": source_journal_sha256,
-        "base_config_sha256": base_config_sha256,
-        "top_n": args.finalist_top_n,
-        "selection_policy": args.finalist_selection_policy,
-        "ppl": {
-            "chunks": args.recheck_ppl_chunks,
-            "window": args.recheck_ppl_window,
-        },
-        "gates": {
+    if getattr(args, "multilingual_v3_enabled", False):
+        gates = {"balanced_removal_fraction": removal_fraction}
+        ppl = None
+    else:
+        gates = {
             "max_ppl_drift": args.max_ppl_drift,
             "max_keyword_rate": args.max_keywords / args.keyword_total,
             "max_keywords": args.max_keywords,
@@ -2426,7 +2455,24 @@ def build_finalization_contract(
             "baseline_srg_override": (
                 None if baseline_srg_override is None else float(baseline_srg_override)
             ),
-        },
+        }
+        ppl = {
+            "chunks": args.recheck_ppl_chunks,
+            "window": args.recheck_ppl_window,
+        }
+    return {
+        "schema_version": 1,
+        "manifest_contract": (
+            "multilingual_v3_full_recheck"
+            if getattr(args, "multilingual_v3_enabled", False)
+            else None
+        ),
+        "source_journal_sha256": source_journal_sha256,
+        "base_config_sha256": base_config_sha256,
+        "top_n": args.finalist_top_n,
+        "selection_policy": args.finalist_selection_policy,
+        "ppl": ppl,
+        "gates": gates,
         "overrides": override_fingerprint,
         "export": {
             "root": str((args.export_root or root / "exports").resolve()),
@@ -2453,23 +2499,28 @@ def finalization_manifest_matches(
         expected_gates = contract["gates"]
         if not isinstance(manifest_gates, dict):
             return False
-        gate_keys = (
-            "max_ppl_drift",
-            "max_keyword_rate",
-            "max_keywords",
-            "keyword_total",
-            "keyword_near_gate_extra",
-            "balanced_srg_gate",
-            "balanced_removal_fraction",
+        gate_keys = tuple(
+            key for key in expected_gates if key != "baseline_srg_override"
         )
         gates_match = all(
             manifest_gates.get(key) == expected_gates[key] for key in gate_keys
         )
-        baseline_override = expected_gates["baseline_srg_override"]
+        if contract["ppl"] is None:
+            gates_match = gates_match and set(manifest_gates) == set(expected_gates)
+        baseline_override = expected_gates.get("baseline_srg_override")
         if baseline_override is not None:
             gates_match = (
                 gates_match and manifest_gates.get("baseline_srg") == baseline_override
             )
+        if expected_gates.get("balanced_srg_gate") is not None:
+            gates_match = gates_match and manifest_gates.get(
+                "balanced_srg_gate"
+            ) == expected_gates["balanced_srg_gate"]
+        expected_manifest_contract = contract.get("manifest_contract")
+        manifest_contract_matches = (
+            expected_manifest_contract is None
+            or manifest.get("contract") == expected_manifest_contract
+        )
     except (KeyError, TypeError, ValueError):
         return False
     return (
@@ -2479,8 +2530,13 @@ def finalization_manifest_matches(
         and manifest.get("base_config_sha256") == contract["base_config_sha256"]
         and top_n == contract["top_n"]
         and manifest.get("selection_policy") == contract["selection_policy"]
-        and manifest.get("ppl") == contract["ppl"]
+        and (
+            manifest.get("ppl") == contract["ppl"]
+            if contract["ppl"] is not None
+            else manifest.get("ppl") is None
+        )
         and manifest.get("finalization_overrides") == contract["overrides"]
+        and manifest_contract_matches
         and gates_match
     )
 
@@ -2863,6 +2919,59 @@ def select_finalization_paths(
         )
 
 
+def build_finalist_prepare_command(
+    args: argparse.Namespace,
+    *,
+    finalist_script: Path,
+    source_journal: Path,
+    base_config: Path,
+    finalist_dir: Path,
+    devices: list[str],
+) -> list[str]:
+    """Build the recheck prepare command; v3 omits unused legacy gates."""
+
+    command = [
+        sys.executable,
+        str(finalist_script),
+        "prepare",
+        "--source-journal",
+        str(source_journal),
+        "--base-config",
+        str(base_config),
+        "--output-dir",
+        str(finalist_dir),
+        "--top-n",
+        str(args.finalist_top_n),
+        "--selection-policy",
+        args.finalist_selection_policy,
+        "--devices",
+        *devices,
+        "--balanced-removal-fraction",
+        str(args.balanced_removal_fraction),
+    ]
+    if getattr(args, "multilingual_v3_enabled", False):
+        return command
+    command.extend(
+        [
+            "--ppl-chunks",
+            str(args.recheck_ppl_chunks),
+            "--ppl-window",
+            str(args.recheck_ppl_window),
+            "--max-ppl-drift",
+            str(args.max_ppl_drift),
+            "--max-keywords",
+            str(args.max_keywords),
+            "--keyword-total",
+            str(args.keyword_total),
+            "--keyword-near-gate-extra",
+            str(args.keyword_near_gate_extra),
+        ]
+    )
+    if args.balanced_srg_gate is not None:
+        command.extend(["--balanced-srg-gate", str(args.balanced_srg_gate)])
+    return command
+
+
 def finalize_and_export(
     args: argparse.Namespace,
     *,
@@ -2884,11 +2993,15 @@ def finalize_and_export(
                     "source_journal": str(shared_stage.journal),
                     "top_n": args.finalist_top_n,
                     "selection_policy": args.finalist_selection_policy,
-                    "recheck": {
-                        "ppl_chunks": args.recheck_ppl_chunks,
-                        "ppl_window": args.recheck_ppl_window,
-                        "devices": devices,
-                    },
+                    "recheck": (
+                        {"devices": devices, "contract": "multilingual_v3"}
+                        if getattr(args, "multilingual_v3_enabled", False)
+                        else {
+                            "ppl_chunks": args.recheck_ppl_chunks,
+                            "ppl_window": args.recheck_ppl_window,
+                            "devices": devices,
+                        }
+                    ),
                     "winners": ["Balanced", "Max"],
                     "export_models": export_models,
                     "export_root": str(export_root),
@@ -2931,39 +3044,14 @@ def finalize_and_export(
 
     finalist_manifest = finalist_dir / "manifest.json"
     if not finalist_manifest.is_file():
-        prepare_command = [
-            sys.executable,
-            str(finalist_script),
-            "prepare",
-            "--source-journal",
-            str(shared_stage.journal),
-            "--base-config",
-            str(base_config),
-            "--output-dir",
-            str(finalist_dir),
-            "--top-n",
-            str(args.finalist_top_n),
-            "--selection-policy",
-            args.finalist_selection_policy,
-            "--ppl-chunks",
-            str(args.recheck_ppl_chunks),
-            "--ppl-window",
-            str(args.recheck_ppl_window),
-            "--devices",
-            *devices,
-            "--max-ppl-drift",
-            str(args.max_ppl_drift),
-            "--max-keywords",
-            str(args.max_keywords),
-            "--keyword-total",
-            str(args.keyword_total),
-            "--keyword-near-gate-extra",
-            str(args.keyword_near_gate_extra),
-            "--balanced-removal-fraction",
-            str(args.balanced_removal_fraction),
-        ]
-        if args.balanced_srg_gate is not None:
-            prepare_command.extend(["--balanced-srg-gate", str(args.balanced_srg_gate)])
+        prepare_command = build_finalist_prepare_command(
+            args,
+            finalist_script=finalist_script,
+            source_journal=shared_stage.journal,
+            base_config=base_config,
+            finalist_dir=finalist_dir,
+            devices=devices,
+        )
         run_checked(
             prepare_command, cwd=Path(__file__).parents[2], event="finalist_prepare"
         )
@@ -3371,6 +3459,35 @@ def finalize_and_export(
 
 def main() -> None:
     args = parse_args()
+
+    run_controller(args, arguments=sys.argv[1:])
+
+
+def run_controller(
+    args: argparse.Namespace,
+    *,
+    arguments: list[str] | None = None,
+) -> None:
+    """Run while holding the writer lock and report only failures owned by this run."""
+
+    root = args.run_root.resolve()
+    with controller_run_lock(
+        root,
+        supervised=os.environ.get("HERETIC_SUPERVISED") == "1",
+        dry_run=args.dry_run,
+    ):
+        try:
+            _main_with_args(args)
+        except BaseException as error:
+            if not args.dry_run:
+                mark_existing_run_failed(
+                    list(sys.argv[1:] if arguments is None else arguments),
+                    error,
+                )
+            raise
+
+
+def _main_with_args(args: argparse.Namespace) -> None:
     if args.exploration_trials <= 0 or args.target_trials <= 0:
         raise ValueError("Trial budgets must be positive")
     if args.exploration_trials % 2:
@@ -3379,16 +3496,6 @@ def main() -> None:
         raise ValueError("--target-trials must exceed the combined exploration prefix")
     if args.finalist_top_n < 2:
         raise ValueError("--finalist-top-n must be at least 2")
-    if args.recheck_ppl_chunks <= 0 or args.recheck_ppl_window <= 0:
-        raise ValueError("Recheck PPL dimensions must be positive")
-    if args.max_ppl_drift < 0:
-        raise ValueError("--max-ppl-drift cannot be negative")
-    if (
-        args.max_keywords < 0
-        or args.keyword_total <= 0
-        or args.keyword_near_gate_extra < 0
-    ):
-        raise ValueError("Keyword gate values are invalid")
     if not 0 <= args.balanced_removal_fraction <= 1:
         raise ValueError("--balanced-removal-fraction must be in [0, 1]")
 
@@ -3426,6 +3533,22 @@ def main() -> None:
     if (args.model or args.data_root) and not args.dry_run:
         base_config = root / "effective_base_config.toml"
         write_managed_config(base_config, base, dry_run=False)
+    multilingual_contract = base.get("multilingual_search")
+    args.multilingual_v3_enabled = bool(
+        isinstance(multilingual_contract, dict)
+        and multilingual_contract.get("enabled")
+    )
+    if not args.multilingual_v3_enabled:
+        if args.recheck_ppl_chunks <= 0 or args.recheck_ppl_window <= 0:
+            raise ValueError("Recheck PPL dimensions must be positive")
+        if args.max_ppl_drift < 0:
+            raise ValueError("--max-ppl-drift cannot be negative")
+        if (
+            args.max_keywords < 0
+            or args.keyword_total <= 0
+            or args.keyword_near_gate_extra < 0
+        ):
+            raise ValueError("Keyword gate values are invalid")
     branch_trials = args.exploration_trials // 2
     devices = assigned_devices(args)
     shared_worker_count = len(devices)
@@ -3861,8 +3984,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except BaseException as error:
-        mark_existing_run_failed(sys.argv[1:], error)
-        raise
+    main()

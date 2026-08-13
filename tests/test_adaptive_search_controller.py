@@ -3,6 +3,7 @@
 import importlib.util
 import io
 import json
+import os
 import sys
 import unittest
 from argparse import Namespace
@@ -56,6 +57,247 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
         self.assertFalse(args.recheck_only)
         self.assertEqual(args.finalist_top_n, 6)
         self.assertEqual(args.keyword_near_gate_extra, 1)
+
+    def test_git_provenance_counts_untracked_files_as_dirty(self) -> None:
+        calls: list[list[str]] = []
+
+        class Result:
+            def __init__(self, stdout: str) -> None:
+                self.stdout = stdout
+
+        def run(command, **kwargs):
+            del kwargs
+            calls.append(list(command))
+            if command[:2] == ["git", "rev-parse"]:
+                return Result("abc123\n")
+            return Result("?? new-file.txt\n")
+
+        with patch.object(controller.subprocess, "run", side_effect=run):
+            revision, dirty = controller.git_provenance(Path("repo"))
+
+        self.assertEqual(revision, "abc123")
+        self.assertTrue(dirty)
+        self.assertIn("--untracked-files=all", calls[1])
+
+    def test_direct_controller_lock_rejects_second_writer_and_allows_supervised_child(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "run"
+            with controller.controller_run_lock(
+                root, supervised=False, dry_run=False
+            ):
+                with (
+                    self.assertRaises(controller.ControllerRunLockError),
+                    controller.controller_run_lock(
+                        root, supervised=False, dry_run=False
+                    ),
+                ):
+                    self.fail("a second direct controller acquired the run lock")
+                with controller.controller_run_lock(root, supervised=True, dry_run=False):
+                    pass
+                with controller.controller_run_lock(root, supervised=False, dry_run=True):
+                    pass
+
+    def test_lock_contention_never_marks_the_active_run_failed(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "run"
+            args = SimpleNamespace(run_root=root, dry_run=False)
+            with controller.controller_run_lock(
+                root, supervised=False, dry_run=False
+            ):
+                with (
+                    self.assertRaises(controller.ControllerRunLockError),
+                    patch.dict(os.environ, {}, clear=True),
+                    patch.object(controller, "mark_existing_run_failed") as mark_failed,
+                ):
+                    controller.run_controller(
+                        args,
+                        arguments=["--run-root", str(root)],
+                    )
+                mark_failed.assert_not_called()
+
+    def test_controller_failure_after_lock_acquisition_is_recorded(self) -> None:
+        error = RuntimeError("worker failed")
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "run"
+            args = SimpleNamespace(run_root=root, dry_run=False)
+            arguments = ["--run-root", str(root)]
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(controller, "_main_with_args", side_effect=error),
+                patch.object(controller, "mark_existing_run_failed") as mark_failed,
+                self.assertRaisesRegex(RuntimeError, "worker failed"),
+            ):
+                controller.run_controller(args, arguments=arguments)
+            mark_failed.assert_called_once_with(arguments, error)
+
+    def test_dry_run_failure_never_marks_an_existing_run_failed(self) -> None:
+        error = RuntimeError("dry-run validation failed")
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "run"
+            args = SimpleNamespace(run_root=root, dry_run=True)
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(controller, "_main_with_args", side_effect=error),
+                patch.object(controller, "mark_existing_run_failed") as mark_failed,
+                self.assertRaisesRegex(RuntimeError, "dry-run validation failed"),
+            ):
+                controller.run_controller(args, arguments=["--run-root", str(root)])
+            mark_failed.assert_not_called()
+
+    def test_multilingual_v3_finalization_contract_excludes_legacy_recheck_gates(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            args = SimpleNamespace(
+                finalist_top_n=6,
+                finalist_selection_policy="feasible_cost",
+                recheck_ppl_chunks=64,
+                recheck_ppl_window=1024,
+                max_ppl_drift=0.005,
+                max_keywords=2,
+                keyword_total=136,
+                keyword_near_gate_extra=1,
+                balanced_srg_gate=None,
+                balanced_removal_fraction=0.8,
+                export_root=None,
+                export_strategy="merge",
+                heretic_path="hereticMOE.exe",
+                heretic_sha256="a" * 64,
+                multilingual_v3_enabled=True,
+            )
+            contract = controller.build_finalization_contract(
+                args,
+                root=root,
+                source_journal_sha256="b" * 64,
+                base_config_sha256="c" * 64,
+            )
+            manifest = {
+                "version": 1,
+                "status": "prepared",
+                "contract": "multilingual_v3_full_recheck",
+                "source_journal_sha256": "b" * 64,
+                "base_config_sha256": "c" * 64,
+                "top_n": 6,
+                "selection_policy": "feasible_cost",
+                "gates": {"balanced_removal_fraction": 0.8},
+                "finalization_overrides": None,
+            }
+
+            self.assertIsNone(contract["ppl"])
+            self.assertEqual(contract["gates"], {"balanced_removal_fraction": 0.8})
+            self.assertTrue(controller.finalization_manifest_matches(manifest, contract))
+            wrong_contract_manifest = {**manifest, "contract": "legacy_recheck"}
+            self.assertFalse(
+                controller.finalization_manifest_matches(
+                    wrong_contract_manifest,
+                    contract,
+                )
+            )
+            legacy_manifest = {
+                **manifest,
+                "gates": {
+                    "balanced_removal_fraction": 0.8,
+                    "max_ppl_drift": 0.005,
+                },
+            }
+            self.assertFalse(
+                controller.finalization_manifest_matches(legacy_manifest, contract)
+            )
+
+    def test_legacy_finalization_manifest_still_accepts_baseline_override(self) -> None:
+        contract = {
+            "source_journal_sha256": "b" * 64,
+            "base_config_sha256": "c" * 64,
+            "top_n": 6,
+            "selection_policy": "feasible_cost",
+            "ppl": {"chunks": 64, "window": 1024},
+            "gates": {
+                "max_ppl_drift": 0.005,
+                "max_keyword_rate": 2 / 136,
+                "max_keywords": 2,
+                "keyword_total": 136,
+                "keyword_near_gate_extra": 1,
+                "balanced_srg_gate": None,
+                "balanced_removal_fraction": 0.8,
+                "baseline_srg_override": 0.5,
+            },
+            "overrides": None,
+        }
+        manifest = {
+            "version": 1,
+            "status": "prepared",
+            "source_journal_sha256": "b" * 64,
+            "base_config_sha256": "c" * 64,
+            "top_n": 6,
+            "selection_policy": "feasible_cost",
+            "ppl": {"chunks": 64, "window": 1024},
+            "gates": {
+                "max_ppl_drift": 0.005,
+                "max_keyword_rate": 2 / 136,
+                "max_keywords": 2,
+                "keyword_total": 136,
+                "keyword_near_gate_extra": 1,
+                "balanced_srg_gate": None,
+                "balanced_removal_fraction": 0.8,
+                "baseline_srg": 0.5,
+            },
+            "finalization_overrides": None,
+        }
+        self.assertTrue(controller.finalization_manifest_matches(manifest, contract))
+        manifest["gates"]["baseline_srg"] = 0.4
+        self.assertFalse(controller.finalization_manifest_matches(manifest, contract))
+
+    def test_multilingual_v3_finalist_prepare_command_excludes_legacy_flags(self) -> None:
+        args = SimpleNamespace(
+            finalist_top_n=6,
+            finalist_selection_policy="feasible_cost",
+            recheck_ppl_chunks=64,
+            recheck_ppl_window=1024,
+            max_ppl_drift=0.005,
+            max_keywords=2,
+            keyword_total=136,
+            keyword_near_gate_extra=1,
+            balanced_srg_gate=0.1,
+            balanced_removal_fraction=0.8,
+            multilingual_v3_enabled=True,
+        )
+        command = controller.build_finalist_prepare_command(
+            args,
+            finalist_script=Path("finalist_recheck.py"),
+            source_journal=Path("journal.jsonl"),
+            base_config=Path("config.toml"),
+            finalist_dir=Path("finalist_recheck"),
+            devices=["0", "2"],
+        )
+
+        for legacy_flag in (
+            "--ppl-chunks",
+            "--ppl-window",
+            "--max-ppl-drift",
+            "--max-keywords",
+            "--keyword-total",
+            "--keyword-near-gate-extra",
+            "--balanced-srg-gate",
+        ):
+            self.assertNotIn(legacy_flag, command)
+        self.assertIn("--balanced-removal-fraction", command)
+        self.assertEqual(
+            command[command.index("--devices") + 1 : command.index("--devices") + 3],
+            ["0", "2"],
+        )
+
+        args.multilingual_v3_enabled = False
+        legacy = controller.build_finalist_prepare_command(
+            args,
+            finalist_script=Path("finalist_recheck.py"),
+            source_journal=Path("journal.jsonl"),
+            base_config=Path("config.toml"),
+            finalist_dir=Path("finalist_recheck"),
+            devices=["0", "2"],
+        )
+        self.assertIn("--ppl-chunks", legacy)
+        self.assertIn("--balanced-srg-gate", legacy)
 
     def test_multilingual_v3_config_does_not_require_legacy_cost_scorers(self) -> None:
         controller.validate_adaptive_cost_contract(
