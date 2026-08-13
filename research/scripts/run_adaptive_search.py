@@ -181,7 +181,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--finalist-top-n", type=int, default=6)
     parser.add_argument(
         "--finalist-selection-policy",
-        choices=("pareto", "feasible_lexicographic", "feasible_diverse", "feasible_cost"),
+        choices=(
+            "pareto",
+            "feasible_lexicographic",
+            "feasible_diverse",
+            "feasible_cost",
+        ),
         default="feasible_cost",
         help=(
             "Ranking used only to build the high-fidelity finalist shortlist. "
@@ -194,6 +199,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-ppl-drift", type=float, default=0.005)
     parser.add_argument("--max-keywords", type=int, default=2)
     parser.add_argument("--keyword-total", type=int, default=136)
+    parser.add_argument("--max-worker-restarts", type=int, default=2)
+    parser.add_argument("--heartbeat-interval-seconds", type=int, default=30)
+    parser.add_argument("--lease-timeout-seconds", type=int, default=180)
     parser.add_argument(
         "--keyword-near-gate-extra",
         type=int,
@@ -338,9 +346,7 @@ _ADAPTIVE_COST_SCORERS = {
 }
 
 
-def validate_adaptive_cost_contract(
-    config: dict[str, Any], *, source: Path
-) -> None:
+def validate_adaptive_cost_contract(config: dict[str, Any], *, source: Path) -> None:
     """Fail before GPU work when an adaptive profile cannot use calibrated Cost."""
 
     multilingual = config.get("multilingual_search")
@@ -444,9 +450,7 @@ def apply_data_root(base: dict[str, Any], data_root: Path) -> dict[str, Any]:
     sparse["prototypes"] = paths["prototypes"].as_posix()
     sparse["prototypes_sha256"] = sha256(paths["prototypes"])
     sparse["prompts"]["dataset"] = paths["search_unsafe"].as_posix()
-    scorer["KeywordRate"]["prompts"]["dataset"] = paths[
-        "search_unsafe"
-    ].as_posix()
+    scorer["KeywordRate"]["prompts"]["dataset"] = paths["search_unsafe"].as_posix()
     return config
 
 
@@ -532,14 +536,7 @@ def multilingual_runtime_prepare_command(
         "--runtime-root",
         str((run_root / "runtime").resolve()),
         "--direction-source",
-        str(
-            (
-                run_root
-                / "runtime_sources"
-                / "direction_map"
-                / "analysis"
-            ).resolve()
-        ),
+        str((run_root / "runtime_sources" / "direction_map" / "analysis").resolve()),
         "--srg-source",
         str(srg_source.resolve()),
         "--devices",
@@ -591,14 +588,114 @@ def verify_prepared_multilingual_runtime(runtime_root: Path) -> dict[str, Any]:
     }
     if mismatches:
         raise ValueError(f"multilingual runtime contract mismatch: {mismatches}")
-    if (
-        static_manifest.get("direction_package_sha256")
-        != direction.get("package_sha256")
-        or static_manifest.get("schedule_contract_sha256")
-        != schedule.get("schedule_contract_sha256")
+    if static_manifest.get("direction_package_sha256") != direction.get(
+        "package_sha256"
+    ) or static_manifest.get("schedule_contract_sha256") != schedule.get(
+        "schedule_contract_sha256"
     ):
         raise ValueError("multilingual static component hash mismatch")
     return manifest
+
+
+def build_prepared_frozen_run_contract(
+    config: dict[str, Any],
+    *,
+    runtime_manifest: dict[str, Any],
+    static_manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Link every immutable multilingual component before trial zero."""
+
+    from heretic.multilingual_contract import build_frozen_run_contract
+
+    multilingual = config.get("multilingual_search")
+    if not isinstance(multilingual, dict) or not multilingual.get("enabled"):
+        raise ValueError("multilingual search v3 is not enabled")
+    generation_contract = {
+        "backend": str(config.get("generation_backend", "dynamic_eager")),
+        "prompt_bucket_multiple": int(
+            config.get("generation_prompt_bucket_multiple", 64)
+        ),
+        "compile_mode": str(config.get("generation_compile_mode", "default")),
+        "ordinary_max_new_tokens": int(
+            multilingual.get("ordinary_max_new_tokens", 100)
+        ),
+        "final_max_new_tokens": int(multilingual.get("final_max_new_tokens", 100)),
+    }
+    metric_contract = {
+        "schema_version": 3,
+        "static_runtime_sha256": str(runtime_manifest["static_runtime_sha256"]),
+        "worker_runtime_contract_sha256": str(
+            runtime_manifest["worker_runtime_contract_sha256"]
+        ),
+        "schedule_contract_sha256": str(static_manifest["schedule_contract_sha256"]),
+    }
+    constraint_contract = {
+        "max_safe_ppl_drift": float(multilingual.get("max_safe_ppl_drift", 0.005)),
+        "max_empty_response_rate": float(
+            multilingual.get("max_empty_response_rate", 0.01)
+        ),
+        "max_truncated_response_rate": float(
+            multilingual.get("max_truncated_response_rate", 0.05)
+        ),
+        "max_safe_d_to_r_rate": float(multilingual.get("max_safe_d_to_r_rate", 0.02)),
+        "max_safe_geometry_damage": float(
+            multilingual.get("max_safe_geometry_damage", 1.0)
+        ),
+        "max_language_instability": float(
+            multilingual.get("max_language_instability", 1.0)
+        ),
+        "max_category_instability": float(
+            multilingual.get("max_category_instability", 1.0)
+        ),
+    }
+    return build_frozen_run_contract(
+        dataset_contract_sha256=str(runtime_manifest["dataset_contract_sha256"]),
+        model_id=str(config["model"]),
+        model_fingerprint_sha256=str(runtime_manifest["model_fingerprint"]),
+        model_revision=(
+            str(config["model_commit"]) if config.get("model_commit") else None
+        ),
+        tokenizer_revision=(
+            str(config["model_commit"]) if config.get("model_commit") else None
+        ),
+        map_sha256=str(static_manifest["direction_package_sha256"]),
+        srg_profile_sha256=str(static_manifest["srg_profile_sha256"]),
+        schedule_seed=int(multilingual.get("schedule_seed", 20260811)),
+        schedule_version=int(multilingual.get("schedule_version", 2)),
+        generation_contract=generation_contract,
+        metric_contract=metric_contract,
+        constraint_contract=constraint_contract,
+    )
+
+
+def freeze_prepared_run_contract(
+    config: dict[str, Any],
+    *,
+    run_root: Path,
+    runtime_manifest: dict[str, Any] | None,
+    dry_run: bool,
+) -> dict[str, Any] | None:
+    """Write or verify the full production resume contract."""
+
+    if runtime_manifest is None:
+        return None
+    static_path = run_root.resolve() / "runtime" / "static_manifest.json"
+    if dry_run:
+        return {"status": "DRY_RUN"}
+    if not static_path.is_file():
+        raise FileNotFoundError(static_path)
+    from heretic.multilingual_contract import write_or_verify_frozen_contract
+
+    static_manifest = json.loads(static_path.read_text(encoding="utf-8"))
+    contract = build_prepared_frozen_run_contract(
+        config,
+        runtime_manifest=runtime_manifest,
+        static_manifest=static_manifest,
+    )
+    return write_or_verify_frozen_contract(
+        run_root.resolve() / "run_contract.json",
+        contract,
+    )
 
 
 def prepare_multilingual_run_runtime(
@@ -661,10 +758,7 @@ def prepare_multilingual_run_runtime(
         srg_source=resolved_srg,
     )
     direction_package = (
-        run_root.resolve()
-        / "runtime_sources"
-        / "direction_map"
-        / "analysis"
+        run_root.resolve() / "runtime_sources" / "direction_map" / "analysis"
     )
     if dry_run or not (direction_package / "manifest.json").is_file():
         print(
@@ -948,7 +1042,9 @@ def wait_stage(stage: Stage, process: subprocess.Popen) -> None:
     if return_code != 0:
         raise RuntimeError(f"Stage {stage.name} failed with exit code {return_code}")
     if not stage.journal.is_file():
-        raise FileNotFoundError(f"Stage {stage.name} produced no journal: {stage.journal}")
+        raise FileNotFoundError(
+            f"Stage {stage.name} produced no journal: {stage.journal}"
+        )
     print(
         json.dumps(
             {
@@ -997,7 +1093,7 @@ def wait_parallel(
     for stage, process in stages:
         try:
             wait_stage(stage, process)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - collect every worker failure
             failures.append(f"{stage.name}: {error}")
     if failures:
         raise RuntimeError("Parallel stage failure(s): " + "; ".join(failures))
@@ -1044,6 +1140,7 @@ def _monitor_dynamic_workers(
     expected_tasks: int,
     visible_worker_window: bool,
     max_restarts_per_gpu: int = 2,
+    lease_timeout_seconds: float = 180.0,
 ) -> list[dict[str, Any]]:
     """Monitor queue workers concurrently and recover abandoned claims."""
 
@@ -1054,7 +1151,24 @@ def _monitor_dynamic_workers(
             tuple[Stage, subprocess.Popen, str, tuple[str, ...], int]
         ] = []
         changed = False
+        stale_workers = set(
+            queue.stale_claimed_workers(lease_timeout_seconds=lease_timeout_seconds)
+        )
         for stage, process, worker_id, command_args, restart_count in active:
+            if worker_id in stale_workers and process.poll() is None:
+                process.terminate()
+                print(
+                    json.dumps(
+                        {
+                            "event": "worker_lease_expired",
+                            "worker_id": worker_id,
+                            "device": stage.device,
+                            "lease_timeout_seconds": lease_timeout_seconds,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
             return_code = process.poll()
             if return_code is None:
                 next_active.append(
@@ -1139,8 +1253,7 @@ def _monitor_dynamic_workers(
             or stats.complete != expected_tasks
         ):
             raise RuntimeError(
-                "All dynamic workers exited before the queue completed: "
-                f"{stats}"
+                f"All dynamic workers exited before the queue completed: {stats}"
             )
         if active and not changed:
             time.sleep(0.25)
@@ -1155,6 +1268,7 @@ def wait_dynamic_workers(
     expected_tasks: int,
     visible_worker_window: bool,
     max_restarts_per_gpu: int = 2,
+    lease_timeout_seconds: float = 180.0,
 ) -> list[dict[str, Any]]:
     """Monitor workers and guarantee child cleanup if the controller exits."""
 
@@ -1166,6 +1280,7 @@ def wait_dynamic_workers(
             expected_tasks=expected_tasks,
             visible_worker_window=visible_worker_window,
             max_restarts_per_gpu=max_restarts_per_gpu,
+            lease_timeout_seconds=lease_timeout_seconds,
         )
     except BaseException:
         for _, process, _, _, _ in workers:
@@ -1221,12 +1336,8 @@ def journal_trial_counts(journal: Path) -> JournalTrialCounts:
         raise ValueError(f"Expected one study in {journal}, found {len(summaries)}")
     study = optuna.load_study(study_name=summaries[0].study_name, storage=storage)
     trials = study.get_trials(deepcopy=False)
-    complete = sum(
-        trial.state == optuna.trial.TrialState.COMPLETE for trial in trials
-    )
-    waiting = sum(
-        trial.state == optuna.trial.TrialState.WAITING for trial in trials
-    )
+    complete = sum(trial.state == optuna.trial.TrialState.COMPLETE for trial in trials)
+    waiting = sum(trial.state == optuna.trial.TrialState.WAITING for trial in trials)
     return JournalTrialCounts(
         total=len(trials),
         complete=complete,
@@ -1308,21 +1419,17 @@ def verify_queue_against_journal(
         records = queue.task_records()
     except (OSError, RuntimeError, ValueError) as error:
         return False, f"unreadable_contract:{type(error).__name__}:{error}"
-    if contract.schema_version != 5:
+    if contract.schema_version != 6:
         return False, f"schema_version:{contract.schema_version}"
     if contract.target_trial_count != target_trial_count:
-        return False, (
-            f"target:{contract.target_trial_count}!={target_trial_count}"
-        )
+        return False, (f"target:{contract.target_trial_count}!={target_trial_count}")
     if contract.last_task_id_exclusive != target_trial_count:
         return False, (
             "last_task_id_exclusive:"
             f"{contract.last_task_id_exclusive}!={target_trial_count}"
         )
     if contract.tpe_concurrency != tpe_concurrency:
-        return False, (
-            f"tpe_concurrency:{contract.tpe_concurrency}!={tpe_concurrency}"
-        )
+        return False, (f"tpe_concurrency:{contract.tpe_concurrency}!={tpe_concurrency}")
     if contract.first_task_id < 0 or contract.task_count < 0:
         return False, "negative_task_range"
     if contract.journal_base_complete_count != contract.first_task_id:
@@ -1345,27 +1452,18 @@ def verify_queue_against_journal(
         )
     if contract.tpe_concurrency <= 0:
         return False, f"invalid_tpe_concurrency:{contract.tpe_concurrency}"
-    if (
-        contract.first_task_id + contract.task_count
-        != contract.last_task_id_exclusive
-    ):
+    if contract.first_task_id + contract.task_count != contract.last_task_id_exclusive:
         return False, "task_count_range_mismatch"
     if len(records) != contract.task_count:
         return False, f"task_count:{len(records)}!={contract.task_count}"
-    expected_ids = list(
-        range(contract.first_task_id, contract.last_task_id_exclusive)
-    )
+    expected_ids = list(range(contract.first_task_id, contract.last_task_id_exclusive))
     if [record.task_id for record in records] != expected_ids:
         return False, "task_id_range_mismatch"
     for offset, record in enumerate(records):
         expected_kind = (
             "random"
             if offset < contract.exploration_task_count and offset % 2 == 0
-            else (
-                "sobol"
-                if offset < contract.exploration_task_count
-                else "tpe"
-            )
+            else ("sobol" if offset < contract.exploration_task_count else "tpe")
         )
         if record.task_kind != expected_kind:
             return False, (
@@ -1403,14 +1501,12 @@ def verify_queue_against_journal(
     base_sha256 = sha256_prefix(journal, contract.journal_base_size_bytes)
     if base_sha256 != contract.journal_base_sha256:
         return False, (
-            f"journal_base_sha256:{base_sha256}!="
-            f"{contract.journal_base_sha256}"
+            f"journal_base_sha256:{base_sha256}!={contract.journal_base_sha256}"
         )
     trials = load_journal_trials(journal)
     if len(trials) < contract.journal_base_trial_count:
         return False, (
-            f"journal_truncated:{len(trials)}<"
-            f"{contract.journal_base_trial_count}"
+            f"journal_truncated:{len(trials)}<{contract.journal_base_trial_count}"
         )
     if [trial.number for trial in trials[: contract.journal_base_trial_count]] != list(
         range(contract.journal_base_trial_count)
@@ -1470,9 +1566,7 @@ def verify_queue_against_journal(
             if trial.user_attrs.get("queue_task_kind") != record.task_kind:
                 return False, f"trial_task_kind_mismatch:{record.task_id}:{attempt}"
             if attempt < record.attempt and trial.state not in terminal:
-                return False, (
-                    f"nonterminal_prior_attempt:{record.task_id}:{attempt}"
-                )
+                return False, (f"nonterminal_prior_attempt:{record.task_id}:{attempt}")
         current = by_attempt.get((record.task_id, record.attempt))
         if (
             current is not None
@@ -1634,9 +1728,7 @@ def assigned_devices(args: argparse.Namespace) -> list[str]:
             raise ValueError("--devices contains an empty GPU index")
         devices = list(dict.fromkeys(requested))
     else:
-        devices = list(
-            dict.fromkeys((str(args.random_device), str(args.sobol_device)))
-        )
+        devices = list(dict.fromkeys((str(args.random_device), str(args.sobol_device))))
     if not devices:
         raise ValueError("At least one worker device is required")
     return devices
@@ -1760,7 +1852,9 @@ def write_run_manifest(
                 "name": stage.name,
                 "directory": str(stage.directory),
                 "config": str(stage.config),
-                "config_sha256": sha256(stage.config) if stage.config.is_file() else None,
+                "config_sha256": sha256(stage.config)
+                if stage.config.is_file()
+                else None,
                 "journal": str(stage.journal),
                 "journal_sha256": sha256(stage.journal)
                 if stage.journal.is_file()
@@ -1894,12 +1988,9 @@ def winners_share_physical_export(winners: dict[str, Any]) -> bool:
     try:
         balanced = winners["Balanced"]
         maximum = winners["Max"]
-        return (
-            int(balanced["source_trial_index"])
-            == int(maximum["source_trial_index"])
-            and str(balanced["params_sha256"])
-            == str(maximum["params_sha256"])
-        )
+        return int(balanced["source_trial_index"]) == int(
+            maximum["source_trial_index"]
+        ) and str(balanced["params_sha256"]) == str(maximum["params_sha256"])
     except (KeyError, TypeError, ValueError):
         return False
 
@@ -1923,9 +2014,7 @@ def export_alias_is_complete(
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         recorded_physical = (directory / str(manifest["physical_export"])).resolve()
-        recorded_manifest = (
-            directory / str(manifest["physical_manifest"])
-        ).resolve()
+        recorded_manifest = (directory / str(manifest["physical_manifest"])).resolve()
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
         return False
     if (
@@ -1959,7 +2048,9 @@ def write_export_manifest(
     export_strategy: str,
 ) -> Path:
     files: list[dict[str, Any]] = []
-    for path in sorted(candidate for candidate in directory.rglob("*") if candidate.is_file()):
+    for path in sorted(
+        candidate for candidate in directory.rglob("*") if candidate.is_file()
+    ):
         if path.name == "heretic_moe_export.json":
             continue
         files.append(
@@ -1969,8 +2060,12 @@ def write_export_manifest(
                 "sha256": sha256(path),
             }
         )
-    if not files or not any(record["path"].endswith(".safetensors") for record in files):
-        raise RuntimeError(f"Export {variant} contains no safetensors weights: {directory}")
+    if not files or not any(
+        record["path"].endswith(".safetensors") for record in files
+    ):
+        raise RuntimeError(
+            f"Export {variant} contains no safetensors weights: {directory}"
+        )
     manifest = {
         "schema_version": 1,
         "status": "PASS",
@@ -1982,7 +2077,9 @@ def write_export_manifest(
         "files": files,
     }
     path = directory / "heretic_moe_export.json"
-    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return path
 
 
@@ -2030,7 +2127,9 @@ def write_export_alias_manifest(
         "physical_manifest_sha256": sha256(physical_manifest),
     }
     path = directory / "heretic_moe_export.json"
-    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return path
 
 
@@ -2175,9 +2274,7 @@ def build_finalization_contract(
     """Build the complete immutable recheck and export reuse fingerprint."""
 
     overrides, override_fingerprint = load_finalization_overrides_contract(root)
-    balanced_srg_gate = overrides.get(
-        "balanced_srg_gate", args.balanced_srg_gate
-    )
+    balanced_srg_gate = overrides.get("balanced_srg_gate", args.balanced_srg_gate)
     baseline_srg_override = overrides.get("baseline_srg")
     removal_fraction = float(
         overrides.get(
@@ -2202,15 +2299,11 @@ def build_finalization_contract(
             "keyword_total": args.keyword_total,
             "keyword_near_gate_extra": args.keyword_near_gate_extra,
             "balanced_srg_gate": (
-                None
-                if balanced_srg_gate is None
-                else float(balanced_srg_gate)
+                None if balanced_srg_gate is None else float(balanced_srg_gate)
             ),
             "balanced_removal_fraction": removal_fraction,
             "baseline_srg_override": (
-                None
-                if baseline_srg_override is None
-                else float(baseline_srg_override)
+                None if baseline_srg_override is None else float(baseline_srg_override)
             ),
         },
         "overrides": override_fingerprint,
@@ -2254,18 +2347,15 @@ def finalization_manifest_matches(
         baseline_override = expected_gates["baseline_srg_override"]
         if baseline_override is not None:
             gates_match = (
-                gates_match
-                and manifest_gates.get("baseline_srg") == baseline_override
+                gates_match and manifest_gates.get("baseline_srg") == baseline_override
             )
     except (KeyError, TypeError, ValueError):
         return False
     return (
         manifest.get("version") == 1
         and manifest.get("status") == "prepared"
-        and manifest.get("source_journal_sha256")
-        == contract["source_journal_sha256"]
-        and manifest.get("base_config_sha256")
-        == contract["base_config_sha256"]
+        and manifest.get("source_journal_sha256") == contract["source_journal_sha256"]
+        and manifest.get("base_config_sha256") == contract["base_config_sha256"]
         and top_n == contract["top_n"]
         and manifest.get("selection_policy") == contract["selection_policy"]
         and manifest.get("ppl") == contract["ppl"]
@@ -2372,16 +2462,13 @@ def load_valid_winners_report(path: Path) -> dict[str, Any] | None:
         try:
             expected_report = select_multilingual_winners(
                 measured,
-                balanced_removal_fraction=float(
-                    report["balanced_removal_fraction"]
-                ),
+                balanced_removal_fraction=float(report["balanced_removal_fraction"]),
             )
         except (KeyError, TypeError, ValueError):
             return None
         if (
             expected_report["winners"] != winners
-            or expected_report["winners_distinct"]
-            is not report.get("winners_distinct")
+            or expected_report["winners_distinct"] is not report.get("winners_distinct")
             or not math.isclose(
                 float(expected_report["resolved_balanced_removal_gate"]),
                 float(report.get("resolved_balanced_removal_gate", math.nan)),
@@ -2427,13 +2514,9 @@ def finalization_outputs_resumable(
     winners_report = load_valid_winners_report(winners_path)
     if winners_path.exists() and winners_report is None:
         return False, "invalid_winners_report"
-    winners = (
-        winners_report.get("winners")
-        if winners_report is not None
-        else None
-    )
-    collapsed_roles = (
-        isinstance(winners, dict) and winners_share_physical_export(winners)
+    winners = winners_report.get("winners") if winners_report is not None else None
+    collapsed_roles = isinstance(winners, dict) and winners_share_physical_export(
+        winners
     )
     complete_variants: set[str] = set()
     for variant in ("Balanced", "Max"):
@@ -2444,9 +2527,7 @@ def finalization_outputs_resumable(
             return False, f"export_not_directory:{variant}"
         if not any(output.iterdir()):
             continue
-        if not isinstance(winners, dict) or not isinstance(
-            winners.get(variant), dict
-        ):
+        if not isinstance(winners, dict) or not isinstance(winners.get(variant), dict):
             return False, f"export_without_winner_contract:{variant}"
         if collapsed_roles and variant == "Max":
             valid_export = export_alias_is_complete(
@@ -2498,8 +2579,7 @@ def finalization_outputs_resumable(
     if complete_variants != {"Balanced", "Max"} or winners_report is None:
         return False, "workflow_without_complete_exports"
     expected_exports = {
-        variant: str(export_root / variant.lower())
-        for variant in ("Balanced", "Max")
+        variant: str(export_root / variant.lower()) for variant in ("Balanced", "Max")
     }
     expected_policy_reference = (
         {
@@ -2762,24 +2842,31 @@ def finalize_and_export(
             str(args.balanced_removal_fraction),
         ]
         if args.balanced_srg_gate is not None:
-            prepare_command.extend(
-                ["--balanced-srg-gate", str(args.balanced_srg_gate)]
-            )
-        run_checked(prepare_command, cwd=Path(__file__).parents[2], event="finalist_prepare")
+            prepare_command.extend(["--balanced-srg-gate", str(args.balanced_srg_gate)])
+        run_checked(
+            prepare_command, cwd=Path(__file__).parents[2], event="finalist_prepare"
+        )
     else:
         print(
             json.dumps(
-                {"event": "finalist_prepare_resume", "manifest": str(finalist_manifest)},
+                {
+                    "event": "finalist_prepare_resume",
+                    "manifest": str(finalist_manifest),
+                },
                 sort_keys=True,
             ),
             flush=True,
         )
 
     prepared_manifest = load_json_object(finalist_manifest)
-    if prepared_manifest is None or not finalization_manifest_matches(
-        prepared_manifest,
-        finalization_contract,
-    ) or not prepared_finalization_artifacts_match(prepared_manifest):
+    if (
+        prepared_manifest is None
+        or not finalization_manifest_matches(
+            prepared_manifest,
+            finalization_contract,
+        )
+        or not prepared_finalization_artifacts_match(prepared_manifest)
+    ):
         raise RuntimeError(
             f"Prepared finalist manifest violates the selected contract: "
             f"{finalist_manifest}"
@@ -2938,7 +3025,9 @@ def finalize_and_export(
         if len(devices) == 1:
             return_code = process.wait()
             if return_code != 0:
-                raise RuntimeError(f"Export failure: {variant} on GPU {device}: exit {return_code}")
+                raise RuntimeError(
+                    f"Export failure: {variant} on GPU {device}: exit {return_code}"
+                )
             export_manifest = write_export_manifest(
                 output,
                 variant=variant,
@@ -3113,9 +3202,7 @@ def main() -> None:
     if args.exploration_trials % 2:
         raise ValueError("--exploration-trials must be even for a 50/50 split")
     if not args.continue_shared_only and args.target_trials <= args.exploration_trials:
-        raise ValueError(
-            "--target-trials must exceed the combined exploration prefix"
-        )
+        raise ValueError("--target-trials must exceed the combined exploration prefix")
     if args.finalist_top_n < 2:
         raise ValueError("--finalist-top-n must be at least 2")
     if args.recheck_ppl_chunks <= 0 or args.recheck_ppl_window <= 0:
@@ -3162,16 +3249,15 @@ def main() -> None:
         base = apply_data_root(base, args.data_root)
     if args.model:
         base["model"] = args.model
-    if args.model or args.data_root:
-        if not args.dry_run:
-            base_config = root / "effective_base_config.toml"
-            write_managed_config(base_config, base, dry_run=False)
+    if (args.model or args.data_root) and not args.dry_run:
+        base_config = root / "effective_base_config.toml"
+        write_managed_config(base_config, base, dry_run=False)
     branch_trials = args.exploration_trials // 2
     devices = assigned_devices(args)
     shared_worker_count = len(devices)
     random_device = devices[0]
     sobol_device = devices[1] if len(devices) > 1 else devices[0]
-    prepare_multilingual_run_runtime(
+    runtime_manifest = prepare_multilingual_run_runtime(
         base,
         executable=executable,
         base_config=base_config,
@@ -3180,11 +3266,15 @@ def main() -> None:
         srg_source=args.srg_calibration_source,
         dry_run=args.dry_run,
     )
+    freeze_prepared_run_contract(
+        base,
+        run_root=root,
+        runtime_manifest=runtime_manifest,
+        dry_run=args.dry_run,
+    )
     response_archive = root / "trial-responses.sqlite3"
     scorer_updates = (
-        frozenset({"scorer"})
-        if args.allow_scorer_config_update
-        else frozenset()
+        frozenset({"scorer"}) if args.allow_scorer_config_update else frozenset()
     )
     preserve_search_provenance = preserve_existing_search_provenance(args, root)
     random_stage: Stage | None = None
@@ -3247,9 +3337,7 @@ def main() -> None:
             base_config=base_config,
             stages=manifest_stages,
             status=(
-                "tpe_preparing"
-                if args.continue_shared_only
-                else "exploration_running"
+                "tpe_preparing" if args.continue_shared_only else "exploration_running"
             ),
         )
 
@@ -3331,10 +3419,7 @@ def main() -> None:
     selected_queue: TrialWorkQueue | None = None
     selected_queue_path = queue_path_for_version(root, args.target_trials, 1)
     queue_rejections: list[dict[str, Any]] = []
-    if (
-        args.dynamic_worker_queue
-        and not args.dry_run
-    ):
+    if args.dynamic_worker_queue and not args.dry_run:
         selected_queue, candidate_path, queue_rejections = select_verified_queue(
             root,
             shared_stage.journal,
@@ -3373,8 +3458,7 @@ def main() -> None:
                     or contract.tpe_concurrency != shared_worker_count
                 ):
                     raise RuntimeError(
-                        "Verified queue contract changed unexpectedly: "
-                        f"{contract}"
+                        f"Verified queue contract changed unexpectedly: {contract}"
                     )
                 queue_expected_tasks = contract.task_count
             else:
@@ -3434,7 +3518,9 @@ def main() -> None:
             args.worker_recoveries = prelaunch_recoveries
             queue_stats = queue.stats()
             if queue_stats.failed:
-                raise RuntimeError(f"Dynamic worker queue has failed tasks: {queue_stats}")
+                raise RuntimeError(
+                    f"Dynamic worker queue has failed tasks: {queue_stats}"
+                )
             remaining_trials = queue_stats.pending + queue_stats.claimed
     else:
         args.worker_queue_path = None
@@ -3493,6 +3579,8 @@ def main() -> None:
                     "--worker-queue-path",
                     str(args.worker_queue_path),
                     f"--worker-id={worker_id}",
+                    "--worker-heartbeat-interval-seconds",
+                    str(args.heartbeat_interval_seconds),
                 )
             )
         else:
@@ -3517,11 +3605,13 @@ def main() -> None:
             recoveries = [
                 *getattr(args, "worker_recoveries", []),
                 *wait_dynamic_workers(
-                worker_processes,
-                queue=queue,
-                executable=executable,
-                expected_tasks=queue_expected_tasks,
-                visible_worker_window=args.visible_worker_windows,
+                    worker_processes,
+                    queue=queue,
+                    executable=executable,
+                    expected_tasks=queue_expected_tasks,
+                    visible_worker_window=args.visible_worker_windows,
+                    max_restarts_per_gpu=args.max_worker_restarts,
+                    lease_timeout_seconds=args.lease_timeout_seconds,
                 ),
             ]
         else:

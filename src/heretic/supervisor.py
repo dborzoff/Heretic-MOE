@@ -9,11 +9,20 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
 from typing import BinaryIO
+
+from .launch_config import (
+    LaunchOverrides,
+    build_internal_settings,
+    load_effective_launch_config,
+    resolve_run_root,
+    write_effective_config_bundle,
+)
 
 
 @dataclass(frozen=True)
@@ -33,12 +42,16 @@ class AdaptiveRunLock(AbstractContextManager["AdaptiveRunLock"]):
     """Keep two supervisors from launching workers into the same run root."""
 
     def __init__(self, run_root: Path):
-        self.path = run_root.resolve() / ".hereticmoe-controller.lock"
+        resolved = run_root.resolve()
+        self.path = resolved.parent / f".{resolved.name}.hereticmoe-controller.lock"
         self.handle: BinaryIO | None = None
 
-    def __enter__(self) -> "AdaptiveRunLock":
+    def __enter__(self) -> AdaptiveRunLock:  # noqa: PYI034 - Python 3.10 support
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+b")
+        try:
+            handle = self.path.open("x+b")
+        except FileExistsError:
+            handle = self.path.open("r+b")
         self.handle = handle
         handle.seek(0, os.SEEK_END)
         if handle.tell() < 64:
@@ -66,6 +79,7 @@ class AdaptiveRunLock(AbstractContextManager["AdaptiveRunLock"]):
         handle.seek(0)
         lock_record = f"pid={os.getpid()}\n".encode().ljust(64, b" ")
         handle.write(lock_record)
+        handle.truncate(64)
         handle.flush()
         return self
 
@@ -112,13 +126,22 @@ def detect_nvidia_gpus() -> list[GpuInfo]:
         fields = [field.strip() for field in raw_line.split(",")]
         if len(fields) != 5:
             raise RuntimeError(f"Unexpected nvidia-smi row: {raw_line!r}")
+        try:
+            total_mib = int(fields[2])
+            free_mib = int(fields[3])
+            utilization = int(fields[4])
+        except ValueError as error:
+            raise RuntimeError(
+                f"nvidia-smi returned an unavailable numeric field for GPU "
+                f"{fields[0]}: {raw_line!r}"
+            ) from error
         devices.append(
             GpuInfo(
                 index=fields[0],
                 name=fields[1],
-                total_mib=int(fields[2]),
-                free_mib=int(fields[3]),
-                utilization=int(fields[4]),
+                total_mib=total_mib,
+                free_mib=free_mib,
+                utilization=utilization,
             )
         )
     if not devices:
@@ -201,10 +224,7 @@ def executable_path(override: Path | None) -> Path:
         if not discovered:
             discovered = shutil.which("hereticMOE")
         if not discovered:
-            raise FileNotFoundError(
-                "Cannot locate hereticMOE worker launcher; provide "
-                "--worker-executable"
-            )
+            raise FileNotFoundError("Cannot locate hereticMOE worker launcher")
         result = Path(discovered).resolve()
     if not result.is_file():
         raise FileNotFoundError(result)
@@ -216,83 +236,53 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="hereticMOE",
         description="Dynamic render-queue search across available GPUs.",
     )
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--run-root", type=Path, required=True)
-    parser.add_argument("--base-config", type=Path)
-    parser.add_argument("--data-root", type=Path)
-    parser.add_argument("--srg-calibration-source", type=Path)
-    parser.add_argument("--devices", default="auto")
-    parser.add_argument("--max-workers", type=int)
-    parser.add_argument("--min-free-fraction", type=float, default=0.70)
-    parser.add_argument("--min-free-gib", type=float, default=4.0)
     parser.add_argument(
-        "--exploration-trials",
-        type=int,
-        default=120,
-        help="Alternating Random/Sobol queue prefix (default: 120).",
+        "--config",
+        type=Path,
+        default=Path("config.yaml"),
+        help="Public Heretic-MOE YAML configuration (default: ./config.yaml).",
+    )
+    parser.add_argument("--model", help="Override model.path from YAML.")
+    parser.add_argument("--run-root", type=Path, help="Override run.root from YAML.")
+    parser.add_argument("--devices", help="Override devices.include from YAML.")
+    parser.add_argument("--target-trials", type=int)
+    parser.add_argument("--exploration-trials", type=int)
+    parser.add_argument(
+        "--post-search",
+        choices=("export", "recheck", "none"),
     )
     parser.add_argument(
-        "--n-trials",
-        type=int,
-        default=600,
-        help=(
-            "Exact work-permit target (default: 600); increase it to extend a "
-            "compatible shared journal."
-        ),
+        "--incompatible-contract",
+        choices=("archive", "new_run", "replace", "fail"),
     )
-    parser.add_argument("--continue-shared-only", action="store_true")
-    post_search = parser.add_mutually_exclusive_group()
-    post_search.add_argument(
-        "--finalize",
-        dest="post_search_mode",
-        action="store_const",
-        const="export",
-        default="export",
-    )
-    post_search.add_argument(
-        "--no-finalize",
-        "--search-only",
-        dest="post_search_mode",
-        action="store_const",
-        const="none",
-    )
-    post_search.add_argument(
-        "--recheck-only",
-        dest="post_search_mode",
-        action="store_const",
-        const="recheck",
-        help="Select and recheck TOP-6 without assembling model weights.",
-    )
-    parser.add_argument("--worker-executable", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    if not 0 <= args.min_free_fraction <= 1:
-        raise ValueError("--min-free-fraction must be in [0, 1]")
-    if args.min_free_gib < 0:
-        raise ValueError("--min-free-gib cannot be negative")
-    if args.max_workers is not None and args.max_workers <= 0:
-        raise ValueError("--max-workers must be positive")
+    config = load_effective_launch_config(
+        args.config,
+        LaunchOverrides(
+            model=args.model,
+            run_root=args.run_root,
+            devices=args.devices,
+            target_trials=args.target_trials,
+            exploration_trials=args.exploration_trials,
+            post_search=args.post_search,
+            incompatible_contract=args.incompatible_contract,
+        ),
+    )
 
     root = repository_root()
-    base_config = args.base_config or (
-        root
-        / "research"
-        / "configs"
-        / "adaptive_search"
-        / "multilingual_v3.toml"
-    )
-    worker_executable = executable_path(args.worker_executable)
+    worker_executable = executable_path(None)
     available = detect_nvidia_gpus()
     selected = select_devices(
         available,
-        args.devices,
-        min_free_fraction=args.min_free_fraction,
-        min_free_gib=args.min_free_gib,
-        max_workers=args.max_workers,
+        config.devices.selection_specification(),
+        min_free_fraction=config.devices.min_free_fraction,
+        min_free_gib=config.devices.min_free_gib,
+        max_workers=config.devices.max_workers,
     )
 
     print(
@@ -308,54 +298,119 @@ def main(argv: list[str] | None = None) -> None:
             flush=True,
         )
 
-    controller = root / "research" / "scripts" / "run_adaptive_search.py"
-    device_indices = ",".join(device.index for device in selected)
-    command = [
-        sys.executable,
-        str(controller),
-        "--base-config",
-        str(base_config.resolve()),
-        "--model",
-        args.model,
-        "--run-root",
-        str(args.run_root.resolve()),
-        "--heretic",
-        str(worker_executable),
-        "--exploration-trials",
-        str(args.exploration_trials),
-        "--target-trials",
-        str(args.n_trials),
-        "--devices",
-        device_indices,
-        "--random-device",
-        selected[0].index,
-        "--sobol-device",
-        selected[1].index if len(selected) > 1 else selected[0].index,
-        "--dynamic-worker-queue",
-    ]
-    if args.data_root:
-        command.extend(("--data-root", str(args.data_root.resolve())))
-    if args.srg_calibration_source:
-        command.extend(
-            (
-                "--srg-calibration-source",
-                str(args.srg_calibration_source.resolve()),
-            )
-        )
-    if args.continue_shared_only:
-        command.append("--continue-shared-only")
-    command.append(
-        {
-            "export": "--finalize",
-            "recheck": "--recheck-only",
-            "none": "--no-finalize",
-        }[args.post_search_mode]
-    )
     if args.dry_run:
-        command.append("--dry-run")
+        resolution = resolve_run_root(
+            config.run.root,
+            config,
+            config.run.incompatible_contract,
+            mutate=False,
+        )
+        print(
+            f"Dry run: would use {resolution.run_root} "
+            f"with {config.run.target_trials} trial(s); no files were changed.",
+            flush=True,
+        )
+        return
 
     environment = os.environ.copy()
     environment["HERETIC_SUPERVISED"] = "1"
-    with AdaptiveRunLock(args.run_root):
+    with AdaptiveRunLock(config.run.root):
+        preview = resolve_run_root(
+            config.run.root,
+            config,
+            config.run.incompatible_contract,
+            mutate=False,
+        )
+        run_config = config.model_copy(
+            update={"run": config.run.model_copy(update={"root": preview.run_root})}
+        )
+        internal_settings = build_internal_settings(run_config)
+        staging_root = Path(
+            tempfile.mkdtemp(
+                prefix=f".{preview.run_root.name}.config-staging-",
+                dir=preview.run_root.parent,
+            )
+        )
+        try:
+            staged_bundle = write_effective_config_bundle(
+                args.config,
+                run_config,
+                staging_root,
+            )
+            resolution = resolve_run_root(
+                config.run.root,
+                config,
+                config.run.incompatible_contract,
+            )
+            run_root = resolution.run_root
+            run_root.mkdir(parents=True, exist_ok=True)
+            for staged_file in staging_root.iterdir():
+                staged_file.replace(run_root / staged_file.name)
+        finally:
+            shutil.rmtree(staging_root, ignore_errors=True)
+        if resolution.archived_root is not None:
+            print(
+                f"Archived incompatible run: {resolution.archived_root}",
+                flush=True,
+            )
+        elif resolution.replaced:
+            print(f"Replaced incompatible Heretic-MOE run: {run_root}", flush=True)
+        elif resolution.run_root != config.run.root.resolve():
+            print(f"Using new run root: {run_root}", flush=True)
+        effective_toml = run_root / staged_bundle.effective_toml.name
+        controller = root / "research" / "scripts" / "run_adaptive_search.py"
+        device_indices = ",".join(device.index for device in selected)
+        command = [
+            sys.executable,
+            str(controller),
+            "--base-config",
+            str(effective_toml),
+            "--model",
+            internal_settings.model,
+            "--run-root",
+            str(run_root),
+            "--heretic",
+            str(worker_executable),
+            "--exploration-trials",
+            str(config.run.exploration_trials),
+            "--target-trials",
+            str(config.run.target_trials),
+            "--devices",
+            device_indices,
+            "--random-device",
+            selected[0].index,
+            "--sobol-device",
+            selected[1].index if len(selected) > 1 else selected[0].index,
+            "--dynamic-worker-queue",
+            "--finalist-top-n",
+            str(config.finalists.top_n),
+            "--balanced-removal-fraction",
+            str(config.finalists.balanced_removal_fraction),
+            "--max-worker-restarts",
+            str(config.recovery.max_restarts_per_gpu),
+            "--heartbeat-interval-seconds",
+            str(config.recovery.worker_heartbeat_seconds),
+            "--lease-timeout-seconds",
+            str(config.recovery.worker_timeout_seconds),
+        ]
+        multilingual = internal_settings.multilingual_search
+        if multilingual.dataset_root:
+            command.extend(
+                ("--data-root", str(Path(multilingual.dataset_root).resolve()))
+            )
+        if multilingual.srg_calibration_source:
+            command.extend(
+                (
+                    "--srg-calibration-source",
+                    str(Path(multilingual.srg_calibration_source).resolve()),
+                )
+            )
+        command.append(
+            {
+                "export": "--finalize",
+                "recheck": "--recheck-only",
+                "none": "--no-finalize",
+            }[config.run.post_search]
+        )
         result = subprocess.run(command, cwd=root, env=environment, check=False)
     raise SystemExit(result.returncode)

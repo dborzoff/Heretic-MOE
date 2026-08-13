@@ -2,7 +2,7 @@
 # Copyright (C) 2025-2026  Philipp Emanuel Weidmann <pew@worldwidemann.com> + contributors
 
 from enum import Enum
-from typing import Dict, Literal
+from typing import Literal
 
 from pydantic import (
     BaseModel,
@@ -46,7 +46,9 @@ def generation_runtime_contract(settings: object) -> dict[str, str | int]:
 
     backend = getattr(settings, "generation_backend", GenerationBackend.DYNAMIC_EAGER)
     return {
-        "backend": backend.value if isinstance(backend, GenerationBackend) else str(backend),
+        "backend": backend.value
+        if isinstance(backend, GenerationBackend)
+        else str(backend),
         "prompt_bucket_multiple": int(
             getattr(settings, "generation_prompt_bucket_multiple", 0)
         ),
@@ -247,9 +249,7 @@ class MultilingualSearchSettings(BaseModel):
             "the supervisor while freezing a new runtime."
         ),
     )
-    languages: list[str] = Field(
-        default_factory=lambda: ["en", "ru", "zh", "es", "fr"]
-    )
+    languages: list[str] = Field(default_factory=lambda: ["en", "ru", "zh", "es", "fr"])
     direction_rows_per_cell: PositiveInt = 1000
     trial_rows_per_cell: PositiveInt = 400
     calibration_rows_per_language: PositiveInt = 132
@@ -263,6 +263,9 @@ class MultilingualSearchSettings(BaseModel):
     max_safe_geometry_damage: NonNegativeFloat = 1.0
     max_language_instability: NonNegativeFloat = 1.0
     max_category_instability: NonNegativeFloat = 1.0
+    max_empty_response_rate: NonNegativeFloat = 0.01
+    max_truncated_response_rate: NonNegativeFloat = 0.05
+    max_safe_d_to_r_rate: NonNegativeFloat = 0.02
 
     @field_validator("languages")
     @classmethod
@@ -356,12 +359,12 @@ class Settings(BaseSettings):
         ),
     )
 
-    device_map: str | Dict[str, int | str] = Field(
+    device_map: str | dict[str, int | str] = Field(
         default="auto",
         description="Device map to pass to Accelerate when loading the model.",
     )
 
-    max_memory: Dict[str, str] | None = Field(
+    max_memory: dict[str, str] | None = Field(
         default=None,
         description='Maximum memory to allocate per device (e.g., { "0" = "20GB", "cpu" = "64GB" }).',
     )
@@ -774,6 +777,12 @@ class Settings(BaseSettings):
     worker_id: str | None = Field(
         default=None,
         description="Internal stable identifier for a supervised GPU worker.",
+        exclude=True,
+    )
+
+    worker_heartbeat_interval_seconds: PositiveInt = Field(
+        default=30,
+        description="Internal durable queue heartbeat interval.",
         exclude=True,
     )
 

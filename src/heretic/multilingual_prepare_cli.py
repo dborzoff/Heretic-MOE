@@ -233,6 +233,9 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
             max_safe_geometry_damage=float(contract.max_safe_geometry_damage),
             max_language_instability=float(contract.max_language_instability),
             max_category_instability=float(contract.max_category_instability),
+            max_empty_response_rate=float(contract.max_empty_response_rate),
+            max_truncated_response_rate=float(contract.max_truncated_response_rate),
+            max_safe_d_to_r_rate=float(contract.max_safe_d_to_r_rate),
         ),
         expected_per_direction=contract.trial_rows_per_cell,
         expected_languages=tuple(contract.languages),
@@ -244,9 +247,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         "dataset_contract_sha256": bundle.manifest["contract_sha256"],
         "model_fingerprint": fingerprint["model_fingerprint"],
         "static_runtime_sha256": static_manifest["static_runtime_sha256"],
-        "clean_reference_contract_sha256": clean_manifest[
-            "archive_contract_sha256"
-        ],
+        "clean_reference_contract_sha256": clean_manifest["archive_contract_sha256"],
         "worker_runtime_contract_sha256": worker_runtime_manifest[
             "runtime_contract_sha256"
         ],

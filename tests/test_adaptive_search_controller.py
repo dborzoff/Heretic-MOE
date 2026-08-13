@@ -88,14 +88,12 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
                 root,
             )
 
-        self.assertEqual(
-            config["multilingual_search"]["dataset_root"], root.as_posix()
-        )
-        self.assertEqual(
-            config["multilingual_search"]["split_root"], split.as_posix()
-        )
+        self.assertEqual(config["multilingual_search"]["dataset_root"], root.as_posix())
+        self.assertEqual(config["multilingual_search"]["split_root"], split.as_posix())
 
-    def test_multilingual_preparation_commands_use_all_devices_and_frozen_pools(self) -> None:
+    def test_multilingual_preparation_commands_use_all_devices_and_frozen_pools(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             split = root / "dataset" / "operative_split_1000_400_v1"
@@ -160,9 +158,10 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
                 },
             }
             output = io.StringIO()
-            with redirect_stdout(output), patch.object(
-                controller.subprocess, "run"
-            ) as run:
+            with (
+                redirect_stdout(output),
+                patch.object(controller.subprocess, "run") as run,
+            ):
                 result = controller.prepare_multilingual_run_runtime(
                     config,
                     executable=Path("hereticMOE.exe"),
@@ -177,6 +176,57 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
         self.assertIn("multilingual_geometry_prepare", output.getvalue())
         self.assertIn("multilingual_runtime_prepare", output.getvalue())
         run.assert_not_called()
+
+    def test_frozen_run_contract_links_every_prepared_component(self) -> None:
+        runtime = {
+            "dataset_contract_sha256": "a" * 64,
+            "model_fingerprint": "d" * 64,
+            "static_runtime_sha256": "e" * 64,
+            "worker_runtime_contract_sha256": "f" * 64,
+        }
+        static = {
+            "direction_package_sha256": "b" * 64,
+            "srg_profile_sha256": "c" * 64,
+            "schedule_contract_sha256": "9" * 64,
+        }
+        config = {
+            "model": "example/model",
+            "model_commit": "revision-a",
+            "generation_backend": "compiled_static",
+            "generation_prompt_bucket_multiple": 64,
+            "generation_compile_mode": "default",
+            "multilingual_search": {
+                "enabled": True,
+                "dataset_root": "F:/dataset",
+                "schedule_seed": 42,
+                "schedule_version": 2,
+                "ordinary_max_new_tokens": 100,
+                "final_max_new_tokens": 100,
+                "max_safe_ppl_drift": 0.005,
+                "max_safe_geometry_damage": 1.0,
+                "max_language_instability": 1.0,
+                "max_category_instability": 1.0,
+            },
+        }
+
+        contract = controller.build_prepared_frozen_run_contract(
+            config,
+            runtime_manifest=runtime,
+            static_manifest=static,
+        )
+
+        self.assertEqual(contract["dataset_contract_sha256"], "a" * 64)
+        self.assertEqual(contract["model_fingerprint_sha256"], "d" * 64)
+        self.assertEqual(contract["map_sha256"], "b" * 64)
+        self.assertEqual(contract["srg_profile_sha256"], "c" * 64)
+        self.assertEqual(
+            contract["metric_contract"]["worker_runtime_contract_sha256"],
+            "f" * 64,
+        )
+        self.assertEqual(contract["metric_contract"]["static_runtime_sha256"], "e" * 64)
+        self.assertEqual(
+            contract["metric_contract"]["schedule_contract_sha256"], "9" * 64
+        )
 
     def test_recheck_only_is_distinct_from_search_only_and_export(self) -> None:
         args = self.parse_args("--recheck-only")
@@ -199,9 +249,12 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
 
     def test_post_search_modes_are_mutually_exclusive(self) -> None:
         for conflicting in ("--finalize", "--search-only", "--no-finalize"):
-            with self.subTest(conflicting=conflicting):
-                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-                    self.parse_args("--recheck-only", conflicting)
+            with (
+                self.subTest(conflicting=conflicting),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                self.parse_args("--recheck-only", conflicting)
 
     def test_recheck_only_returns_before_creating_model_exports(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -351,7 +404,9 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
         self.assertEqual(counts.waiting, 0)
         self.assertEqual(controller.remaining_complete_trial_budget(2, counts), 1)
 
-    def test_queue_contract_separates_base_trial_records_from_completed_work(self) -> None:
+    def test_queue_contract_separates_base_trial_records_from_completed_work(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory:
             queue = TrialWorkQueue(Path(temporary_directory) / "queue.sqlite3")
             queue.initialize(
@@ -413,7 +468,9 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
             second.set_user_attr("queue_task_kind", "random")
             second.set_user_attr("queue_worker_id", "gpu-1")
             study.tell(second, 2.0)
-            queue.finish(second_item, trial_number=second.number, trial_state="COMPLETE")
+            queue.finish(
+                second_item, trial_number=second.number, trial_state="COMPLETE"
+            )
 
             valid, reason = controller.verify_queue_against_journal(
                 queue,

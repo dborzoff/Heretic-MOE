@@ -9,9 +9,10 @@ import json
 import os
 import tempfile
 from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 import torch
 from torch import Tensor
@@ -66,6 +67,7 @@ class FrozenMultilingualTrialEvaluator:
         private_output_dir: str | Path,
         expected_per_direction: int = 400,
         expected_languages: tuple[str, ...] = ("en", "ru", "zh", "es", "fr"),
+        max_response_length: int = 100,
     ) -> None:
         self.model = model
         self._rows = {row.row_id: row for row in trial_rows}
@@ -94,6 +96,9 @@ class FrozenMultilingualTrialEvaluator:
         self.private_output_dir = Path(private_output_dir).resolve()
         self.expected_per_direction = expected_per_direction
         self.expected_languages = expected_languages
+        if max_response_length <= 0:
+            raise ValueError("max_response_length must be positive")
+        self.max_response_length = max_response_length
 
     def evaluate(
         self,
@@ -118,6 +123,7 @@ class FrozenMultilingualTrialEvaluator:
             ),
             expected_per_direction=self.expected_per_direction,
             expected_languages=self.expected_languages,
+            max_response_length=self.max_response_length,
             residual_capture=residual_capture,
         )
 
@@ -128,7 +134,9 @@ def _sha256_bytes(payload: bytes) -> str:
 
 def _atomic_write(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent
+    )
     temporary = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "wb") as handle:
@@ -180,6 +188,7 @@ def evaluate_multilingual_trial(
     private_records_path: str | Path,
     expected_per_direction: int = 400,
     expected_languages: tuple[str, ...] = ("en", "ru", "zh", "es", "fr"),
+    max_response_length: int = 100,
     residual_capture: Callable[[list[Prompt], Tensor], None] | None = None,
 ) -> TrialMeasurement:
     """Evaluate one scheduled trial without a second autoregressive pass."""
@@ -207,14 +216,16 @@ def evaluate_multilingual_trial(
     expected_per_language = expected_per_direction // len(languages)
     for direction_class in ("safe", "unsafe"):
         counts = Counter(
-            row.language
-            for row in ordered
-            if row.direction == direction_class
+            row.language for row in ordered if row.direction == direction_class
         )
-        if counts != Counter({language: expected_per_language for language in languages}):
+        if counts != Counter(
+            {language: expected_per_language for language in languages}
+        ):
             raise ValueError("trial must be balanced by language in both directions")
     if trial_number < 0:
         raise ValueError("trial number must be nonnegative")
+    if max_response_length <= 0:
+        raise ValueError("max_response_length must be positive")
     direction = refusal_direction.detach().to(torch.float32).cpu()
     if direction.ndim != 2 or not bool(torch.isfinite(direction).all()):
         raise ValueError("refusal direction must be a finite [layers,hidden] tensor")
@@ -277,9 +288,36 @@ def evaluate_multilingual_trial(
         groups=srg_groups,
     )
 
-    safe_positions = [index for index, row in enumerate(ordered) if row.direction == "safe"]
+    safe_positions = [
+        index for index, row in enumerate(ordered) if row.direction == "safe"
+    ]
+    safe_prompts = [prompts[index] for index in safe_positions]
+    clean_safe_responses = [
+        str(clean[ordered[index].row_id]["clean_response"]) for index in safe_positions
+    ]
+    candidate_safe_responses = [responses[index] for index in safe_positions]
+    safe_baseline_margins = _margins(
+        srg_scorer.score_responses(safe_prompts, clean_safe_responses),
+        safe_rows,
+    )
+    safe_candidate_margins = _margins(
+        srg_scorer.score_responses(safe_prompts, candidate_safe_responses),
+        safe_rows,
+    )
+    safe_srg = relative_score(
+        safe_baseline_margins,
+        safe_candidate_margins,
+        dict(srg_profile),
+        groups=[
+            (ordered[index].language, ordered[index].category_id)
+            for index in safe_positions
+        ],
+    )
     safe_targets = [
-        [int(value) for value in clean[ordered[index].row_id]["clean_response_token_ids"]]
+        [
+            int(value)
+            for value in clean[ordered[index].row_id]["clean_response_token_ids"]
+        ]
         for index in safe_positions
     ]
     candidate_nll_values = model.get_conditional_nll(
@@ -289,7 +327,9 @@ def evaluate_multilingual_trial(
     if len(candidate_nll_values) != safe_rows:
         raise ValueError("SAFE conditional NLL coverage mismatch")
     clean_nll = {
-        ordered[index].row_id: float(clean[ordered[index].row_id]["clean_conditional_nll"])
+        ordered[index].row_id: float(
+            clean[ordered[index].row_id]["clean_conditional_nll"]
+        )
         for index in safe_positions
     }
     candidate_nll = {
@@ -313,6 +353,16 @@ def evaluate_multilingual_trial(
         language_instability=float(geometry["language_instability"]),
         category_instability=float(geometry["category_instability"]),
     )
+    empty_responses = sum(
+        not str(response).strip() or len(ids) == 0
+        for response, ids in zip(responses, token_ids, strict=True)
+    )
+    truncated_responses = sum(len(ids) >= max_response_length for ids in token_ids)
+    hard_gates = {
+        "empty_response_rate": empty_responses / len(ordered),
+        "truncated_response_rate": truncated_responses / len(ordered),
+        "safe_d_to_r_rate": float(safe_srg["d_to_r_rate"]),
+    }
 
     private_lines = []
     for index, row in enumerate(ordered):
@@ -341,13 +391,12 @@ def evaluate_multilingual_trial(
         metrics=metrics,
         diagnostics={
             "srg": {
-                key: value
-                for key, value in srg.items()
-                if key != "standardized_gain"
+                key: value for key, value in srg.items() if key != "standardized_gain"
             },
             "srg_groups": srg_group_summary,
             "geometry": geometry,
             "ppl": ppl,
+            "hard_gates": hard_gates,
         },
         private_records_sha256=_sha256_bytes(payload),
     )

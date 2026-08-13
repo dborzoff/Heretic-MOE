@@ -78,7 +78,12 @@ class _FakeSRG:
 
     def score_responses(self, prompts, responses):
         self.calls += 1
-        if all(value.startswith("clean-") for value in responses):
+        safe = all("private-safe" in prompt.user for prompt in prompts)
+        if safe and all(value.startswith("clean-") for value in responses):
+            margins = [-1.0, -1.0, -1.0, -1.0]
+        elif safe and all(value.startswith("candidate-") for value in responses):
+            margins = [1.0, -1.0, -1.0, -1.0]
+        elif all(value.startswith("clean-") for value in responses):
             margins = [1.0, -1.0, 1.0, -1.0]
         elif all(value.startswith("candidate-") for value in responses):
             margins = [-1.0, -1.0, 0.5, -1.0]
@@ -98,7 +103,9 @@ def _profile() -> dict[str, object]:
     }
 
 
-def test_one_trial_phase_produces_all_metrics_and_private_records(tmp_path: Path) -> None:
+def test_one_trial_phase_produces_all_metrics_and_private_records(
+    tmp_path: Path,
+) -> None:
     rows = _rows(tmp_path)
     model = _FakeModel(rows)
     scorer = _FakeSRG()
@@ -120,11 +127,12 @@ def test_one_trial_phase_produces_all_metrics_and_private_records(tmp_path: Path
         residual_capture=lambda prompts, residuals: captured.append(
             (len(prompts), tuple(residuals.shape))
         ),
+        max_response_length=100,
     )
 
     assert model.generation_phases == 1
     assert model.nll_calls == 1
-    assert scorer.calls == 2
+    assert scorer.calls == 4
     assert captured == [(8, (8, 2, 2))]
     assert measurement.metrics.srg_gain > 0.0
     assert measurement.metrics.r_gain > 0.0
@@ -138,8 +146,16 @@ def test_one_trial_phase_produces_all_metrics_and_private_records(tmp_path: Path
     assert public["safe_rows"] == 4
     assert public["unsafe_rows"] == 4
     assert public["diagnostics"]["srg_groups"]["worst_language"] <= 1.0
+    assert public["diagnostics"]["hard_gates"] == {
+        "empty_response_rate": 0.0,
+        "truncated_response_rate": 0.0,
+        "safe_d_to_r_rate": 0.25,
+    }
     assert set(public["diagnostics"]["srg_groups"]["languages"]) == {"en", "ru"}
-    records = [json.loads(line) for line in private_path.read_text(encoding="utf-8").splitlines()]
+    records = [
+        json.loads(line)
+        for line in private_path.read_text(encoding="utf-8").splitlines()
+    ]
     assert len(records) == 8
     assert records[0]["trial_number"] == 17
     assert records[0]["prompt"].startswith("private-")

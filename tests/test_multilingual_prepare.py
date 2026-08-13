@@ -12,10 +12,10 @@ from heretic.language_map_directions import (
     write_direction_map_package,
 )
 from heretic.multilingual_contract import MultilingualDatasetBundle
-from heretic.multilingual_prepare import freeze_srg_calibration_package
 from heretic.multilingual_prepare import (
     fingerprint_local_model,
     freeze_direction_package,
+    freeze_srg_calibration_package,
     prepare_clean_reference_runtime,
     prepare_static_multilingual_runtime,
 )
@@ -27,7 +27,9 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_srg_package_is_copied_portably_and_rewrites_external_paths(tmp_path: Path) -> None:
+def test_srg_package_is_copied_portably_and_rewrites_external_paths(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "source"
     source_private = source / "private"
     source_private.mkdir(parents=True)
@@ -150,6 +152,7 @@ def _bundle() -> MultilingualDatasetBundle:
             "status": "PASS",
             "contract_sha256": "a" * 64,
             "counts": {"trial": len(rows)},
+            "rows_per_cell": {"srg_calibration": 132},
         },
     )
 
@@ -161,13 +164,18 @@ def test_direction_package_is_copied_and_verified_portably(tmp_path: Path) -> No
     manifest = freeze_direction_package(source, destination)
 
     assert manifest["status"] == "PASS"
-    assert manifest["package_sha256"] == json.loads(
-        (source / "manifest.json").read_text(encoding="utf-8")
-    )["package_sha256"]
+    assert (
+        manifest["package_sha256"]
+        == json.loads((source / "manifest.json").read_text(encoding="utf-8"))[
+            "package_sha256"
+        ]
+    )
     assert freeze_direction_package(source, destination) == manifest
 
 
-def test_static_runtime_freezes_dataset_direction_srg_and_schedule(tmp_path: Path) -> None:
+def test_static_runtime_freezes_dataset_direction_srg_and_schedule(
+    tmp_path: Path,
+) -> None:
     runtime = tmp_path / "runtime"
 
     manifest = prepare_static_multilingual_runtime(
@@ -192,16 +200,19 @@ def test_static_runtime_freezes_dataset_direction_srg_and_schedule(tmp_path: Pat
         field in json.dumps(manifest).lower()
         for field in ('"prompt"', '"response"', '"answer"', '"text"')
     )
-    assert prepare_static_multilingual_runtime(
-        bundle=_bundle(),
-        direction_source=tmp_path / "direction-source",
-        srg_source=tmp_path / "srg-source",
-        runtime_root=runtime,
-        languages=("en", "ru", "zh", "es", "fr"),
-        schedule_seed=17,
-        schedule_capacity=10,
-        expected_per_direction=5,
-    ) == manifest
+    assert (
+        prepare_static_multilingual_runtime(
+            bundle=_bundle(),
+            direction_source=tmp_path / "direction-source",
+            srg_source=tmp_path / "srg-source",
+            runtime_root=runtime,
+            languages=("en", "ru", "zh", "es", "fr"),
+            schedule_seed=17,
+            schedule_capacity=10,
+            expected_per_direction=5,
+        )
+        == manifest
+    )
 
 
 class _ReferenceModel:
@@ -247,17 +258,22 @@ def test_clean_reference_runtime_uses_full_trial_archive_once(tmp_path: Path) ->
     assert manifest["status"] == "PASS"
     assert manifest["rows"] == len(bundle.trial_rows)
     assert manifest["safe_rows_with_nll"] == len(bundle.trial_rows) // 2
-    assert prepare_clean_reference_runtime(
-        bundle=bundle,
-        runtime_root=runtime,
-        model=_ReferenceModel(),
-        model_fingerprint="model-fingerprint",
-        max_response_length=512,
-        batch_size=7,
-    ) == manifest
+    assert (
+        prepare_clean_reference_runtime(
+            bundle=bundle,
+            runtime_root=runtime,
+            model=_ReferenceModel(),
+            model_fingerprint="model-fingerprint",
+            max_response_length=512,
+            batch_size=7,
+        )
+        == manifest
+    )
 
 
-def test_local_model_fingerprint_hashes_weights_and_runtime_metadata(tmp_path: Path) -> None:
+def test_local_model_fingerprint_hashes_weights_and_runtime_metadata(
+    tmp_path: Path,
+) -> None:
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_bytes(b"config-v1")
@@ -272,6 +288,7 @@ def test_local_model_fingerprint_hashes_weights_and_runtime_metadata(tmp_path: P
     assert first["files"] == 2
     assert len(first["model_fingerprint"]) == 64
     (model / "model-00001-of-00001.safetensors").write_bytes(b"weights-v2")
-    assert fingerprint_local_model(model)["model_fingerprint"] != first[
-        "model_fingerprint"
-    ]
+    assert (
+        fingerprint_local_model(model)["model_fingerprint"]
+        != first["model_fingerprint"]
+    )

@@ -55,7 +55,9 @@ def _assert_text_free(value: object) -> None:
     if isinstance(value, dict):
         for key, nested in value.items():
             if str(key).strip().lower() in _FORBIDDEN_PUBLIC_KEYS:
-                raise ValueError(f"public runtime manifest contains forbidden field {key}")
+                raise ValueError(
+                    f"public runtime manifest contains forbidden field {key}"
+                )
             _assert_text_free(nested)
     elif isinstance(value, (list, tuple)):
         for nested in value:
@@ -248,9 +250,13 @@ def prepare_static_multilingual_runtime(
         direction_source,
         root / "clean_map" / "directions",
     )
-    expected_srg_rows = (
-        len(normalized_languages)
-        * int(bundle.manifest["rows_per_cell"]["srg_calibration"])
+    rows_per_cell = bundle.manifest.get("rows_per_cell")
+    if not isinstance(rows_per_cell, dict) or "srg_calibration" not in rows_per_cell:
+        raise ValueError(
+            "multilingual dataset manifest is missing rows_per_cell.srg_calibration"
+        )
+    expected_srg_rows = len(normalized_languages) * int(
+        rows_per_cell["srg_calibration"]
     )
     srg_manifest = freeze_srg_calibration_package(
         srg_source,
@@ -277,9 +283,7 @@ def prepare_static_multilingual_runtime(
     )
     dataset_manifest_path = root / "dataset" / "manifest.json"
     if dataset_manifest_path.is_file():
-        existing_dataset = json.loads(
-            dataset_manifest_path.read_text(encoding="utf-8")
-        )
+        existing_dataset = json.loads(dataset_manifest_path.read_text(encoding="utf-8"))
         if existing_dataset != bundle.manifest:
             raise ValueError("existing frozen dataset manifest differs")
     else:
@@ -292,9 +296,7 @@ def prepare_static_multilingual_runtime(
         "direction_package_sha256": str(direction_manifest["package_sha256"]),
         "srg_profile_sha256": str(srg_manifest["calibration_profile_sha256"]),
         "srg_prompt_rows": int(srg_manifest["prompt_rows"]),
-        "schedule_contract_sha256": str(
-            schedule_manifest["schedule_contract_sha256"]
-        ),
+        "schedule_contract_sha256": str(schedule_manifest["schedule_contract_sha256"]),
         "schedule_trials": int(schedule_manifest["trials"]),
         "rows_per_trial": int(schedule_manifest["rows_per_trial"]),
         "languages": list(normalized_languages),
@@ -326,11 +328,9 @@ def prepare_clean_reference_runtime(
     if not static_manifest_path.is_file():
         raise FileNotFoundError(static_manifest_path)
     static_manifest = json.loads(static_manifest_path.read_text(encoding="utf-8"))
-    if (
-        static_manifest.get("status") != "PASS"
-        or static_manifest.get("dataset_contract_sha256")
-        != bundle.manifest.get("contract_sha256")
-    ):
+    if static_manifest.get("status") != "PASS" or static_manifest.get(
+        "dataset_contract_sha256"
+    ) != bundle.manifest.get("contract_sha256"):
         raise ValueError("static runtime and dataset bundle differ")
     profile, direction_manifest = load_direction_map_package(
         root / "clean_map" / "directions"

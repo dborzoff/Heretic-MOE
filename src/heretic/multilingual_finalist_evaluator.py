@@ -4,9 +4,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from torch import Tensor
 
@@ -61,10 +62,13 @@ class MultilingualFinalistEvaluator:
             srg_scorer=self.srg_scorer,
             srg_profile=self.srg_profile,
             private_records_path=(
-                self.private_output_dir / "trial_pool" / f"trial-{trial_number:06d}.jsonl"
+                self.private_output_dir
+                / "trial_pool"
+                / f"trial-{trial_number:06d}.jsonl"
             ),
             expected_per_direction=self.expected_per_direction,
             expected_languages=self.expected_languages,
+            max_response_length=self.final_max_new_tokens,
             residual_capture=residual_capture,
         )
         final = evaluate_final_holdout(
@@ -77,7 +81,9 @@ class MultilingualFinalistEvaluator:
             srg_scorer=self.srg_scorer,
             srg_profile=self.srg_profile,
             private_records_path=(
-                self.private_output_dir / "final_holdout" / f"trial-{trial_number:06d}.jsonl"
+                self.private_output_dir
+                / "final_holdout"
+                / f"trial-{trial_number:06d}.jsonl"
             ),
             max_response_length=self.final_max_new_tokens,
         )

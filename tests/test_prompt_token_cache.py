@@ -205,6 +205,34 @@ def test_compiled_backend_prewarm_covers_full_and_tail_batch_shapes() -> None:
     assert calls == [4, 2]
 
 
+def test_compiled_backend_prewarm_covers_search_and_finalist_tail_shapes() -> None:
+    wrapper = _wrapper()
+    wrapper.settings.generation_backend = "compiled_static"
+    wrapper.settings.generation_prompt_bucket_multiple = 32
+    wrapper.settings.batch_size = 40
+    prompts = [Prompt(system="", user=f"row-{index}") for index in range(10)]
+    calls: list[int] = []
+
+    def capture(prompts, **_kwargs):
+        calls.append(len(prompts))
+        return (
+            ["ok"] * len(prompts),
+            [[7]] * len(prompts),
+            torch.zeros((len(prompts), 1, 1)),
+        )
+
+    wrapper.get_response_artifacts_with_prefill_residuals = capture
+
+    result = wrapper.prewarm_generation_backend(
+        prompts,
+        expected_rows=(800, 4000, 660),
+    )
+
+    assert result["status"] == "PASS"
+    assert result["shapes"] == [[40, 32], [20, 32]]
+    assert calls == [40, 20]
+
+
 def test_batched_artifact_progress_reports_completed_rows() -> None:
     wrapper = _wrapper()
     wrapper.settings.batch_size = 2

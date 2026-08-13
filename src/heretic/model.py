@@ -44,6 +44,10 @@ from .teacher_forced import per_row_conditional_nll
 from .utils import Prompt, batchify, format_exception, print
 
 
+class ModelLoadError(RuntimeError):
+    """All configured dtypes failed to load the model."""
+
+
 def get_model_class(
     model: str,
 ) -> type[AutoModelForImageTextToText] | type[AutoModelForCausalLM]:
@@ -259,7 +263,7 @@ class Model:
                     ],
                     max_new_tokens=1,
                 )
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - dtype fallback must intercept any model-load failure
                 self.model = None  # ty:ignore[invalid-assignment]
                 empty_cache()
 
@@ -277,7 +281,7 @@ class Model:
             break
 
         if self.model is None:
-            raise Exception("Failed to load model with all configured dtypes.")
+            raise ModelLoadError("Failed to load model with all configured dtypes.")
 
         self._apply_lora()
 
@@ -589,14 +593,28 @@ class Model:
 
     def _has_fused_experts(self) -> bool:
         """Return whether any layer stores experts as a batched 3D parameter."""
-        for layer in self.get_layers():
-            mlp = getattr(layer, "mlp", None)
-            experts = getattr(mlp, "experts", None)
-            if experts is not None and isinstance(
-                getattr(experts, "down_proj", None), torch.nn.Parameter
-            ):
-                return True
-        return False
+        return next(self._iter_fused_expert_parameters(), None) is not None
+
+    def _iter_fused_expert_parameters(self):
+        """Yield supported fused routed-expert output projections once."""
+
+        seen: set[int] = set()
+        for layer_index, layer in enumerate(self.get_layers()):
+            for block_name in ("mlp", "block_sparse_moe", "feed_forward", "moe"):
+                block = getattr(layer, block_name, None)
+                experts = getattr(block, "experts", None)
+                if experts is None:
+                    continue
+                for param_name in ("down_proj", "w2", "output_linear"):
+                    fused = getattr(experts, param_name, None)
+                    if (
+                        isinstance(fused, torch.nn.Parameter)
+                        and fused.dim() == 3
+                        and id(fused) not in seen
+                    ):
+                        seen.add(id(fused))
+                        yield layer_index, fused
+                        break
 
     def abliterate(
         self,
@@ -870,27 +888,9 @@ class Model:
         params = parameters["mlp.experts.down_proj"]
         try:
             hidden = self.model.config.get_text_config().hidden_size
-        except Exception:
+        except (AttributeError, TypeError):
             hidden = getattr(self.model.config, "hidden_size", None)
-        for layer_index, layer in enumerate(self.get_layers()):
-            # Locate the experts container across the architectures Heretic supports.
-            experts = None
-            for block_name in ("mlp", "block_sparse_moe", "feed_forward", "moe"):
-                block = getattr(layer, block_name, None)
-                if block is not None:
-                    experts = getattr(block, "experts", None)
-                    if experts is not None:
-                        break
-            if experts is None:
-                continue
-            # The fused down-projection may be named differently across families.
-            fused = None
-            for param_name in ("down_proj", "w2", "output_linear"):
-                fused = getattr(experts, param_name, None)
-                if fused is not None:
-                    break
-            if not isinstance(fused, torch.nn.Parameter) or fused.dim() != 3:
-                continue
+        for layer_index, fused in self._iter_fused_expert_parameters():
             # Expect [num_experts, out=hidden, in=inter]; skip on unexpected orientation.
             if hidden is not None and fused.shape[1] != hidden:
                 continue
@@ -1172,9 +1172,7 @@ class Model:
         ) and max_new_tokens > 1:
             from transformers.generation.configuration_utils import CompileConfig
 
-            mode = str(
-                getattr(self.settings, "generation_compile_mode", "default")
-            )
+            mode = str(getattr(self.settings, "generation_compile_mode", "default"))
             compile_config = getattr(self, "_generation_compile_config", None)
             if compile_config is None or compile_config.mode != mode:
                 compile_config = CompileConfig(mode=mode)
@@ -1214,13 +1212,14 @@ class Model:
         prompts: list[Prompt],
         skip_special_tokens: bool = False,
     ) -> list[str]:
-        responses = []
+        responses: list[str] = []
         for batch in batchify(prompts, self.settings.batch_size):
-            for response in self.get_responses(
-                batch,
-                skip_special_tokens=skip_special_tokens,
-            ):
-                responses.append(response)
+            responses.extend(
+                self.get_responses(
+                    batch,
+                    skip_special_tokens=skip_special_tokens,
+                )
+            )
 
         return responses
 
@@ -1402,7 +1401,7 @@ class Model:
         self,
         prompts: Sequence[Prompt],
         *,
-        expected_rows: int | None = None,
+        expected_rows: int | Sequence[int] | None = None,
     ) -> dict[str, object]:
         """Compile each resident generation shape once before timed trials."""
 
@@ -1418,9 +1417,18 @@ class Model:
             return {"status": "DISABLED", "batch_size": 0, "shapes": []}
         if not prompts:
             raise ValueError("generation prewarm requires at least one prompt")
-        row_count = len(prompts) if expected_rows is None else int(expected_rows)
-        if row_count <= 0:
-            raise ValueError("expected_rows must be positive")
+        row_counts = (
+            (len(prompts),)
+            if expected_rows is None
+            else (
+                (int(expected_rows),)
+                if isinstance(expected_rows, int)
+                else tuple(int(value) for value in expected_rows)
+            )
+        )
+        if not row_counts or any(row_count <= 0 for row_count in row_counts):
+            raise ValueError("expected_rows must contain positive row counts")
+        row_count = max(row_counts)
         configured = int(self.settings.batch_size)
         automatic = configured == 0
         batch_size = configured or int(
@@ -1444,14 +1452,16 @@ class Model:
             by_width.setdefault(padded_width(row), []).append(prompt)
 
         while True:
-            tail_size = row_count % batch_size
+            tail_sizes = sorted(
+                {count % batch_size for count in row_counts if count % batch_size}
+            )
             shapes: list[tuple[int, int, list[Prompt]]] = []
             for width, candidates in sorted(by_width.items()):
                 sample = [
                     candidates[index % len(candidates)] for index in range(batch_size)
                 ]
                 shapes.append((batch_size, width, sample))
-            if tail_size:
+            for tail_size in tail_sizes:
                 width = max(by_width)
                 candidates = by_width[width]
                 sample = [
@@ -1489,9 +1499,7 @@ class Model:
             key=lambda index: int(prompt_rows[index].numel()),
             reverse=True,
         )
-        sample = [
-            prompts[longest[index % len(longest)]] for index in range(batch_size)
-        ]
+        sample = [prompts[longest[index % len(longest)]] for index in range(batch_size)]
         widths = [int(row.numel()) for row in self._cached_prompt_token_ids(sample)]
         width = max(widths)
         bucket_multiple = int(
@@ -1523,7 +1531,7 @@ class Model:
             )
             torch.cuda.synchronize()
             measured_free, measured_total, measured_peak = self._cuda_memory_snapshot()
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 - restore CUDA state before re-raising OOM/interrupts
             probe_error = error
         finally:
             if generation_config is not None:
@@ -1535,9 +1543,10 @@ class Model:
             probe_error is None and baseline_total != measured_total
         ):
             raise RuntimeError("CUDA device memory total changed during batch probe")
-        tolerance = int(
-            getattr(self.settings, "generation_batch_recovery_tolerance_mib", 256)
-        ) * 1024**2
+        tolerance = (
+            int(getattr(self.settings, "generation_batch_recovery_tolerance_mib", 256))
+            * 1024**2
+        )
         if recovered_free + tolerance < baseline_free:
             leaked = (baseline_free - recovered_free) / 1024**2
             raise RuntimeError(

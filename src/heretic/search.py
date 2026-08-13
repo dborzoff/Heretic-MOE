@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Sequence
 
@@ -71,9 +72,8 @@ class StratifiedQMCSampler(QMCSampler):
         param_name: str,
         param_distribution,
     ):
-        if (
-            param_name == "direction_scope"
-            and isinstance(param_distribution, CategoricalDistribution)
+        if param_name == "direction_scope" and isinstance(
+            param_distribution, CategoricalDistribution
         ):
             choices = param_distribution.choices
             return choices[trial.number % len(choices)]
@@ -102,9 +102,8 @@ class QueueTaskQMCSampler(StratifiedQMCSampler):
         param_name: str,
         param_distribution,
     ):
-        if (
-            param_name == "direction_scope"
-            and isinstance(param_distribution, CategoricalDistribution)
+        if param_name == "direction_scope" and isinstance(
+            param_distribution, CategoricalDistribution
         ):
             choices = param_distribution.choices
             return choices[self._queue_sample_id % len(choices)]
@@ -364,11 +363,14 @@ class OptimizationRunner:
         queue_path: str,
         worker_id: str,
         callbacks: Sequence[StudyCallback] = (),
+        heartbeat_interval_seconds: float = 30.0,
     ) -> None:
         """Consume dynamically scheduled trials while keeping the model resident."""
 
         if not worker_id.strip():
             raise ValueError("worker_id cannot be empty")
+        if heartbeat_interval_seconds <= 0:
+            raise ValueError("heartbeat_interval_seconds must be positive")
         queue = TrialWorkQueue(queue_path)
         queue_contract = queue.contract()
         while True:
@@ -414,11 +416,42 @@ class OptimizationRunner:
                 target.append(trial)
 
             try:
-                study.optimize(
-                    queued_objective,
-                    n_trials=1,
-                    callbacks=[capture_trial, *callbacks],
+                stop_heartbeat = threading.Event()
+                heartbeat_errors: list[BaseException] = []
+
+                def renew_claim(
+                    *,
+                    queue_item=item,
+                    stop_event=stop_heartbeat,
+                    errors=heartbeat_errors,
+                    owner=worker_id,
+                ) -> None:
+                    while not stop_event.wait(heartbeat_interval_seconds):
+                        try:
+                            queue.heartbeat(queue_item, worker_id=owner)
+                        except Exception as error:  # noqa: BLE001 - rethrown on worker thread
+                            errors.append(error)
+                            return
+
+                heartbeat = threading.Thread(
+                    target=renew_claim,
+                    name=f"queue-heartbeat-{worker_id}",
+                    daemon=True,
                 )
+                heartbeat.start()
+                try:
+                    study.optimize(
+                        queued_objective,
+                        n_trials=1,
+                        callbacks=[capture_trial, *callbacks],
+                    )
+                finally:
+                    stop_heartbeat.set()
+                    heartbeat.join(timeout=max(1.0, heartbeat_interval_seconds))
+                if heartbeat_errors:
+                    raise RuntimeError("queue heartbeat failed") from heartbeat_errors[
+                        0
+                    ]
             except BaseException as error:
                 if finished and finished[-1].state == TrialState.COMPLETE:
                     trial = finished[-1]

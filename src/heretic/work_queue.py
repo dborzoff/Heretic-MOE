@@ -110,17 +110,13 @@ class TrialWorkQueue:
         if not 0 <= exploration_task_count <= task_count:
             raise ValueError("exploration_task_count must be within the task range")
         if target_trial_count != first_task_id + task_count:
-            raise ValueError(
-                "target_trial_count must equal first_task_id + task_count"
-            )
+            raise ValueError("target_trial_count must equal first_task_id + task_count")
         if tpe_concurrency <= 0:
             raise ValueError("tpe_concurrency must be positive")
         if journal_base_trial_count < 0:
             raise ValueError("journal_base_trial_count cannot be negative")
         if journal_base_complete_count != first_task_id:
-            raise ValueError(
-                "journal_base_complete_count must equal first_task_id"
-            )
+            raise ValueError("journal_base_complete_count must equal first_task_id")
         if journal_base_trial_count < journal_base_complete_count:
             raise ValueError(
                 "journal_base_trial_count cannot be below the completed count"
@@ -129,8 +125,7 @@ class TrialWorkQueue:
             raise ValueError("journal_base_size_bytes cannot be negative")
         normalized_base_sha256 = journal_base_sha256.strip().lower()
         if len(normalized_base_sha256) != 64 or any(
-            character not in "0123456789abcdef"
-            for character in normalized_base_sha256
+            character not in "0123456789abcdef" for character in normalized_base_sha256
         ):
             raise ValueError("journal_base_sha256 must be a SHA-256 hex digest")
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -158,6 +153,7 @@ class TrialWorkQueue:
                     worker_id TEXT,
                     attempt INTEGER NOT NULL DEFAULT 0,
                     claimed_at REAL,
+                    heartbeat_at REAL,
                     finished_at REAL,
                     trial_number INTEGER,
                     trial_state TEXT,
@@ -170,7 +166,7 @@ class TrialWorkQueue:
                 for row in connection.execute("SELECT key, value FROM queue_meta")
             }
             expected = {
-                "schema_version": "5",
+                "schema_version": "6",
                 "queue_seed": str(int(queue_seed)),
                 "first_task_id": str(first_task_id),
                 "task_count": str(task_count),
@@ -283,11 +279,12 @@ class TrialWorkQueue:
                 """
                 UPDATE tasks
                 SET state = 'claimed', worker_id = ?, attempt = ?, claimed_at = ?,
+                    heartbeat_at = ?,
                     finished_at = NULL, trial_number = NULL, trial_state = NULL,
                     error_type = NULL
                 WHERE task_id = ? AND state = 'pending'
                 """,
-                (worker_id, attempt, time.time(), task_id),
+                (worker_id, attempt, time.time(), time.time(), task_id),
             )
             connection.commit()
             return WorkItem(
@@ -303,12 +300,14 @@ class TrialWorkQueue:
         trial_number: int,
         trial_state: str,
     ) -> None:
+        if str(trial_state) != "COMPLETE":
+            raise ValueError("Only a COMPLETE Optuna trial can complete a queue permit")
         with closing(self._connect()) as connection:
             updated = connection.execute(
                 """
                 UPDATE tasks
                 SET state = 'complete', finished_at = ?, trial_number = ?,
-                    trial_state = ?
+                    trial_state = ?, heartbeat_at = NULL
                 WHERE task_id = ? AND state = 'claimed' AND attempt = ?
                 """,
                 (
@@ -328,7 +327,8 @@ class TrialWorkQueue:
             updated = connection.execute(
                 """
                 UPDATE tasks
-                SET state = ?, finished_at = ?, error_type = ?
+                SET state = ?, finished_at = ?, error_type = ?,
+                    worker_id = NULL, claimed_at = NULL, heartbeat_at = NULL
                 WHERE task_id = ? AND state = 'claimed' AND attempt = ?
                 """,
                 (state, time.time(), error_type, item.task_id, item.attempt),
@@ -344,11 +344,47 @@ class TrialWorkQueue:
                 """
                 UPDATE tasks
                 SET state = 'pending', worker_id = NULL, claimed_at = NULL,
+                    heartbeat_at = NULL,
                     error_type = 'worker_released'
                 WHERE state = 'claimed' AND worker_id = ?
                 """,
                 (worker_id,),
             ).rowcount
+
+    def heartbeat(self, item: WorkItem, *, worker_id: str) -> None:
+        """Renew one exact claim without weakening attempt fencing."""
+
+        with closing(self._connect()) as connection:
+            updated = connection.execute(
+                """
+                UPDATE tasks SET heartbeat_at = ?
+                WHERE task_id = ? AND state = 'claimed' AND attempt = ?
+                    AND worker_id = ?
+                """,
+                (time.time(), item.task_id, item.attempt, worker_id),
+            ).rowcount
+            if updated != 1:
+                raise RuntimeError(f"Lost queue claim for task {item.task_id}")
+
+    def stale_claimed_workers(self, *, lease_timeout_seconds: float) -> list[str]:
+        """Return workers whose current claim has stopped renewing its lease."""
+
+        if lease_timeout_seconds <= 0:
+            raise ValueError("lease_timeout_seconds must be positive")
+        cutoff = time.time() - float(lease_timeout_seconds)
+        with closing(self._connect_readonly()) as connection:
+            return [
+                str(row["worker_id"])
+                for row in connection.execute(
+                    """
+                    SELECT DISTINCT worker_id FROM tasks
+                    WHERE state = 'claimed' AND worker_id IS NOT NULL
+                        AND COALESCE(heartbeat_at, claimed_at, 0) < ?
+                    ORDER BY worker_id
+                    """,
+                    (cutoff,),
+                )
+            ]
 
     def claimed_workers(self) -> list[str]:
         """Return stable worker identifiers that still own queue claims."""
@@ -419,14 +455,10 @@ class TrialWorkQueue:
                 task_id=int(row["task_id"]),
                 task_kind=str(row["task_kind"]),
                 state=str(row["state"]),
-                worker_id=(
-                    None if row["worker_id"] is None else str(row["worker_id"])
-                ),
+                worker_id=(None if row["worker_id"] is None else str(row["worker_id"])),
                 attempt=int(row["attempt"]),
                 trial_number=(
-                    None
-                    if row["trial_number"] is None
-                    else int(row["trial_number"])
+                    None if row["trial_number"] is None else int(row["trial_number"])
                 ),
                 trial_state=(
                     None if row["trial_state"] is None else str(row["trial_state"])

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from optuna.study import StudyDirection
 import pytest
+from optuna.study import StudyDirection
 
 from heretic.multilingual_search_evaluator import (
     MultilingualConstraintContract,
@@ -38,7 +38,14 @@ def _measurement() -> TrialMeasurement:
         safe_rows=400,
         unsafe_rows=400,
         metrics=metrics,
-        diagnostics={"coverage": {"rows": 800}},
+        diagnostics={
+            "coverage": {"rows": 800},
+            "hard_gates": {
+                "empty_response_rate": 0.0,
+                "truncated_response_rate": 0.01,
+                "safe_d_to_r_rate": 0.02,
+            },
+        },
         private_records_sha256="a" * 64,
     )
 
@@ -52,6 +59,9 @@ def test_adapter_exposes_two_objectives_cost_and_frozen_constraints() -> None:
             max_safe_geometry_damage=0.25,
             max_language_instability=0.15,
             max_category_instability=0.10,
+            max_empty_response_rate=0.01,
+            max_truncated_response_rate=0.05,
+            max_safe_d_to_r_rate=0.03,
         ),
     )
 
@@ -77,9 +87,12 @@ def test_adapter_exposes_two_objectives_cost_and_frozen_constraints() -> None:
         "Safe geometry damage <= 0.25",
         "Language instability <= 0.15",
         "Category instability <= 0.1",
+        "Empty response rate <= 0.01",
+        "Truncated response rate <= 0.05",
+        "SAFE D->R rate <= 0.03",
     ]
     assert evaluator.get_constraint_values(scores) == pytest.approx(
-        (-0.01, -0.05, -0.05, -0.05)
+        (-0.01, -0.05, -0.05, -0.05, -0.01, -0.04, -0.01)
     )
     records = evaluator.get_paired_score_records(scores)
     assert records[2]["score"]["value"] == _measurement().metrics.cost_up

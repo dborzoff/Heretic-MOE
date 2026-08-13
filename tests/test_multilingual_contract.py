@@ -177,15 +177,17 @@ def test_contract_sha_changes_when_a_source_file_changes(tmp_path: Path):
     )
 
     assert first.manifest["contract_sha256"] != second.manifest["contract_sha256"]
-    assert hashlib.sha256(manifest.read_bytes()).hexdigest() == second.manifest[
-        "source_manifests"
-    ]["dataset_manifest_sha256"]
+    assert (
+        hashlib.sha256(manifest.read_bytes()).hexdigest()
+        == second.manifest["source_manifests"]["dataset_manifest_sha256"]
+    )
 
 
 def test_frozen_run_contract_is_deterministic_and_text_free():
     contract = build_frozen_run_contract(
         dataset_contract_sha256="a" * 64,
         model_id="model-a",
+        model_fingerprint_sha256="d" * 64,
         model_revision="revision-a",
         tokenizer_revision="tokenizer-a",
         map_sha256="b" * 64,
@@ -197,19 +199,23 @@ def test_frozen_run_contract_is_deterministic_and_text_free():
         constraint_contract={"safe_ppl_drift_max": 0.01},
     )
 
-    assert contract["contract_sha256"] == build_frozen_run_contract(
-        dataset_contract_sha256="a" * 64,
-        model_id="model-a",
-        model_revision="revision-a",
-        tokenizer_revision="tokenizer-a",
-        map_sha256="b" * 64,
-        srg_profile_sha256="c" * 64,
-        schedule_seed=42,
-        schedule_version=2,
-        generation_contract={"ordinary_max_new_tokens": 512},
-        metric_contract={"version": 3},
-        constraint_contract={"safe_ppl_drift_max": 0.01},
-    )["contract_sha256"]
+    assert (
+        contract["contract_sha256"]
+        == build_frozen_run_contract(
+            dataset_contract_sha256="a" * 64,
+            model_id="model-a",
+            model_fingerprint_sha256="d" * 64,
+            model_revision="revision-a",
+            tokenizer_revision="tokenizer-a",
+            map_sha256="b" * 64,
+            srg_profile_sha256="c" * 64,
+            schedule_seed=42,
+            schedule_version=2,
+            generation_contract={"ordinary_max_new_tokens": 512},
+            metric_contract={"version": 3},
+            constraint_contract={"safe_ppl_drift_max": 0.01},
+        )["contract_sha256"]
+    )
     assert not ({"prompt", "response", "answer", "text"} & set(contract))
 
 
@@ -218,6 +224,7 @@ def test_resume_rejects_a_changed_frozen_contract(tmp_path: Path):
     original = build_frozen_run_contract(
         dataset_contract_sha256="a" * 64,
         model_id="model-a",
+        model_fingerprint_sha256="d" * 64,
         model_revision=None,
         tokenizer_revision=None,
         map_sha256="b" * 64,

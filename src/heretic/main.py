@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2025-2026  Philipp Emanuel Weidmann <pew@worldwidemann.com> + contributors
 
-# ruff: noqa: E402
 
 import sys
 from importlib.metadata import version
@@ -82,6 +81,7 @@ from rich.traceback import install
 from .analyzer import Analyzer
 from .config import ExportStrategy, QuantizationMethod, SelectionPolicy
 from .evaluator import Evaluator
+from .language_map_trajectory import TrialRecord
 from .model import AbliterationParameters, Model, get_model_class
 from .multilingual_runtime import (
     apply_multilingual_search_mode,
@@ -98,13 +98,11 @@ from .search import OptimizationRunner, record_trial_constraints
 from .study_diagnostics import make_parameter_importance_callbacks
 from .system import empty_cache, get_accelerator_info
 from .trial_geometry_capture import TrialGeometrySession
-from .language_map_trajectory import TrialRecord
 from .trial_selection import (
     candidate_trials,
     selection_cost_value,
     trial_selection_costs,
 )
-from .work_queue import TrialWorkQueue
 from .utils import (
     Prompt,
     ask_if_unset,
@@ -119,6 +117,7 @@ from .utils import (
     print_memory_usage,
     upload_reproduce_folder,
 )
+from .work_queue import TrialWorkQueue
 
 _ALWAYS_RUNTIME_FIELDS = (
     "save_directory",
@@ -135,6 +134,7 @@ _ALWAYS_RUNTIME_FIELDS = (
     "worker_trial_budget",
     "worker_queue_path",
     "worker_id",
+    "worker_heartbeat_interval_seconds",
     "seed",
     "save_trial_responses",
     "trial_responses_file",
@@ -347,7 +347,7 @@ def obtain_export_strategy(
                 print(
                     f"[yellow]Estimated RAM required (excluding overhead): [bold]~{footprint_gb:.2f} GB[/][/]"
                 )
-        except Exception:
+        except Exception:  # noqa: BLE001 - RAM estimate is best-effort; any meta-load failure uses the fallback rule
             # Fallback if meta loading fails (e.g. owing to custom model code
             # or bitsandbytes quantization config issues on the meta device).
             print(
@@ -440,7 +440,7 @@ def run():
 
         print()
         print(
-            "Run [bold]hereticMOE --help[/] or see [bold]config.default.toml[/] for details about configuration parameters."
+            "Run [bold]hereticMOE --help[/] or see [bold]config.yaml[/] for details about configuration parameters."
         )
         return
 
@@ -461,12 +461,10 @@ def run():
         # rejected rather than silently failing on a missing key later.
         if reproduction_information["version"] != "3":
             print(
-                (
-                    f"[red]Unsupported file format version: [bold]{reproduction_information['version']}[/].[/] "
-                    "This version of Heretic reads version 3 (plugin scorer) reproduce.json files. "
-                    "Older files were produced before the scorer-plugin refactor and are not supported. "
-                    "Please install Heretic 1.4 to use these files."
-                )
+                f"[red]Unsupported file format version: [bold]{reproduction_information['version']}[/].[/] "
+                "This version of Heretic reads version 3 (plugin scorer) reproduce.json files. "
+                "Older files were produced before the scorer-plugin refactor and are not supported. "
+                "Please install Heretic 1.4 to use these files."
             )
             return
 
@@ -552,12 +550,10 @@ def run():
             if settings.checkpoint_action is None:
                 print()
                 print(
-                    (
-                        "[green]You have already processed this model.[/] "
-                        "You can show the results from the previous run, allowing you to export models or to run additional trials. "
-                        "Alternatively, you can ignore the previous run and start from scratch. "
-                        "This will delete the checkpoint file and all results from the previous run."
-                    )
+                    "[green]You have already processed this model.[/] "
+                    "You can show the results from the previous run, allowing you to export models or to run additional trials. "
+                    "Alternatively, you can ignore the previous run and start from scratch. "
+                    "This will delete the checkpoint file and all results from the previous run."
                 )
 
             choices.append(
@@ -570,12 +566,10 @@ def run():
             if settings.checkpoint_action is None:
                 print()
                 print(
-                    (
-                        "[yellow]You have already processed this model, but the run was interrupted.[/] "
-                        "You can continue the previous run from where it stopped. This will override any specified settings. "
-                        "Alternatively, you can ignore the previous run and start from scratch. "
-                        "This will delete the checkpoint file and all results from the previous run."
-                    )
+                    "[yellow]You have already processed this model, but the run was interrupted.[/] "
+                    "You can continue the previous run from where it stopped. This will override any specified settings. "
+                    "Alternatively, you can ignore the previous run and start from scratch. "
+                    "This will delete the checkpoint file and all results from the previous run."
                 )
 
             choices.append(
@@ -625,7 +619,7 @@ def run():
             # journal entirely; losing them turns an unattended run interactive.
             # These fields are archived in the journal, but an explicitly supplied
             # value is a legitimate continuation control. In particular,
-            # ``--n-trials 1000`` must extend a finished 600-trial study instead of
+            # ``n_trials=1000`` must extend a finished 600-trial study instead of
             # silently restoring the old target. Defaults are deliberately not
             # copied, so an ordinary ``checkpoint_action=continue`` remains exactly
             # reproducible.
@@ -930,12 +924,14 @@ def run():
         print("Prewarming resident generation backend...")
         prewarm = model.prewarm_generation_backend(
             resident_prompts,
-            expected_rows=resident_rows,
+            expected_rows=(
+                resident_rows,
+                len(multilingual_worker_runtime.bundle.trial_rows),
+                len(multilingual_worker_runtime.bundle.final_rows),
+            ),
         )
         if prewarm["status"] == "PASS":
-            shapes = ", ".join(
-                f"{batch}x{width}" for batch, width in prewarm["shapes"]
-            )
+            shapes = ", ".join(f"{batch}x{width}" for batch, width in prewarm["shapes"])
             print(
                 "* Compiled-static ready: "
                 f"batch [bold]{prewarm['batch_size']}[/], "
@@ -969,7 +965,7 @@ def run():
         print(
             "[red]No optimization objectives configured.[/] At least one scorer "
             'must set [bold]optimization[/] to "maximize" or "minimize". '
-            "See [bold]config.default.toml[/] for details."
+            "See [bold]config.yaml[/] for details."
         )
         return
 
@@ -1511,6 +1507,9 @@ def run():
                     objective_wrapper,
                     queue_path=settings.worker_queue_path,
                     worker_id=settings.worker_id,
+                    heartbeat_interval_seconds=(
+                        settings.worker_heartbeat_interval_seconds
+                    ),
                     callbacks=study_callbacks,
                 )
             elif settings.worker_trial_budget is None:
@@ -1584,7 +1583,11 @@ def run():
                 else {}
             )
 
-            def format_trial_title(trial: FrozenTrial) -> str:
+            def format_trial_title(
+                trial: FrozenTrial,
+                *,
+                costs=selection_costs,
+            ) -> str:
                 feasible = trial.user_attrs.get("feasible", not constraint_names)
                 status = "" if feasible else " · INFEASIBLE"
                 prefix = f"[{_trial_display_label(trial)}{status}]"
@@ -1597,7 +1600,7 @@ def run():
                     for part in _leaderboard_score_parts(score)
                 ]
                 if settings.selection_policy == SelectionPolicy.FEASIBLE_COST:
-                    penalty = selection_costs[trial.number]
+                    penalty = costs[trial.number]
                     score_parts.insert(0, _format_selection_cost(penalty))
 
                 return f"{prefix} " + " · ".join(score_parts)
@@ -1627,13 +1630,11 @@ def run():
             if settings.trial_index is None:
                 print()
                 print(
-                    (
-                        "The following trials resulted in Pareto optimal combinations of the optimization objectives. "
-                        "After selecting a trial, you will be able to save the model, upload it to Hugging Face, "
-                        "chat with it to test how well it works, or run standard benchmarks on it. "
-                        "You can return to this menu later to select a different trial. "
-                        "[yellow]Note that KL divergence values above 0.5 usually indicate significant damage to the original model's capabilities.[/]"
-                    )
+                    "The following trials resulted in Pareto optimal combinations of the optimization objectives. "
+                    "After selecting a trial, you will be able to save the model, upload it to Hugging Face, "
+                    "chat with it to test how well it works, or run standard benchmarks on it. "
+                    "You can return to this menu later to select a different trial. "
+                    "[yellow]Note that KL divergence values above 0.5 usually indicate significant damage to the original model's capabilities.[/]"
                 )
 
         while trial_loop_active:
@@ -1684,9 +1685,9 @@ def run():
 
                 trial = ask_if_unset(
                     selected_trial,
-                    lambda: questionary.select(
+                    lambda *, menu_choices=choices: questionary.select(
                         "Which trial do you want to use?",
-                        choices=choices,
+                        choices=menu_choices,
                         style=Style([("highlighted", "reverse")]),
                     ),
                 )
@@ -1747,16 +1748,16 @@ def run():
             # Per https://github.com/huggingface/peft/issues/868#issuecomment-1820642893
             # once a LoRA is merged it's expected to be empty. Provide a utility function
             # to restore the previous LoRA-ified state.
-            def reset_trial_model():
+            def reset_trial_model(selected=trial):
                 print("* Resetting model...")
                 model.reset_model()
                 print("* Abliterating...")
                 model.abliterate(
                     residual_directions,
-                    trial.user_attrs["direction_index"],
+                    selected.user_attrs["direction_index"],
                     {
                         k: AbliterationParameters(**v)
-                        for k, v in trial.user_attrs["parameters"].items()
+                        for k, v in selected.user_attrs["parameters"].items()
                     },
                 )
 
@@ -1909,9 +1910,9 @@ def run():
 
                             repo_id = ask_if_unset(
                                 settings.upload_repo_id,
-                                lambda: questionary.text(
+                                lambda *, account=user: questionary.text(
                                     "Name of repository:",
-                                    default=f"{user['name']}/{Path(settings.model).name}-heretic",
+                                    default=f"{account['name']}/{Path(settings.model).name}-heretic",
                                 ),
                             )
                             if not repo_id:
@@ -1968,13 +1969,11 @@ def run():
                             if is_reproducible:
                                 if settings.upload_reproducibility_information is None:
                                     print(
-                                        (
-                                            "Heretic can add information to the repository that allows others to reproduce the model. "
-                                            "This is optional, but valuable to the community as both a learning tool and to preserve computational work already done. "
-                                            "Guaranteeing reproducibility requires basic system information (Python and OS version, CPU and GPU/accelerator info) "
-                                            "as tensor operations can give different results in different system environments. "
-                                            "[bold]The information does not include any file system paths or other private data.[/]"
-                                        )
+                                        "Heretic can add information to the repository that allows others to reproduce the model. "
+                                        "This is optional, but valuable to the community as both a learning tool and to preserve computational work already done. "
+                                        "Guaranteeing reproducibility requires basic system information (Python and OS version, CPU and GPU/accelerator info) "
+                                        "as tensor operations can give different results in different system environments. "
+                                        "[bold]The information does not include any file system paths or other private data.[/]"
                                     )
 
                                 reproducibility_information = ask_if_unset(
@@ -2224,12 +2223,18 @@ def run():
                                         f"Running benchmark [bold]{benchmark.name}[/]..."
                                     )
 
-                                    def get_results() -> dict[str, Any]:
+                                    def get_results(
+                                        *,
+                                        lm=hflm,
+                                        current_benchmark=benchmark,
+                                    ) -> dict[str, Any]:
                                         results = lm_eval.simple_evaluate(
-                                            model=hflm,
-                                            tasks=[benchmark.task],
+                                            model=lm,
+                                            tasks=[current_benchmark.task],
                                         )
-                                        return results["results"][benchmark.task]
+                                        return results["results"][
+                                            current_benchmark.task
+                                        ]
 
                                     results = get_results()
                                     if benchmark_original_model:
@@ -2279,7 +2284,7 @@ def run():
                             if table.rows:
                                 print(table)
 
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - interactive action loop reports any action failure and continues
                     formatted = format_exception(error)
                     if "\n" in formatted:
                         print(f"[red]Error:\n{formatted}[/]")

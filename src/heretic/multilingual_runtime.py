@@ -209,6 +209,9 @@ def load_multilingual_worker_runtime(
         max_safe_geometry_damage=float(contract.max_safe_geometry_damage),
         max_language_instability=float(contract.max_language_instability),
         max_category_instability=float(contract.max_category_instability),
+        max_empty_response_rate=float(contract.max_empty_response_rate),
+        max_truncated_response_rate=float(contract.max_truncated_response_rate),
+        max_safe_d_to_r_rate=float(contract.max_safe_d_to_r_rate),
     )
     if contract.evaluation_phase == "finalist":
         evaluator, manifest = load_multilingual_finalist_evaluator(
@@ -357,6 +360,11 @@ def load_multilingual_search_evaluator(
         private_output_dir=private_output,
         expected_per_direction=expected_per_direction,
         expected_languages=expected_languages,
+        max_response_length=int(
+            expected_generation_contract.get("max_response_length", 100)
+        )
+        if expected_generation_contract is not None
+        else 100,
     )
     evaluator = MultilingualSearchEvaluator(
         frozen_runtime,

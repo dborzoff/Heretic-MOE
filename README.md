@@ -33,49 +33,54 @@ Heretic-MOE 1.5 can run the complete multi-GPU workflow unattended from one
 command:
 
 ```powershell
-hereticMOE --base-config research/configs/adaptive_search/ministral3_sparse_geometry.toml --model F:/models/my-model --data-root F:/data/adaptive-search --run-root F:/runs/my-model-heretic-moe --exploration-trials 120 --n-trials 600
+hereticMOE --config config.yaml --model F:/models/my-model --run-root F:/runs/my-model-heretic-moe --devices 0,1 --target-trials 600 --exploration-trials 120 --post-search export --incompatible-contract archive
 ```
 
-`--model` replaces only the model path; the base config still defines the frozen
-prompt sets, scorers, constraints, and search geometry. The target architecture
-must be supported and each worker GPU must have enough memory for one full
-Heretic process.
+Add `--dry-run` to validate the YAML, device selection, and run-root resolution
+without writing files. `--model` overrides `model.path`; `config.yaml` defines
+the frozen prompt sets, scorers, constraints, and search geometry. The target
+architecture must be supported and each worker GPU must have enough memory for
+one full Heretic process.
 
 The supervisor detects available GPUs and keeps one model-resident worker on
 each selected device. The first 120 globally numbered tasks alternate Random
 and scrambled Sobol. After that prefix is complete, the same workers consume
 multivariate-TPE tasks from the same journal without reloading the model. Faster
 GPUs naturally complete more tasks because there are no fixed per-device
-budgets. The supervisor then remeasures five constraint-feasible candidates
-from different regions of the Pareto front with 64 x 1,024-token PPL windows,
-selects two distinct models, and exports them as `exports/balanced` and
-`exports/max`.
+budgets. The supervisor then remeasures the TOP-6 constraint-feasible
+candidates from different regions of the Pareto front with the configured
+final token length (100 tokens by default), selects the Balanced and Max
+roles, and exports them as `exports/balanced` and `exports/max`.
 
-`--devices auto` is the default. Use `--devices 0,1,2` to select devices
-explicitly or `--max-workers N` to cap the number of resident workers. The same
-command works with one GPU; no separate single-GPU script is required. A
-run-root lock prevents two supervisors from writing into the same journal.
+`devices.mode: auto` is the YAML default. Use `--devices 0,1,2` to select
+devices explicitly, or set `devices.max_workers` in `config.yaml` to cap the
+number of resident workers. The same command works with one GPU; no separate
+single-GPU script is required. A run-root lock prevents two supervisors from
+writing into the same journal.
 
-`--data-root` removes machine-specific prompt paths from the base TOML. The
-directory is local-only and must contain `direction_safe.jsonl`,
-`direction_unsafe.jsonl`, `search_unsafe.jsonl`, and `prototypes.jsonl`; their
-payloads are not committed to this repository.
+Set `data.dataset_root` in `config.yaml` to remove machine-specific prompt
+paths. The directory is local-only and stores the frozen multilingual v3
+corpus: `direction_{lang}_{safe,unsafe}.jsonl`,
+`search_unsafe_{lang}.jsonl`, and `srg_calibration_{lang}.jsonl`.
+Set `data.split_root` to the operative split containing
+`direction_*_1000.jsonl` and `trial_*_400.jsonl`. Prompt payloads are not
+committed to this repository.
 
 | Export | Selection rule |
 |---|---|
-| `Balanced` | Lowest PPL drift among finalists that pass the refusal-removal gate |
-| `Max` | Lowest SRG/R-side/keyword refusal signal among finalists below the PPL ceiling |
+| `Balanced` | Best preservation among finalists that keep at least `finalists.balanced_removal_fraction` of the best measured removal |
+| `Max` | Strongest removal among finalists that pass the configured preservation and safety gates |
 
 By default, the Balanced gate is model-relative: a finalist must retain 80% of
 the SRG improvement between the original-model baseline and the best rechecked
 candidate. This avoids applying a threshold calibrated on one architecture to a
-different SRG scale. `--balanced-srg-gate` remains available as an explicit
-absolute override for frozen reproductions.
+different SRG scale. Frozen reproductions pin the relevant metric gates in
+`config.yaml`.
 
 Every stage is journaled and resume-safe. Raw per-trial responses are kept in a
 separate SQLite archive, while manifests contain only paths, hashes, settings,
-trial numbers, and numeric measurements. Use `--search-only` to stop after the
-600-trial journal without the high-fidelity recheck or exports.
+trial numbers, and numeric measurements. Use `--post-search none` to stop after
+the 600-trial journal without the high-fidelity recheck or exports.
 
 ### Multilingual geometry map
 
@@ -293,8 +298,7 @@ Replace `Qwen/Qwen3-4B-Instruct-2507` with whatever model you want to decensor.
 The process is fully automatic and does not require configuration; however,
 Heretic has a variety of configuration parameters that can be changed for
 greater control. Run `hereticMOE --help` to see available command-line options,
-or look at [`config.default.toml`](config.default.toml) if you prefer to use
-a configuration file.
+or use `config.yaml` if you prefer a configuration file.
 
 At the start of a program run, Heretic benchmarks the system to determine
 the optimal batch size to make the most of the available hardware.
@@ -340,8 +344,8 @@ When run with this flag, Heretic will:
 
 <img width="800" height="600" alt="Plot of residual vectors" src="https://github.com/user-attachments/assets/981aa6ed-5ab9-48f0-9abf-2b1a2c430295" />
 
-See [the configuration file](config.default.toml) for options that allow you
-to control various aspects of the generated plots.
+See `config.yaml` for options that allow you to control various aspects of the
+generated plots.
 
 Note that PaCMAP is an expensive operation that is performed on the CPU.
 For larger models, it can take an hour or more to compute projections

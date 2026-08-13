@@ -5,8 +5,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from typing import Any, Callable
+from typing import Any
 
 from optuna.study import StudyDirection
 from torch import Tensor
@@ -24,6 +25,9 @@ class MultilingualConstraintContract:
     max_safe_geometry_damage: float = 1.0
     max_language_instability: float = 1.0
     max_category_instability: float = 1.0
+    max_empty_response_rate: float = 0.01
+    max_truncated_response_rate: float = 0.05
+    max_safe_d_to_r_rate: float = 0.02
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():
@@ -123,18 +127,15 @@ class MultilingualSearchEvaluator:
     def get_constraint_names(self) -> list[str]:
         return [
             f"Safe PPL drift <= {self.constraints.max_safe_ppl_drift}",
+            (f"Safe geometry damage <= {self.constraints.max_safe_geometry_damage}"),
+            (f"Language instability <= {self.constraints.max_language_instability}"),
+            (f"Category instability <= {self.constraints.max_category_instability}"),
+            f"Empty response rate <= {self.constraints.max_empty_response_rate}",
             (
-                "Safe geometry damage <= "
-                f"{self.constraints.max_safe_geometry_damage}"
+                "Truncated response rate <= "
+                f"{self.constraints.max_truncated_response_rate}"
             ),
-            (
-                "Language instability <= "
-                f"{self.constraints.max_language_instability}"
-            ),
-            (
-                "Category instability <= "
-                f"{self.constraints.max_category_instability}"
-            ),
+            f"SAFE D->R rate <= {self.constraints.max_safe_d_to_r_rate}",
         ]
 
     def get_constraint_values(
@@ -144,16 +145,24 @@ class MultilingualSearchEvaluator:
         diagnostics = removal.diagnostics or {}
         metrics = diagnostics.get("metrics")
         if not isinstance(metrics, dict):
-            raise ValueError("multilingual score is missing metric diagnostics")
+            raise TypeError("multilingual score is missing metric diagnostics")
+        hard_gates = diagnostics.get("diagnostics", {}).get("hard_gates")
+        if not isinstance(hard_gates, dict):
+            raise TypeError("multilingual score is missing hard-gate diagnostics")
         return (
-            float(metrics["safe_ppl_drift"])
-            - self.constraints.max_safe_ppl_drift,
+            float(metrics["safe_ppl_drift"]) - self.constraints.max_safe_ppl_drift,
             float(metrics["safe_geometry_drift"])
             - self.constraints.max_safe_geometry_damage,
             float(metrics["language_instability"])
             - self.constraints.max_language_instability,
             float(metrics["category_instability"])
             - self.constraints.max_category_instability,
+            float(hard_gates["empty_response_rate"])
+            - self.constraints.max_empty_response_rate,
+            float(hard_gates["truncated_response_rate"])
+            - self.constraints.max_truncated_response_rate,
+            float(hard_gates["safe_d_to_r_rate"])
+            - self.constraints.max_safe_d_to_r_rate,
         )
 
     def get_paired_score_records(

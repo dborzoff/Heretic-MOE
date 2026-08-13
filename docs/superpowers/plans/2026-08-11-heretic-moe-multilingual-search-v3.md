@@ -35,7 +35,7 @@
 - [ ] Make batch selection verify the selected batch at the real 100-token length; prewarm ordinary, 4,000-row finalist and 660-row holdout shapes separately.
 - [ ] Wire the existing trajectory package and offline HTML renderer into the one-command search pipeline.
 - [ ] Add one-line aggregate N-GPU progress, worker heartbeat/lease recovery and controller-level duplicate-run locking.
-- [ ] Synchronize `config.default.toml`, active documentation, provenance including untracked files, lint and type checks for the production path.
+- [ ] Synchronize public `config.yaml` documentation, generated internal TOML provenance, untracked-file provenance, lint and type checks for the production path.
 - [ ] Verify with unit tests, N=1/2/4 controller tests, crash/resume tests, a two-GPU 10-12-trial smoke and only then a 120/600 real search.
 
 ### Task 1: Symmetric PPL preservation metric

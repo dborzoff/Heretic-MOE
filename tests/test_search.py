@@ -3,11 +3,12 @@
 
 import unittest
 import warnings
-from hashlib import sha256
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import sleep
+from unittest.mock import patch
 
 import optuna
 from optuna.exceptions import ExperimentalWarning
@@ -106,6 +107,45 @@ class OptimizationRunnerTests(unittest.TestCase):
             self.assertEqual(record.trial_state, "COMPLETE")
             self.assertEqual(len(study.trials), 1)
 
+    def test_queue_renews_and_stops_heartbeat_for_the_exact_claim(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            queue = self._single_task_queue(temporary_directory)
+            runner = OptimizationRunner(
+                startup_design=StartupDesign.HYBRID,
+                n_startup_trials=1,
+                seed=3,
+            )
+            study = optuna.create_study(direction="minimize")
+            heartbeat_claims: list[tuple[int, int, str]] = []
+            original_heartbeat = TrialWorkQueue.heartbeat
+
+            def record_heartbeat(
+                active_queue: TrialWorkQueue,
+                item,
+                *,
+                worker_id: str,
+            ) -> None:
+                heartbeat_claims.append((item.task_id, item.attempt, worker_id))
+                original_heartbeat(active_queue, item, worker_id=worker_id)
+
+            with patch.object(TrialWorkQueue, "heartbeat", record_heartbeat):
+                runner.optimize_queue(
+                    study,
+                    lambda _: sleep(0.04) or 1.0,
+                    queue_path=str(queue.path),
+                    worker_id="gpu-0",
+                    heartbeat_interval_seconds=0.005,
+                )
+                completed_count = len(heartbeat_claims)
+                sleep(0.02)
+
+            self.assertGreaterEqual(completed_count, 1)
+            self.assertEqual(len(heartbeat_claims), completed_count)
+            self.assertEqual(
+                set(heartbeat_claims),
+                {(0, queue.task_records()[0].attempt, "gpu-0")},
+            )
+
             runner.optimize_queue(
                 study,
                 lambda _: 2.0,
@@ -151,7 +191,9 @@ class OptimizationRunnerTests(unittest.TestCase):
 
         self.assertEqual(run(100), run(101))
 
-    def test_constraint_record_is_visible_to_every_sampler_before_completion(self) -> None:
+    def test_constraint_record_is_visible_to_every_sampler_before_completion(
+        self,
+    ) -> None:
         study = optuna.create_study(direction="minimize", sampler=RandomSampler(seed=3))
         trial = study.ask()
 
@@ -183,7 +225,10 @@ class OptimizationRunnerTests(unittest.TestCase):
             next_trial.suggest_float("x", 0.0, 1.0)
 
         self.assertFalse(
-            any("does not have constraint values" in str(item.message) for item in caught)
+            any(
+                "does not have constraint values" in str(item.message)
+                for item in caught
+            )
         )
         self.assertEqual(study.trials[0].system_attrs["constraints"], [0.125])
 

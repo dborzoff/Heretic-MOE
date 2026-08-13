@@ -79,6 +79,7 @@ def build_frozen_run_contract(
     *,
     dataset_contract_sha256: str,
     model_id: str,
+    model_fingerprint_sha256: str,
     model_revision: str | None,
     tokenizer_revision: str | None,
     map_sha256: str,
@@ -101,6 +102,9 @@ def build_frozen_run_contract(
             dataset_contract_sha256, "dataset_contract_sha256"
         ),
         "model_id": model_id,
+        "model_fingerprint_sha256": _validate_sha256(
+            model_fingerprint_sha256, "model_fingerprint_sha256"
+        ),
         "model_revision": model_revision,
         "tokenizer_revision": tokenizer_revision,
         "map_sha256": _validate_sha256(map_sha256, "map_sha256"),
@@ -128,7 +132,7 @@ def write_or_verify_frozen_contract(
     _assert_text_free_mapping(contract)
     expected_hash = contract.get("contract_sha256")
     if not isinstance(expected_hash, str):
-        raise RuntimeError("contract mismatch: missing contract_sha256")
+        raise TypeError("contract mismatch: missing contract_sha256")
     without_hash = {
         key: value for key, value in contract.items() if key != "contract_sha256"
     }
@@ -137,9 +141,7 @@ def write_or_verify_frozen_contract(
     if destination.exists():
         existing = json.loads(destination.read_text(encoding="utf-8"))
         if existing != contract:
-            raise RuntimeError(
-                f"contract mismatch for resume: {destination}"
-            )
+            raise RuntimeError(f"contract mismatch for resume: {destination}")
         return existing
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".tmp")
@@ -176,14 +178,12 @@ def _read_calibration_file(
                 continue
             value = json.loads(line)
             if not isinstance(value, dict):
-                raise ValueError(f"{path.name}:{line_number} must be a JSON object")
+                raise TypeError(f"{path.name}:{line_number} must be a JSON object")
             observed_language = _required_string(
                 value, "language", path, line_number
             ).lower()
             if observed_language != language:
-                raise ValueError(
-                    f"{path.name}:{line_number} language metadata drift"
-                )
+                raise ValueError(f"{path.name}:{line_number} language metadata drift")
             base_id = _required_string(value, "base_id", path, line_number)
             if base_id in seen_ids:
                 raise ValueError(f"{path.name}:{line_number} duplicate base_id")
@@ -202,9 +202,7 @@ def _read_calibration_file(
                 )
             )
     if len(rows) != expected_rows:
-        raise ValueError(
-            f"{path.name} expected {expected_rows} rows, got {len(rows)}"
-        )
+        raise ValueError(f"{path.name} expected {expected_rows} rows, got {len(rows)}")
     return rows
 
 
@@ -225,22 +223,16 @@ def _load_calibration_pool(
     }
     reference = by_language[languages[0]]
     reference_ids = [row.base_id for row in reference]
-    reference_categories = {
-        row.base_id: row.category_id for row in reference
-    }
+    reference_categories = {row.base_id: row.category_id for row in reference}
     output: list[CalibrationRow] = []
     seen_row_ids: set[str] = set()
     for language in languages:
         rows = by_language[language]
         if [row.base_id for row in rows] != reference_ids:
-            raise ValueError(
-                f"{filename_prefix}/{language} coverage or order drift"
-            )
+            raise ValueError(f"{filename_prefix}/{language} coverage or order drift")
         for row in rows:
             if reference_categories[row.base_id] != row.category_id:
-                raise ValueError(
-                    f"{filename_prefix}/{row.base_id} category drift"
-                )
+                raise ValueError(f"{filename_prefix}/{row.base_id} category drift")
             if row.row_id in seen_row_ids:
                 raise ValueError(f"{filename_prefix} duplicate row_id")
             seen_row_ids.add(row.row_id)
@@ -318,19 +310,21 @@ def load_multilingual_dataset_bundle(
         normalized_languages
     ):
         raise ValueError("languages must be a non-empty unique sequence")
-    if min(
-        direction_rows_per_cell,
-        trial_rows_per_cell,
-        calibration_rows_per_language,
-    ) <= 0:
+    if (
+        min(
+            direction_rows_per_cell,
+            trial_rows_per_cell,
+            calibration_rows_per_language,
+        )
+        <= 0
+    ):
         raise ValueError("all expected row counts must be positive")
 
     direction_files = [
         LanguageFile(
             language,
             direction,  # type: ignore[arg-type]
-            split
-            / f"direction_{language}_{direction}_{direction_rows_per_cell}.jsonl",
+            split / f"direction_{language}_{direction}_{direction_rows_per_cell}.jsonl",
         )
         for direction in ("safe", "unsafe")
         for language in normalized_languages
