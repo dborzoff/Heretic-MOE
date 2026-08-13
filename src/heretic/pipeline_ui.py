@@ -314,6 +314,26 @@ class PipelineUI:
         self._workers = {}
         return {"stage": self._stage, "status": status, "elapsed": _format_duration(elapsed)}
 
+    def result(
+        self,
+        label: object,
+        values: Mapping[object, object],
+    ) -> None:
+        """Print one compact, sanitized result line after a completed stage."""
+
+        self._require_open()
+        if not isinstance(values, Mapping):
+            raise TypeError("result values must be a mapping")
+        rendered: list[str] = []
+        for key, value in values.items():
+            if _sensitive_key(key):
+                continue
+            name = _clean_label(key, fallback="metric", max_length=48)
+            rendered.append(f"{name} {_public_value(value)}")
+        title = _clean_label(label, fallback="Result", max_length=48)
+        suffix = " | ".join(rendered) if rendered else "none"
+        self.console.print(f"  {title}: {suffix}", style="dim")
+
     def fail_stage(self, error: object | None = None) -> dict[str, str] | None:
         """Finish an active stage as failed without masking the original exception."""
 

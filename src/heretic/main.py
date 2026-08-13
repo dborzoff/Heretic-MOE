@@ -175,6 +175,48 @@ def _configure_supervised_model_events(
     model.set_batch_event_sink(sink)
 
 
+def _emit_cached_batch_revalidation(
+    model: Any,
+    *,
+    phase: str,
+    batch_size: int,
+    status: str | None = None,
+    free_bytes: int | None = None,
+) -> None:
+    """Expose cache revalidation through the same visible batch event stream."""
+
+    emit = getattr(model, "_emit_batch_event", None)
+    if not callable(emit):
+        return
+    if phase == "start":
+        emit(
+            "batch_validation",
+            "generation cache",
+            batch_size=int(batch_size),
+            max_new_tokens=100,
+        )
+        return
+    if phase == "result":
+        if status is None or free_bytes is None:
+            raise ValueError("cache validation result requires status and free_bytes")
+        emit(
+            "batch_validation_result",
+            "generation cache",
+            batch_size=int(batch_size),
+            status=str(status),
+            free_gib=round(int(free_bytes) / 1024**3, 3),
+        )
+        return
+    if phase == "selected":
+        emit(
+            "batch_selected",
+            "generation cache",
+            batch_size=int(batch_size),
+        )
+        return
+    raise ValueError(f"unsupported cached batch phase: {phase}")
+
+
 def _predict_next_batch_free_bytes(
     *,
     previous_free_bytes: int,
@@ -1029,10 +1071,22 @@ def run():
             )
             if cached is not None:
                 try:
+                    _emit_cached_batch_revalidation(
+                        model,
+                        phase="start",
+                        batch_size=int(cached["batch_size"]),
+                    )
                     revalidation = model.validate_generation_batch_size(
                         resident_prompts,
                         batch_size=int(cached["batch_size"]),
                         expected_rows=resident_rows,
+                    )
+                    _emit_cached_batch_revalidation(
+                        model,
+                        phase="result",
+                        batch_size=int(cached["batch_size"]),
+                        status=str(revalidation.get("status", "UNKNOWN")),
+                        free_bytes=int(revalidation.get("min_free_bytes", 0)),
                     )
                     if revalidation.get("status") != "PASS":
                         cached = None
@@ -1067,6 +1121,11 @@ def run():
                     "* Resident batch reused from runtime cache: "
                     f"[bold]{cached['batch_size']}[/] "
                     f"(contract {str(cached['contract_sha256'])[:12]}…)"
+                )
+                _emit_cached_batch_revalidation(
+                    model,
+                    phase="selected",
+                    batch_size=int(cached["batch_size"]),
                 )
             else:
                 tuning = model.autotune_generation_batch_size(

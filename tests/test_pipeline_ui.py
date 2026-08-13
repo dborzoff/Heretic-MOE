@@ -78,6 +78,31 @@ def test_tty_stage_summary_is_one_compact_result_line() -> None:
     assert "Metric" not in output
 
 
+def test_stage_can_print_compact_findings_after_summary() -> None:
+    console, _ = _console(terminal=True)
+    ui = PipelineUI(console=console, non_tty_update_interval=0.0)
+
+    ui.stage("Direction analysis", total=3)
+    ui.finish_stage(
+        {"status": "PASS", "rows": 10_000, "next": "Clean reference"}
+    )
+    ui.result(
+        "Found",
+        {
+            "layers": "6-36",
+            "strongest": "29,30,23",
+            "cross-lang": "94.9%",
+        },
+    )
+    ui.result("Report", {"HTML": "analysis/report.html"})
+    ui.close()
+
+    lines = [line.strip() for line in console.export_text(styles=False).splitlines()]
+    assert any(line.startswith("✓ PASS Direction analysis") for line in lines)
+    assert "Found: layers 6-36 | strongest 29,30,23 | cross-lang 94.9%" in lines
+    assert "Report: HTML analysis/report.html" in lines
+
+
 def test_non_tty_fallback_is_compact_and_text_private() -> None:
     console, stream = _console(terminal=False)
     ui = PipelineUI(console=console, non_tty_update_interval=0.0)

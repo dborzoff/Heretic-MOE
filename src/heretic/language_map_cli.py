@@ -625,9 +625,26 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
                 "analysis", completed=completed, total=total
             ),
         )
+        findings = result["findings"]
         analysis_ui.finish_stage(
-            {"status": result["status"], **result["findings"], "next": "Clean reference"}
+            {
+                "status": result["status"],
+                "rows": result["rows"],
+                "layers": result["layers"],
+                "next": "Clean reference",
+            }
         )
+        analysis_ui.result(
+            "Found",
+            {
+                "usable": findings["usable_layers"],
+                "strongest": findings["strongest_layers"],
+                "cross-lang": findings["cross_lang_stability"],
+                "separation": findings["peak_separation"],
+                "language loss": findings["largest_language_loss"],
+            },
+        )
+        analysis_ui.result("Report", {"HTML": findings["report"]})
     except BaseException as error:
         analysis_ui.fail_stage(error)
         raise

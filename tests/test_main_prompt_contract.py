@@ -114,3 +114,53 @@ def test_default_supervised_worker_event_sink_flushes_plain_json() -> None:
         _configure_supervised_model_events(FakeModel(), supervised=True)
 
     assert stream.getvalue() == '{"batch_size": 32, "event": "batch_probe"}\n'
+
+
+def test_cached_generation_batch_revalidation_emits_visible_events() -> None:
+    from heretic.main import _emit_cached_batch_revalidation
+
+    events: list[dict[str, object]] = []
+
+    class FakeModel:
+        def _emit_batch_event(self, event, mode, **values) -> None:
+            events.append({"event": event, "mode": mode, **values})
+
+    model = FakeModel()
+    _emit_cached_batch_revalidation(
+        model,
+        phase="start",
+        batch_size=168,
+    )
+    _emit_cached_batch_revalidation(
+        model,
+        phase="result",
+        batch_size=168,
+        status="PASS",
+        free_bytes=8 * 1024**3,
+    )
+    _emit_cached_batch_revalidation(
+        model,
+        phase="selected",
+        batch_size=168,
+    )
+
+    assert events == [
+        {
+            "event": "batch_validation",
+            "mode": "generation cache",
+            "batch_size": 168,
+            "max_new_tokens": 100,
+        },
+        {
+            "event": "batch_validation_result",
+            "mode": "generation cache",
+            "batch_size": 168,
+            "status": "PASS",
+            "free_gib": 8.0,
+        },
+        {
+            "event": "batch_selected",
+            "mode": "generation cache",
+            "batch_size": 168,
+        },
+    ]
