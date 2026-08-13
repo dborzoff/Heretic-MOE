@@ -167,7 +167,11 @@ def _configure_supervised_model_events(
     if not supervised:
         return
     if sink is None:
-        sink = lambda event: print(json.dumps(event, sort_keys=True), flush=True)
+        def emit(event: dict[str, object]) -> None:
+            sys.stdout.write(json.dumps(event, sort_keys=True) + "\n")
+            sys.stdout.flush()
+
+        sink = emit
     model.set_batch_event_sink(sink)
 
 

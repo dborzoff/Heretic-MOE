@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 def test_main_imports_prompt_used_by_multilingual_runtime() -> None:
@@ -98,3 +100,17 @@ def test_supervised_worker_wires_model_batch_events() -> None:
     )
 
     assert events == [{"event": "batch_probe", "batch_size": 32}]
+
+
+def test_default_supervised_worker_event_sink_flushes_plain_json() -> None:
+    from heretic.main import _configure_supervised_model_events
+
+    class FakeModel:
+        def set_batch_event_sink(self, sink) -> None:
+            sink({"event": "batch_probe", "batch_size": 32})
+
+    stream = io.StringIO()
+    with patch("sys.stdout", stream):
+        _configure_supervised_model_events(FakeModel(), supervised=True)
+
+    assert stream.getvalue() == '{"batch_size": 32, "event": "batch_probe"}\n'
