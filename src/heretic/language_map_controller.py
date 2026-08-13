@@ -99,8 +99,14 @@ def format_worker_event(prefix: str, event: Mapping[str, object]) -> str | None:
         return f"{prefix} Validating batch {batch_size} with {tokens} generated tokens..."
     if kind == "batch_validation_result":
         free_gib = float(event.get("free_gib", 0.0))
+        recovered_gib = event.get("recovered_gib")
         status = str(event.get("status", "unknown"))
-        return f"{prefix} Batch validation {status}: {batch_size}, {free_gib:.2f} GiB free"
+        if recovered_gib is not None:
+            return (
+                f"{prefix} Batch validation {status}: {batch_size}; "
+                f"min {free_gib:.2f} GiB, recovered {float(recovered_gib):.2f} GiB"
+            )
+        return f"{prefix} Batch validation {status}: {batch_size}; min {free_gib:.2f} GiB"
     if kind == "batch_selected":
         return f"{prefix} Batch selected ({mode}): {batch_size}"
     return None

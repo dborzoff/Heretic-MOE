@@ -182,6 +182,7 @@ def _emit_cached_batch_revalidation(
     batch_size: int,
     status: str | None = None,
     free_bytes: int | None = None,
+    recovered_bytes: int | None = None,
 ) -> None:
     """Expose cache revalidation through the same visible batch event stream."""
 
@@ -197,14 +198,17 @@ def _emit_cached_batch_revalidation(
         )
         return
     if phase == "result":
-        if status is None or free_bytes is None:
-            raise ValueError("cache validation result requires status and free_bytes")
+        if status is None or free_bytes is None or recovered_bytes is None:
+            raise ValueError(
+                "cache validation result requires status, free_bytes and recovered_bytes"
+            )
         emit(
             "batch_validation_result",
             "generation cache",
             batch_size=int(batch_size),
             status=str(status),
             free_gib=round(int(free_bytes) / 1024**3, 3),
+            recovered_gib=round(int(recovered_bytes) / 1024**3, 3),
         )
         return
     if phase == "selected":
@@ -1087,6 +1091,9 @@ def run():
                         batch_size=int(cached["batch_size"]),
                         status=str(revalidation.get("status", "UNKNOWN")),
                         free_bytes=int(revalidation.get("min_free_bytes", 0)),
+                        recovered_bytes=int(
+                            revalidation.get("recovered_free_bytes", 0)
+                        ),
                     )
                     if revalidation.get("status") != "PASS":
                         cached = None

@@ -205,3 +205,68 @@ def test_conditional_nll_retries_oom_raised_by_loss_materialization(
     assert len(values) == 4
     assert wrapper._adaptive_nll_batch_size == 2
     assert wrapper.model.batch_sizes[:2] == [4, 2]
+
+
+def test_conditional_nll_reduces_batch_until_vram_headroom_is_ten_percent(
+    monkeypatch,
+) -> None:
+    wrapper = object.__new__(Model)
+    wrapper.model = _CausalModel()
+    wrapper.tokenizer = _Tokenizer()
+    wrapper.settings = type(
+        "Settings",
+        (),
+        {
+            "batch_size": 1,
+            "conditional_nll_batch_size": 0,
+            "max_batch_size": 4,
+            "batch_size_vram_headroom_fraction": 0.10,
+            "batch_size_vram_headroom_gib": 0.0,
+        },
+    )()
+    wrapper._render_chat_prompts = lambda prompts: [prompt.user for prompt in prompts]
+    monkeypatch.setattr(model_module.torch.cuda, "is_available", lambda: True)
+    snapshots = iter(
+        [
+            (50, 1000, 0),
+            (200, 1000, 0),
+            (200, 1000, 0),
+        ]
+    )
+    monkeypatch.setattr(wrapper, "_cuda_memory_snapshot", lambda: next(snapshots))
+    monkeypatch.setattr(wrapper, "_release_failed_cuda_batch", lambda: None)
+
+    values = wrapper.get_conditional_nll(
+        [Prompt(system="", user=str(index)) for index in range(4)],
+        [[3, 4] for _ in range(4)],
+    )
+
+    assert len(values) == 4
+    assert wrapper._adaptive_nll_batch_size == 2
+    assert wrapper.model.batch_sizes[:2] == [4, 2]
+
+
+def test_automatic_conditional_nll_starts_from_quarter_generation_batch() -> None:
+    wrapper = object.__new__(Model)
+    wrapper.model = _CausalModel()
+    wrapper.tokenizer = _Tokenizer()
+    wrapper.settings = type(
+        "Settings",
+        (),
+        {
+            "batch_size": 1,
+            "conditional_nll_batch_size": 0,
+            "max_batch_size": 400,
+        },
+    )()
+    wrapper._adaptive_generation_batch_size = 176
+    wrapper._render_chat_prompts = lambda prompts: [prompt.user for prompt in prompts]
+
+    values = wrapper.get_conditional_nll(
+        [Prompt(system="", user=str(index)) for index in range(400)],
+        [[3, 4] for _ in range(400)],
+    )
+
+    assert len(values) == 400
+    assert wrapper.model.batch_sizes[0] == 44
+    assert wrapper._adaptive_nll_batch_size == 44

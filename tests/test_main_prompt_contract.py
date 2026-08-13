@@ -137,6 +137,7 @@ def test_cached_generation_batch_revalidation_emits_visible_events() -> None:
         batch_size=168,
         status="PASS",
         free_bytes=8 * 1024**3,
+        recovered_bytes=12 * 1024**3,
     )
     _emit_cached_batch_revalidation(
         model,
@@ -157,6 +158,7 @@ def test_cached_generation_batch_revalidation_emits_visible_events() -> None:
             "batch_size": 168,
             "status": "PASS",
             "free_gib": 8.0,
+            "recovered_gib": 12.0,
         },
         {
             "event": "batch_selected",

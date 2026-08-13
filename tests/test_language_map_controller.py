@@ -105,6 +105,23 @@ def test_batch_validation_event_explains_long_full_generation() -> None:
     ) == "[GPU 1] Validating batch 40 with 100 generated tokens..."
 
 
+def test_batch_validation_result_shows_minimum_and_recovered_vram() -> None:
+    assert format_worker_event(
+        "[GPU 1]",
+        {
+            "event": "batch_validation_result",
+            "mode": "generation",
+            "batch_size": 144,
+            "status": "PASS",
+            "free_gib": 4.12,
+            "recovered_gib": 14.12,
+        },
+    ) == (
+        "[GPU 1] Batch validation PASS: 144; "
+        "min 4.12 GiB, recovered 14.12 GiB"
+    )
+
+
 def test_worker_prewarm_phases_explain_compile_pause() -> None:
     assert format_worker_event(
         "[GPU 0]", {"event": "worker_phase", "phase": "prewarm"}

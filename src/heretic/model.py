@@ -1837,6 +1837,10 @@ class Model:
                 batch_size=candidate,
                 status=str(validation["status"]),
                 free_gib=round(int(validation["min_free_bytes"]) / 1024**3, 3),
+                recovered_gib=round(
+                    int(validation["recovered_free_bytes"]) / 1024**3,
+                    3,
+                ),
             )
             if validation["status"] == "PASS":
                 break
@@ -1927,7 +1931,22 @@ class Model:
         tuning = automatic and cached_batch_size <= 0
         batch_size = cached_batch_size if automatic else configured
         if batch_size <= 0:
-            batch_size = min(int(self.settings.max_batch_size), len(pairs))
+            generation_batch_size = int(
+                getattr(self, "_adaptive_generation_batch_size", 0)
+            )
+            if generation_batch_size > 0:
+                # Teacher-forced NLL materializes full-vocabulary logits for
+                # every token.  It therefore needs a substantially smaller
+                # starting point than autoregressive generation, even though
+                # both operate over the same prompt pool.
+                batch_size = max(1, generation_batch_size // 4)
+            else:
+                batch_size = int(
+                    getattr(self.settings, "generation_batch_probe_start", 8)
+                )
+            batch_size = min(
+                int(self.settings.max_batch_size), len(pairs), batch_size
+            )
         if tuning:
             self._emit_batch_event("batch_probe", "conditional NLL", batch_size=batch_size)
         values: list[float | None] = [None] * len(pairs)
@@ -1989,6 +2008,7 @@ class Model:
             attention_mask = cpu_attention_mask.to(device, non_blocking=pin_memory)
             labels = cpu_labels.to(device, non_blocking=pin_memory)
             outputs = None
+            measured_free = measured_total = 0
             try:
                 with torch.inference_mode():
                     outputs = self.model(
@@ -1997,6 +2017,8 @@ class Model:
                         use_cache=False,
                     )
                 batch_values = per_row_conditional_nll(outputs.logits, labels)
+                if automatic and torch.cuda.is_available():
+                    measured_free, measured_total, _ = self._cuda_memory_snapshot()
             except BaseException as error:
                 del input_ids, attention_mask, labels, outputs
                 if not automatic or batch_size == 1 or not self._is_cuda_oom(error):
@@ -2014,7 +2036,55 @@ class Model:
                 self._adaptive_nll_batch_size = batch_size
                 self._release_failed_cuda_batch()
                 continue
+            required_free = max(
+                int(
+                    float(
+                        getattr(
+                            self.settings,
+                            "batch_size_vram_headroom_gib",
+                            0.0,
+                        )
+                    )
+                    * 1024**3
+                ),
+                int(
+                    float(
+                        getattr(
+                            self.settings,
+                            "batch_size_vram_headroom_fraction",
+                            0.10,
+                        )
+                    )
+                    * measured_total
+                ),
+            )
+            if automatic and measured_free < required_free:
+                del input_ids, attention_mask, labels, outputs, batch_values
+                if batch_size == 1:
+                    self._release_failed_cuda_batch()
+                    raise RuntimeError(
+                        "conditional NLL cannot preserve the configured VRAM reserve "
+                        "at batch size 1"
+                    )
+                next_batch_size = max(1, batch_size // 2)
+                if tuning:
+                    self._emit_batch_event(
+                        "batch_backoff",
+                        "conditional NLL",
+                        batch_size=batch_size,
+                        next_batch_size=next_batch_size,
+                        reason="VRAM reserve",
+                    )
+                batch_size = next_batch_size
+                self._adaptive_nll_batch_size = batch_size
+                self._release_failed_cuda_batch()
+                continue
             del input_ids, attention_mask, labels, outputs
+            if automatic:
+                # NLL logits can leave a multi-GiB CUDA allocator cache (and a
+                # matching WDDM system-memory backing store) after each part.
+                # Release only the transient cache; model weights stay resident.
+                self._release_failed_cuda_batch()
             if tuning:
                 self._emit_batch_event(
                     "batch_selected", "conditional NLL", batch_size=batch_size
