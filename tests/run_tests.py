@@ -2,6 +2,7 @@
 # Copyright (C) 2025-2026  Philipp Emanuel Weidmann <pew@worldwidemann.com> + contributors
 
 import hashlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -44,9 +45,10 @@ for test_directory in script_directory.iterdir():
                     project_directory,
                     "--directory",
                     test_directory,
-                    "heretic",
+                    "hereticMOE",
                 ],
                 check=True,
+                env={**os.environ, "HERETIC_MOE_INTERNAL": "1"},
             )
 
             print()

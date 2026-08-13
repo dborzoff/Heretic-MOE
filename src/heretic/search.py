@@ -85,6 +85,44 @@ class StratifiedQMCSampler(QMCSampler):
         )
 
 
+class QueueTaskQMCSampler(StratifiedQMCSampler):
+    """Address one scrambled Sobol point by durable queue task ordinal."""
+
+    def __init__(self, *, sample_id: int, seed: int) -> None:
+        super().__init__(qmc_type="sobol", scramble=True, seed=seed)
+        self._queue_sample_id = sample_id
+
+    def _find_sample_id(self, study: Study, search_space) -> int:
+        return self._queue_sample_id
+
+    def sample_independent(
+        self,
+        study: Study,
+        trial: FrozenTrial,
+        param_name: str,
+        param_distribution,
+    ):
+        if (
+            param_name == "direction_scope"
+            and isinstance(param_distribution, CategoricalDistribution)
+        ):
+            choices = param_distribution.choices
+            return choices[self._queue_sample_id % len(choices)]
+        return super().sample_independent(
+            study,
+            trial,
+            param_name,
+            param_distribution,
+        )
+
+
+def _queue_task_seed(queue_seed: int, task_id: int, task_kind: str) -> int:
+    """Derive a retry- and worker-independent seed for one Random permit."""
+
+    payload = f"{queue_seed}:{task_id}:{task_kind}".encode()
+    return int.from_bytes(__import__("hashlib").sha256(payload).digest()[:4], "big")
+
+
 def select_spread_points(
     front: Sequence[tuple[Sequence[float], int]],
     count: int,
@@ -332,6 +370,7 @@ class OptimizationRunner:
         if not worker_id.strip():
             raise ValueError("worker_id cannot be empty")
         queue = TrialWorkQueue(queue_path)
+        queue_contract = queue.contract()
         while True:
             item = queue.claim(worker_id)
             if item is None:
@@ -341,11 +380,22 @@ class OptimizationRunner:
                     continue
                 break
 
-            study.sampler = {
-                "random": self.queue_random_sampler,
-                "sobol": self.queue_sobol_sampler,
-                "tpe": self.tpe_sampler,
-            }[item.task_kind]
+            if item.task_kind == "random":
+                study.sampler = RandomSampler(
+                    seed=_queue_task_seed(
+                        queue_contract.queue_seed,
+                        item.task_id,
+                        item.task_kind,
+                    )
+                )
+            elif item.task_kind == "sobol":
+                task_offset = item.task_id - queue_contract.first_task_id
+                study.sampler = QueueTaskQMCSampler(
+                    sample_id=task_offset // 2,
+                    seed=queue_contract.queue_seed,
+                )
+            else:
+                study.sampler = self.tpe_sampler
             finished: list[FrozenTrial] = []
 
             def queued_objective(trial: Trial, *, queue_item=item):
@@ -367,10 +417,10 @@ class OptimizationRunner:
                 study.optimize(
                     queued_objective,
                     n_trials=1,
-                    callbacks=[*callbacks, capture_trial],
+                    callbacks=[capture_trial, *callbacks],
                 )
             except BaseException as error:
-                if finished:
+                if finished and finished[-1].state == TrialState.COMPLETE:
                     trial = finished[-1]
                     queue.finish(
                         item,
@@ -387,6 +437,16 @@ class OptimizationRunner:
                     f"Optuna returned without a terminal trial for task {item.task_id}"
                 )
             trial = finished[-1]
+            if trial.state != TrialState.COMPLETE:
+                queue.fail(
+                    item,
+                    error_type=f"trial_{trial.state.name.lower()}",
+                    retry=True,
+                )
+                raise RuntimeError(
+                    f"Queue task {item.task_id} did not complete "
+                    f"(trial {trial.number}: {trial.state.name})"
+                )
             queue.finish(
                 item,
                 trial_number=trial.number,

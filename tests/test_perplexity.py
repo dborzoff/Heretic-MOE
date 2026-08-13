@@ -4,9 +4,13 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import torch
 
 from heretic.config import DatasetSpecification
-from heretic.scorers.perplexity import load_perplexity_text
+from heretic.scorers.perplexity import Perplexity, load_perplexity_text
 
 
 class PerplexityTextTests(unittest.TestCase):
@@ -20,6 +24,26 @@ class PerplexityTextTests(unittest.TestCase):
             )
 
             self.assertEqual(loaded, "alpha beta gamma\n")
+
+    def test_short_corpus_cannot_silently_score_zero_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            text_path = Path(temporary_directory) / "short.txt"
+            text_path.write_text("short", encoding="utf-8")
+            scorer = object.__new__(Perplexity)
+            scorer.settings = SimpleNamespace(
+                text=DatasetSpecification(dataset=str(text_path)),
+                window=8,
+                chunks=2,
+            )
+            scorer._model_and_tokenizer = lambda _ctx: (
+                None,
+                lambda _text, **_kwargs: SimpleNamespace(
+                    input_ids=torch.tensor([[1, 2, 3]])
+                ),
+            )
+
+            with self.assertRaisesRegex(ValueError, "shorter than one PPL window"):
+                scorer._windows(SimpleNamespace())
 
 
 if __name__ == "__main__":

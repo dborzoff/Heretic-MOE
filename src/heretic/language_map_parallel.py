@@ -132,6 +132,7 @@ def finalize_range_cache(
     output_dir: str | Path,
     *,
     metadata: dict[str, object],
+    capture_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Verify every range and publish one canonical cache with manifest last."""
 
@@ -215,6 +216,8 @@ def finalize_range_cache(
             },
             "metadata": dict(metadata),
         }
+        if capture_fingerprint is not None:
+            manifest["capture_fingerprint"] = capture_fingerprint
         _write_json(temporary["manifest.json"], manifest)
         temporary["residuals.safetensors"].replace(final["residuals.safetensors"])
         temporary["row_index.jsonl"].replace(final["row_index.jsonl"])

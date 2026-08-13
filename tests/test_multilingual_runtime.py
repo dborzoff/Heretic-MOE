@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
 import torch
 
 from heretic.clean_reference_archive import build_clean_reference_archive
@@ -261,6 +262,37 @@ def test_srg_runtime_contract_uses_only_pinned_660_files(tmp_path: Path) -> None
     assert resolved["prototype_path"] == prototypes.resolve()
     assert resolved["prompt_path"] == prompts.resolve()
     assert resolved["validate_prompt_alignment"] is False
+
+
+def test_srg_runtime_contract_accepts_and_checks_configured_prompt_rows(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "srg_calibration"
+    private = root / "private"
+    private.mkdir(parents=True)
+    prototypes = root / "prototypes.jsonl"
+    prompts = private / "evaluation_prompts.jsonl"
+    prototypes.write_bytes(b"prototype-bank\n")
+    prompts.write_bytes(b"calibration-custom\n")
+    manifest = {
+        "status": "PASS",
+        "prototype_path": str(prototypes),
+        "prototype_sha256": hashlib.sha256(prototypes.read_bytes()).hexdigest(),
+        "prompt_path": str(prompts),
+        "prompt_sha256": hashlib.sha256(prompts.read_bytes()).hexdigest(),
+        "prompt_rows": 12,
+        "top_k": 5,
+        "min_df": 2,
+        "max_response_length": 100,
+        "validate_prompt_alignment": False,
+    }
+    (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    resolved = resolve_srg_runtime_contract(root, expected_prompt_rows=12)
+
+    assert resolved["prompt_rows"] == 12
+    with pytest.raises(ValueError, match="prompt rows"):
+        resolve_srg_runtime_contract(root, expected_prompt_rows=15)
 
 
 def test_finalist_runtime_uses_full_pool_and_frozen_r_archive(tmp_path: Path) -> None:

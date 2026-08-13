@@ -33,6 +33,7 @@ class QueueStats:
 @dataclass(frozen=True)
 class QueueContract:
     schema_version: int
+    queue_seed: int
     first_task_id: int
     task_count: int
     last_task_id_exclusive: int
@@ -100,6 +101,7 @@ class TrialWorkQueue:
         journal_base_complete_count: int,
         journal_base_size_bytes: int,
         journal_base_sha256: str,
+        queue_seed: int = 0,
     ) -> None:
         if first_task_id < 0:
             raise ValueError("first_task_id cannot be negative")
@@ -168,7 +170,8 @@ class TrialWorkQueue:
                 for row in connection.execute("SELECT key, value FROM queue_meta")
             }
             expected = {
-                "schema_version": "4",
+                "schema_version": "5",
+                "queue_seed": str(int(queue_seed)),
                 "first_task_id": str(first_task_id),
                 "task_count": str(task_count),
                 "last_task_id_exclusive": str(expected_last),
@@ -373,6 +376,7 @@ class TrialWorkQueue:
             }
         required = {
             "schema_version",
+            "queue_seed",
             "first_task_id",
             "task_count",
             "last_task_id_exclusive",

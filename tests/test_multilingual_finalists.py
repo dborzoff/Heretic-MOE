@@ -58,6 +58,16 @@ def test_top_six_deduplicates_identical_parameter_sets() -> None:
     assert sum(row["params_sha256"] == candidates[0]["params_sha256"] for row in selected) == 1
 
 
+def test_top_six_keeps_distinct_parameters_with_identical_metrics() -> None:
+    candidates = [_candidate(i, 0.8, 0.1, 0.9) for i in range(6)]
+
+    selected = select_top_six(candidates, top_n=6)
+
+    assert {row["params_sha256"] for row in selected} == {
+        row["params_sha256"] for row in candidates
+    }
+
+
 def test_top_six_manifest_is_frozen_before_recheck(tmp_path: Path) -> None:
     selected = select_top_six(
         [_candidate(i, 1.0 - i * 0.05, 0.1 + i * 0.01, 0.9 - i * 0.01) for i in range(6)],

@@ -238,6 +238,17 @@ def _capture_parallel(
     cache_dir = args.output_dir / "cache"
     if (cache_dir / "manifest.json").is_file():
         _, _, manifest = load_residual_cache(cache_dir)
+        metadata = _capture_metadata(args, files)
+        fingerprint = _capture_fingerprint(
+            rows,
+            args.batch_size,
+            args.system_prompt,
+            metadata,
+        )
+        if manifest.get("capture_fingerprint") != fingerprint:
+            raise ValueError(
+                "complete geometry cache fingerprint mismatch; use a new output dir"
+            )
         print("Geometry cache already complete; verified without model reload.", flush=True)
         return manifest
 
@@ -340,6 +351,7 @@ def _capture_parallel(
         parts_dir,
         cache_dir,
         metadata=metadata,
+        capture_fingerprint=fingerprint,
     )
     job_path.unlink(missing_ok=True)
     return manifest

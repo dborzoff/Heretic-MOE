@@ -1308,7 +1308,7 @@ def verify_queue_against_journal(
         records = queue.task_records()
     except (OSError, RuntimeError, ValueError) as error:
         return False, f"unreadable_contract:{type(error).__name__}:{error}"
-    if contract.schema_version != 4:
+    if contract.schema_version != 5:
         return False, f"schema_version:{contract.schema_version}"
     if contract.target_trial_count != target_trial_count:
         return False, (
@@ -1456,6 +1456,13 @@ def verify_queue_against_journal(
 
     for record in records:
         attempts = attempts_by_task.get(record.task_id, [])
+        complete_attempts = [
+            trial
+            for trial in attempts
+            if trial.state == optuna.trial.TrialState.COMPLETE
+        ]
+        if len(complete_attempts) > 1:
+            return False, f"duplicate_complete:{record.task_id}"
         for trial in attempts:
             attempt = int(trial.user_attrs["queue_attempt"])
             if attempt > record.attempt:
@@ -2339,6 +2346,8 @@ def load_valid_winners_report(path: Path) -> dict[str, Any] | None:
         if not distinct:
             return None
     elif contract == "multilingual_v3_full_recheck":
+        from heretic.multilingual_finalists import select_multilingual_winners
+
         measured = report.get("measured")
         if (
             report.get("winners_distinct") is not distinct
@@ -2359,6 +2368,27 @@ def load_valid_winners_report(path: Path) -> dict[str, Any] | None:
         except (KeyError, TypeError, ValueError):
             return None
         if not winner_sources.issubset(measured_sources):
+            return None
+        try:
+            expected_report = select_multilingual_winners(
+                measured,
+                balanced_removal_fraction=float(
+                    report["balanced_removal_fraction"]
+                ),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        if (
+            expected_report["winners"] != winners
+            or expected_report["winners_distinct"]
+            is not report.get("winners_distinct")
+            or not math.isclose(
+                float(expected_report["resolved_balanced_removal_gate"]),
+                float(report.get("resolved_balanced_removal_gate", math.nan)),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        ):
             return None
     elif (
         report.get("winners_distinct") is not distinct
@@ -3383,6 +3413,7 @@ def main() -> None:
                     journal_base_complete_count=completed_trials,
                     journal_base_size_bytes=journal_base_size_bytes,
                     journal_base_sha256=journal_base_sha256,
+                    queue_seed=int(base.get("seed") or 0),
                 )
                 queue_expected_tasks = remaining_trials
             prelaunch_recoveries: list[dict[str, Any]] = []

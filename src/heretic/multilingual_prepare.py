@@ -144,19 +144,27 @@ def freeze_direction_package(
 def freeze_srg_calibration_package(
     source_dir: str | Path,
     destination_dir: str | Path,
+    *,
+    expected_prompt_rows: int | None = None,
 ) -> dict[str, Any]:
-    """Copy the completed 660-row calibration into a portable frozen package."""
+    """Copy a completed calibration into a portable frozen package."""
 
     source = Path(source_dir).resolve()
     destination = Path(destination_dir).resolve()
-    source_contract = resolve_srg_runtime_contract(source)
+    source_contract = resolve_srg_runtime_contract(
+        source,
+        expected_prompt_rows=expected_prompt_rows,
+    )
     source_profile = source / "calibration_profile.json"
     if not source_profile.is_file():
         raise FileNotFoundError(source_profile)
     source_profile_sha = _sha256(source_profile)
 
     if destination.exists():
-        resolved = resolve_srg_runtime_contract(destination)
+        resolved = resolve_srg_runtime_contract(
+            destination,
+            expected_prompt_rows=expected_prompt_rows,
+        )
         destination_profile = destination / "calibration_profile.json"
         if (
             _sha256(destination_profile) != source_profile_sha
@@ -189,7 +197,7 @@ def freeze_srg_calibration_package(
                     destination / "private" / "evaluation_prompts.jsonl"
                 ),
                 "prompt_sha256": _sha256(prompt_target),
-                "prompt_rows": 660,
+                "prompt_rows": int(source_contract["prompt_rows"]),
                 "validate_prompt_alignment": False,
                 "portable_package": True,
                 "calibration_profile_sha256": source_profile_sha,
@@ -200,7 +208,10 @@ def freeze_srg_calibration_package(
             encoding="utf-8",
         )
         os.replace(temporary, destination)
-        resolve_srg_runtime_contract(destination)
+        resolve_srg_runtime_contract(
+            destination,
+            expected_prompt_rows=expected_prompt_rows,
+        )
         return manifest
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
@@ -237,9 +248,14 @@ def prepare_static_multilingual_runtime(
         direction_source,
         root / "clean_map" / "directions",
     )
+    expected_srg_rows = (
+        len(normalized_languages)
+        * int(bundle.manifest["rows_per_cell"]["srg_calibration"])
+    )
     srg_manifest = freeze_srg_calibration_package(
         srg_source,
         root / "srg_calibration",
+        expected_prompt_rows=expected_srg_rows,
     )
     index = [
         {

@@ -68,16 +68,26 @@ def apply_multilingual_search_mode(settings: Settings) -> None:
         settings.response_prefix = ""
 
 
-def resolve_srg_runtime_contract(runtime_dir: str | Path) -> dict[str, Any]:
-    """Resolve only the pinned 660-row calibration scorer inputs."""
+def resolve_srg_runtime_contract(
+    runtime_dir: str | Path,
+    *,
+    expected_prompt_rows: int | None = None,
+) -> dict[str, Any]:
+    """Resolve pinned calibration scorer inputs and optionally enforce size."""
 
     root = Path(runtime_dir).resolve()
     manifest_path = root / "manifest.json"
     if not manifest_path.is_file():
         raise FileNotFoundError(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("status") != "PASS" or int(manifest.get("prompt_rows", -1)) != 660:
-        raise ValueError("SRG runtime manifest is not a completed 660-row contract")
+    prompt_rows = int(manifest.get("prompt_rows", -1))
+    if manifest.get("status") != "PASS" or prompt_rows <= 0:
+        raise ValueError("SRG runtime manifest is not a completed prompt contract")
+    if expected_prompt_rows is not None and prompt_rows != expected_prompt_rows:
+        raise ValueError(
+            "SRG runtime prompt rows differ from the configured contract: "
+            f"{prompt_rows} != {expected_prompt_rows}"
+        )
     prototype_path = Path(str(manifest.get("prototype_path", ""))).resolve()
     prompt_path = Path(str(manifest.get("prompt_path", ""))).resolve()
     for label, path, expected in (
@@ -95,7 +105,7 @@ def resolve_srg_runtime_contract(runtime_dir: str | Path) -> dict[str, Any]:
         "prototype_sha256": str(manifest["prototype_sha256"]),
         "prompt_path": prompt_path,
         "prompt_sha256": str(manifest["prompt_sha256"]),
-        "prompt_rows": 660,
+        "prompt_rows": prompt_rows,
         "top_k": int(manifest["top_k"]),
         "min_df": int(manifest["min_df"]),
         "max_response_length": int(manifest["max_response_length"]),
@@ -118,8 +128,13 @@ def build_multilingual_srg_scorer(
         SparseRefusalGeometry,
     )
 
+    expected_prompt_rows = (
+        len(settings.multilingual_search.languages)
+        * settings.multilingual_search.calibration_rows_per_language
+    )
     contract = resolve_srg_runtime_contract(
-        Path(runtime_root).resolve() / "srg_calibration"
+        Path(runtime_root).resolve() / "srg_calibration",
+        expected_prompt_rows=expected_prompt_rows,
     )
     scorer_settings = SparseSettings(
         prototypes=str(contract["prototype_path"]),

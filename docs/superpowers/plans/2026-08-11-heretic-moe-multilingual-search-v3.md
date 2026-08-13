@@ -14,8 +14,8 @@
 - Dataset root: `F:/AI/hf_originals/heretic_out/research/datasets/heretic_moe_5lang_v1`.
 - Languages: `en`, `ru`, `zh`, `es`, `fr`; public reports remain text-free.
 - Direction map: 10,000 prompt-only rows; Trial pool: 4,000 aligned rows; SRG calibration/final holdout: 660 rows each.
-- Ordinary trial: exactly 800 responses at 512-token cap and one autoregressive generation phase.
-- Final holdout recheck: 660 responses at 1024-token cap; independent PPL: `64 x 1024`.
+- Ordinary trial: exactly 800 responses at 100-token cap and one autoregressive generation phase.
+- Final holdout recheck: the frozen 4,000+660 rows at 100-token cap. PPL preservation uses matching SAFE response-token IDs via conditional NLL; the legacy independent text-corpus PPL is not part of multilingual v3.
 - New metric contract never imports raw values from old 136-row or `-0.0088` studies.
 - Resume requires exact model, dataset, map, SRG, schedule, generation, metric and constraint hashes.
 
@@ -65,7 +65,7 @@
 - [ ] Add a failing test proving blocks 0 and 1 use different ID-level assignments, not only a reordered phase list.
 - [ ] Guarantee each trial contains 400 SAFE + 400 UNSAFE and exactly 80 rows per language per direction.
 - [ ] Guarantee every canonical ID uses all five languages exactly once in each five-trial block.
-- [ ] Generate all 4,000 clean reference responses once at 512 tokens; store response IDs, token targets, NLL, residual projections and clean metrics privately.
+- [ ] Generate all 4,000 clean reference responses once at 100 tokens; store response IDs, token targets, NLL, residual projections and clean metrics privately.
 - [ ] Make resume reuse verified schedule/reference artifacts without regenerating or renumbering them.
 
 ### Task 5: SRG calibration and relative scoring
@@ -116,7 +116,7 @@
 
 - [ ] Select two maximum-Removal, two maximum-Cost-up and two diverse low-Preservation Pareto candidates with exact parameter de-duplication.
 - [ ] Freeze TOP-6 before opening any final-holdout candidate outputs.
-- [ ] Recheck every finalist on all 4,000 Trial rows at 512, final holdout 660 at 1024, same-ID SAFE PPL and independent `64 x 1024` PPL.
+- [ ] Recheck every finalist on all 4,000 Trial rows and final holdout 660 at 100 tokens, with same-ID SAFE conditional-NLL PPL drift.
 - [ ] Choose Balanced as minimum PreservationLoss after removal/gates and Max as maximum Removal after preservation gates.
 - [ ] If both roles select identical parameters, write two roles pointing to one physical artifact.
 

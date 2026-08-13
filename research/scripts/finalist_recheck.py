@@ -473,7 +473,6 @@ def prepare_multilingual(
         "selection_mode": selection_mode,
         "selection_policy": args.selection_policy,
         "devices": list(args.devices),
-        "ppl": {"chunks": args.ppl_chunks, "window": args.ppl_window},
         "gates": {
             "max_ppl_drift": args.max_ppl_drift,
             "max_keyword_rate": args.max_keywords / args.keyword_total,

@@ -17,6 +17,7 @@ class _Tokenizer:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.name_or_path = "tokenizer-a"
 
     def __call__(self, values, **kwargs):
         self.calls += 1
@@ -84,6 +85,48 @@ def test_prompt_cache_invalidates_when_response_prefix_changes() -> None:
     wrapper.prepare_prompt_cache(prompts)
 
     assert wrapper.tokenizer.calls == 2
+
+
+def test_prompt_cache_invalidates_when_tokenizer_changes() -> None:
+    wrapper = _wrapper()
+    prompts = [Prompt(system="", user="same")]
+
+    wrapper.prepare_prompt_cache(prompts)
+    replacement = _Tokenizer()
+    replacement.name_or_path = "tokenizer-b"
+    wrapper.tokenizer = replacement
+    wrapper.prepare_prompt_cache(prompts)
+
+    assert replacement.calls == 1
+
+
+def test_full_model_reload_clears_prompt_runtime_cache_and_role_probe() -> None:
+    wrapper = _wrapper()
+    wrapper._prompt_token_cache = {("old", "prompt"): torch.tensor([1])}
+    wrapper._prompt_token_arena = torch.tensor([1])
+    wrapper._prompt_token_cache_signature = ("old",)
+    wrapper._no_system_role = True
+
+    wrapper._clear_prompt_runtime_cache(reset_role_probe=True)
+
+    assert wrapper._prompt_token_cache == {}
+    assert wrapper._prompt_token_arena is None
+    assert wrapper._prompt_token_cache_signature is None
+    assert wrapper._no_system_role is False
+
+
+def test_failed_cuda_batch_releases_retained_static_cache(monkeypatch) -> None:
+    wrapper = _wrapper()
+    wrapper.model._cache = object()
+    calls: list[str] = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append("empty"))
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: calls.append("sync"))
+
+    wrapper._release_failed_cuda_batch()
+
+    assert wrapper.model._cache is None
+    assert calls == ["empty", "sync"]
 
 
 def test_prompt_cache_can_be_packed_into_one_cpu_arena() -> None:

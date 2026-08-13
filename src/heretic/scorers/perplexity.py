@@ -222,6 +222,10 @@ class Perplexity(Scorer):
         ids = tok(text, return_tensors="pt").input_ids[0]
         w = self.settings.window
         n = min(self.settings.chunks, len(ids) // w)
+        if n == 0:
+            raise ValueError(
+                f"Perplexity corpus is shorter than one PPL window ({w} tokens)"
+            )
         return [ids[i * w:(i + 1) * w] for i in range(n)]
 
     @torch.no_grad()
@@ -240,8 +244,10 @@ class Perplexity(Scorer):
             window_nll.append(loss)
             total += loss * (ids.shape[1] - 1)
             count += ids.shape[1] - 1
+        if count == 0:
+            raise ValueError("Perplexity corpus produced no scored tokens")
         return (
-            float(torch.exp(torch.tensor(total / max(count, 1)))),
+            float(torch.exp(torch.tensor(total / count))),
             window_nll,
             count,
         )

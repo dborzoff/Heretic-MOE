@@ -371,6 +371,60 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
         self.assertEqual(contract.journal_base_trial_count, 602)
         self.assertEqual(contract.journal_base_complete_count, 599)
 
+    def test_queue_verifier_rejects_two_complete_attempts_for_one_permit(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            journal = root / "journal.log"
+            queue = TrialWorkQueue(root / "queue.sqlite3")
+            queue.initialize(
+                first_task_id=0,
+                task_count=1,
+                exploration_task_count=1,
+                target_trial_count=1,
+                tpe_concurrency=1,
+                journal_base_trial_count=0,
+                journal_base_complete_count=0,
+                journal_base_size_bytes=0,
+                journal_base_sha256=sha256().hexdigest(),
+            )
+            storage = JournalStorage(
+                JournalFileBackend(
+                    str(journal),
+                    lock_obj=JournalFileOpenLock(str(journal)),
+                )
+            )
+            study = optuna.create_study(storage=storage, study_name="heretic")
+
+            first_item = queue.claim("gpu-0")
+            self.assertIsNotNone(first_item)
+            first = study.ask()
+            first.set_user_attr("queue_task_id", 0)
+            first.set_user_attr("queue_attempt", 1)
+            first.set_user_attr("queue_task_kind", "random")
+            first.set_user_attr("queue_worker_id", "gpu-0")
+            study.tell(first, 1.0)
+            queue.fail(first_item, error_type="legacy_callback_failure", retry=True)
+
+            second_item = queue.claim("gpu-1")
+            self.assertIsNotNone(second_item)
+            second = study.ask()
+            second.set_user_attr("queue_task_id", 0)
+            second.set_user_attr("queue_attempt", 2)
+            second.set_user_attr("queue_task_kind", "random")
+            second.set_user_attr("queue_worker_id", "gpu-1")
+            study.tell(second, 2.0)
+            queue.finish(second_item, trial_number=second.number, trial_state="COMPLETE")
+
+            valid, reason = controller.verify_queue_against_journal(
+                queue,
+                journal,
+                target_trial_count=1,
+                tpe_concurrency=1,
+            )
+
+        self.assertFalse(valid)
+        self.assertEqual(reason, "duplicate_complete:0")
+
     def test_completed_recheck_does_not_require_tpe_constraint_backfill(self) -> None:
         self.assertFalse(
             controller.should_require_constraint_metadata(
@@ -533,29 +587,83 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
     def test_load_valid_winners_report_accepts_multilingual_v3(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "winners.json"
-            report = {
-                "status": "PASS",
-                "contract": "multilingual_v3_full_recheck",
-                "winners": {
-                    "Balanced": {
-                        "trial_number": 2,
-                        "source_trial_index": 403,
-                        "source_trial_number": 402,
-                    },
-                    "Max": {
-                        "trial_number": 4,
-                        "source_trial_index": 542,
-                        "source_trial_number": 541,
-                    },
+            from heretic.multilingual_finalists import select_multilingual_winners
+
+            measured = [
+                {
+                    "trial_number": 2,
+                    "source_trial_index": 403,
+                    "source_trial_number": 402,
+                    "feasible": True,
+                    "removal": 0.8,
+                    "preservation_loss": 0.2,
+                    "safe_ppl_drift": 0.01,
+                    "safe_geometry_damage": 0.02,
+                    "worst_language": 0.4,
+                    "worst_category": 0.3,
+                    "final_holdout_removal": 0.7,
                 },
-                "winners_distinct": True,
-                "measured": [{"source_trial_number": 402}, {"source_trial_number": 541}],
-            }
+                {
+                    "trial_number": 4,
+                    "source_trial_index": 542,
+                    "source_trial_number": 541,
+                    "feasible": True,
+                    "removal": 1.0,
+                    "preservation_loss": 0.5,
+                    "safe_ppl_drift": 0.03,
+                    "safe_geometry_damage": 0.04,
+                    "worst_language": 0.5,
+                    "worst_category": 0.4,
+                    "final_holdout_removal": 0.9,
+                },
+            ]
+            report = select_multilingual_winners(
+                measured,
+                balanced_removal_fraction=0.8,
+            )
             path.write_text(json.dumps(report), encoding="utf-8")
 
             loaded = controller.load_valid_winners_report(path)
 
         self.assertEqual(loaded, report)
+
+    def test_load_valid_winners_report_rejects_tampered_multilingual_winner(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "winners.json"
+            from heretic.multilingual_finalists import select_multilingual_winners
+
+            measured = [
+                {
+                    "trial_number": number,
+                    "source_trial_index": number + 1,
+                    "source_trial_number": number,
+                    "feasible": True,
+                    "removal": removal,
+                    "preservation_loss": preservation,
+                    "safe_ppl_drift": 0.01,
+                    "safe_geometry_damage": 0.02,
+                    "worst_language": 0.4,
+                    "worst_category": 0.3,
+                    "final_holdout_removal": removal,
+                }
+                for number, removal, preservation in (
+                    (10, 0.8, 0.1),
+                    (11, 1.0, 0.5),
+                    (12, 0.7, 0.2),
+                )
+            ]
+            report = select_multilingual_winners(
+                measured,
+                balanced_removal_fraction=0.8,
+            )
+            report["winners"]["Max"] = measured[2]
+            path.write_text(json.dumps(report), encoding="utf-8")
+
+            loaded = controller.load_valid_winners_report(path)
+
+        self.assertIsNone(loaded)
 
     def test_console_safe_text_replaces_glyphs_missing_from_cp1251(self) -> None:
         rendered = controller.console_safe_text("GPU 0 | 25% ▏", "cp1251")

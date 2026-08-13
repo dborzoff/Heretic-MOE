@@ -142,12 +142,27 @@ class Model:
             isinstance(error, RuntimeError) and "out of memory" in str(error).lower()
         )
 
-    @staticmethod
-    def _release_failed_cuda_batch() -> None:
-        """Release only failed temporary allocations; keep model weights resident."""
+    def _release_failed_cuda_batch(self) -> None:
+        """Release retained generation state while keeping weights resident."""
 
+        model = getattr(self, "model", None)
+        if model is not None:
+            for module in model.modules():
+                if "_cache" in vars(module):
+                    module._cache = None
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+    def _clear_prompt_runtime_cache(self, *, reset_role_probe: bool = False) -> None:
+        """Discard tokenized prompts and tokenizer-specific runtime decisions."""
+
+        self._prompt_token_cache = {}
+        self._prompt_token_arena = None
+        self._prompt_token_cache_signature = None
+        if reset_role_probe:
+            self._no_system_role = False
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -434,6 +449,7 @@ class Model:
             return
 
         # Purge existing model object from memory to make space.
+        self._clear_prompt_runtime_cache(reset_role_probe=True)
         self.model = None  # ty:ignore[invalid-assignment]
         self._fused_experts_cache = {}
         empty_cache()
@@ -593,16 +609,9 @@ class Model:
         if direction_index is None:
             residual_direction = None
         else:
-            # The index must be shifted by 1 because the first element
-            # of residual_directions is the direction for the embeddings.
-            weight, index = math.modf(direction_index + 1)
-            residual_direction = F.normalize(
-                residual_directions[int(index)].lerp(
-                    residual_directions[int(index) + 1],
-                    weight,
-                ),
-                p=2,
-                dim=0,
+            residual_direction = self._interpolate_residual_direction(
+                residual_directions,
+                direction_index,
             )
 
         # Note that some implementations of abliteration also orthogonalize
@@ -974,10 +983,37 @@ class Model:
             rendered = [value + self.settings.response_prefix for value in rendered]
         return rendered
 
-    def _prompt_cache_signature(self) -> tuple[str, bool]:
+    @staticmethod
+    def _interpolate_residual_direction(
+        residual_directions: Tensor,
+        direction_index: float,
+    ) -> Tensor:
+        """Interpolate one layer direction without reading past an endpoint."""
+
+        shifted = float(direction_index) + 1.0
+        weight, integral = math.modf(shifted)
+        index = int(integral)
+        if index < 0 or index >= len(residual_directions):
+            raise IndexError(
+                f"direction index {direction_index} is outside residual map "
+                f"with {len(residual_directions)} rows"
+            )
+        direction = residual_directions[index]
+        if weight != 0.0:
+            if index + 1 >= len(residual_directions):
+                raise IndexError(
+                    f"fractional direction index {direction_index} exceeds "
+                    "the residual map endpoint"
+                )
+            direction = direction.lerp(residual_directions[index + 1], weight)
+        return F.normalize(direction, p=2, dim=0)
+
+    def _prompt_cache_signature(self) -> tuple[str, bool, str, str]:
         return (
             str(getattr(self.settings, "response_prefix", None) or ""),
             bool(getattr(self, "_no_system_role", False)),
+            str(getattr(self.tokenizer, "name_or_path", "")),
+            str(getattr(self.tokenizer, "chat_template", "")),
         )
 
     @staticmethod

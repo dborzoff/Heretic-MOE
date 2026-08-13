@@ -94,6 +94,41 @@ def test_dry_run_validates_without_loading_model(
     }
 
 
+def test_complete_geometry_cache_rejects_changed_capture_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [SimpleNamespace(prompt="row")]
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "manifest.json").write_text("{}", encoding="utf-8")
+    args = SimpleNamespace(
+        model="model-b",
+        batch_size=8,
+        output_dir=tmp_path,
+        system_prompt="system-b",
+    )
+    files: list[LanguageFile] = []
+    monkeypatch.setattr(
+        language_map_cli,
+        "_capture_metadata",
+        lambda _args, _files: {"model": "model-b"},
+    )
+    monkeypatch.setattr(
+        language_map_cli,
+        "_capture_fingerprint",
+        lambda *_args: "b" * 64,
+    )
+    monkeypatch.setattr(
+        language_map_cli,
+        "load_residual_cache",
+        lambda _path: ([], torch.zeros(1), {"capture_fingerprint": "a" * 64}),
+    )
+
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        language_map_cli._capture_parallel(rows, args, files)
+
+
 def test_dry_run_can_limit_each_validated_cell(tmp_path: Path) -> None:
     files: dict[tuple[str, str], Path] = {}
     for language in ("en", "ru"):

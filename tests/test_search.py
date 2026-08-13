@@ -3,7 +3,9 @@
 
 import unittest
 import warnings
+from hashlib import sha256
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import sleep
 
@@ -21,6 +23,7 @@ from heretic.search import (
     record_trial_constraints,
     select_spread_points,
 )
+from heretic.work_queue import TrialWorkQueue
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 warnings.filterwarnings("ignore", category=ExperimentalWarning)
@@ -33,6 +36,121 @@ def objective(trial: optuna.Trial) -> tuple[float, float]:
 
 
 class OptimizationRunnerTests(unittest.TestCase):
+    @staticmethod
+    def _single_task_queue(directory: str) -> TrialWorkQueue:
+        queue = TrialWorkQueue(Path(directory) / "queue.sqlite3")
+        queue.initialize(
+            first_task_id=0,
+            task_count=1,
+            exploration_task_count=1,
+            target_trial_count=1,
+            tpe_concurrency=1,
+            journal_base_trial_count=0,
+            journal_base_complete_count=0,
+            journal_base_size_bytes=0,
+            journal_base_sha256=sha256().hexdigest(),
+            queue_seed=20260812,
+        )
+        return queue
+
+    def test_queue_requeues_pruned_trial_instead_of_marking_it_complete(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            queue = self._single_task_queue(temporary_directory)
+            runner = OptimizationRunner(
+                startup_design=StartupDesign.HYBRID,
+                n_startup_trials=1,
+                seed=3,
+            )
+            study = optuna.create_study(direction="minimize")
+
+            def prune(_: optuna.Trial) -> float:
+                raise optuna.TrialPruned("synthetic prune")
+
+            with self.assertRaisesRegex(RuntimeError, "did not complete"):
+                runner.optimize_queue(
+                    study,
+                    prune,
+                    queue_path=str(queue.path),
+                    worker_id="gpu-0",
+                )
+
+            record = queue.task_records()[0]
+            self.assertEqual(record.state, "pending")
+            self.assertEqual(record.attempt, 1)
+            self.assertEqual(study.trials[0].state, TrialState.PRUNED)
+
+    def test_callback_failure_after_complete_does_not_retry_queue_permit(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            queue = self._single_task_queue(temporary_directory)
+            runner = OptimizationRunner(
+                startup_design=StartupDesign.HYBRID,
+                n_startup_trials=1,
+                seed=3,
+            )
+            study = optuna.create_study(direction="minimize")
+
+            def callback_error(_: optuna.Study, __: optuna.trial.FrozenTrial) -> None:
+                raise RuntimeError("synthetic callback failure")
+
+            with self.assertRaisesRegex(RuntimeError, "synthetic callback failure"):
+                runner.optimize_queue(
+                    study,
+                    lambda _: 1.0,
+                    queue_path=str(queue.path),
+                    worker_id="gpu-0",
+                    callbacks=[callback_error],
+                )
+
+            record = queue.task_records()[0]
+            self.assertEqual(record.state, "complete")
+            self.assertEqual(record.trial_state, "COMPLETE")
+            self.assertEqual(len(study.trials), 1)
+
+            runner.optimize_queue(
+                study,
+                lambda _: 2.0,
+                queue_path=str(queue.path),
+                worker_id="gpu-1",
+            )
+            self.assertEqual(len(study.trials), 1)
+
+    def test_queue_exploration_is_stable_across_worker_seeds(self) -> None:
+        def run(worker_seed: int) -> list[dict[str, object]]:
+            with TemporaryDirectory() as temporary_directory:
+                queue = TrialWorkQueue(Path(temporary_directory) / "queue.sqlite3")
+                queue.initialize(
+                    first_task_id=0,
+                    task_count=2,
+                    exploration_task_count=2,
+                    target_trial_count=2,
+                    tpe_concurrency=1,
+                    journal_base_trial_count=0,
+                    journal_base_complete_count=0,
+                    journal_base_size_bytes=0,
+                    journal_base_sha256=sha256().hexdigest(),
+                    queue_seed=20260812,
+                )
+                runner = OptimizationRunner(
+                    startup_design=StartupDesign.HYBRID,
+                    n_startup_trials=2,
+                    seed=worker_seed,
+                )
+                study = optuna.create_study(direction="minimize")
+
+                def sampled(trial: optuna.Trial) -> float:
+                    trial.suggest_categorical("scope", ["global", "per-layer"])
+                    return trial.suggest_float("x", -1.0, 1.0)
+
+                runner.optimize_queue(
+                    study,
+                    sampled,
+                    queue_path=str(queue.path),
+                    worker_id=f"gpu-{worker_seed}",
+                )
+                return [trial.params for trial in study.trials]
+
+        self.assertEqual(run(100), run(101))
+
     def test_constraint_record_is_visible_to_every_sampler_before_completion(self) -> None:
         study = optuna.create_study(direction="minimize", sampler=RandomSampler(seed=3))
         trial = study.ask()

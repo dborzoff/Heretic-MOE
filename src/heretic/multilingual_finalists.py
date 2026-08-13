@@ -59,17 +59,11 @@ def _deduplicated(candidates: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
     )
     unique: list[dict[str, Any]] = []
     seen_params: set[str] = set()
-    seen_metrics: set[tuple[float, float, float]] = set()
     for row in eligible:
         params_hash = str(row["params_sha256"])
-        metric_key = tuple(
-            round(float(row[field]), 10)
-            for field in ("removal", "preservation_loss", "cost_up")
-        )
-        if params_hash in seen_params or metric_key in seen_metrics:
+        if params_hash in seen_params:
             continue
         seen_params.add(params_hash)
-        seen_metrics.add(metric_key)
         unique.append(row)
     return unique
 

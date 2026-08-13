@@ -6,9 +6,13 @@ from __future__ import annotations
 
 import os
 import sys
+from importlib.metadata import version
 
 
 def main() -> None:
+    if any(argument in {"-V", "--version"} for argument in sys.argv[1:]):
+        print(f"Heretic-MOE {version('heretic-llm')}")
+        return
     if len(sys.argv) > 1 and sys.argv[1] in {"geometry-map", "language-map"}:
         from .language_map_cli import main as language_map_main
 
