@@ -28,6 +28,26 @@ def load_recheck_module():
 recheck = load_recheck_module()
 
 
+def test_geometry_offset_advances_past_existing_finalist_namespace(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "geometry_3d"
+    package.mkdir()
+    (package / "trial_index.jsonl").write_text(
+        '\n'.join(
+            (
+                json.dumps({"trial_number": 599}),
+                json.dumps({"trial_number": 1_000_005}),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert recheck.next_geometry_trial_number_offset(package) == 2_000_000
+    assert recheck.next_geometry_trial_number_offset(tmp_path / "missing") == 1_000_000
+
+
 def test_legacy_rate_recovery_is_normalized_as_source_only(tmp_path: Path) -> None:
     journal = tmp_path / "run" / "shared_tpe" / "checkpoints" / "source.jsonl"
     journal.parent.mkdir(parents=True)

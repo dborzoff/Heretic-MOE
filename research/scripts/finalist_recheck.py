@@ -33,6 +33,7 @@ _MULTILINGUAL_RATE_CONSTRAINTS = {
     "max_truncated_response_rate": "Truncated response rate",
     "max_safe_d_to_r_rate": "SAFE D->R rate",
 }
+_GEOMETRY_TRIAL_NAMESPACE_SIZE = 1_000_000
 
 
 def sha256(path: Path) -> str:
@@ -93,6 +94,29 @@ def replace_table_value(text: str, table: str, key: str, value: str) -> str:
             return "\n".join(lines) + "\n"
     lines.insert(end, f"{key} = {value}")
     return "\n".join(lines) + "\n"
+
+
+def next_geometry_trial_number_offset(package_dir: Path) -> int:
+    """Return the first unused million-wide trajectory trial namespace."""
+
+    index_path = Path(package_dir) / "trial_index.jsonl"
+    if not index_path.is_file():
+        return _GEOMETRY_TRIAL_NAMESPACE_SIZE
+    maximum = -1
+    with index_path.open(encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            trial_number = int(record["trial_number"])
+            if trial_number < 0:
+                raise ValueError("geometry trial number must be non-negative")
+            maximum = max(maximum, trial_number)
+    return max(
+        _GEOMETRY_TRIAL_NAMESPACE_SIZE,
+        (maximum // _GEOMETRY_TRIAL_NAMESPACE_SIZE + 1)
+        * _GEOMETRY_TRIAL_NAMESPACE_SIZE,
+    )
 
 
 def score_value(trial: FrozenTrial, *names: str) -> tuple[float, dict[str, Any]]:
@@ -539,6 +563,12 @@ def prepare_multilingual(
 
     multilingual = dict(settings_data["multilingual_search"])
     multilingual["evaluation_phase"] = "finalist"
+    geometry_package_value = settings_data.get("geometry_trajectory_package")
+    geometry_trial_number_offset = (
+        next_geometry_trial_number_offset(Path(str(geometry_package_value)))
+        if geometry_package_value
+        else _GEOMETRY_TRIAL_NAMESPACE_SIZE
+    )
     settings_data.update(
         {
             "n_trials": 6,
@@ -548,7 +578,7 @@ def prepare_multilingual(
             "optimization_only": True,
             "checkpoint_action": "continue",
             "leaderboard_size": 6,
-            "geometry_trial_number_offset": 1_000_000,
+            "geometry_trial_number_offset": geometry_trial_number_offset,
             "study_checkpoint_dir": str(checkpoints).replace("\\", "/"),
             "multilingual_search": multilingual,
         }
@@ -561,7 +591,7 @@ def prepare_multilingual(
         ("optimization_only", "true"),
         ("checkpoint_action", '"continue"'),
         ("leaderboard_size", "6"),
-        ("geometry_trial_number_offset", "1000000"),
+        ("geometry_trial_number_offset", str(geometry_trial_number_offset)),
         ("study_checkpoint_dir", json.dumps(str(checkpoints).replace("\\", "/"))),
     ):
         config_text = replace_top_level(config_text, key, value)
@@ -641,6 +671,7 @@ def prepare_multilingual(
         "top_six_manifest_sha256": sha256(top6_path),
         "final_holdout_sha256": holdout_sha,
         "runtime_root": str(Path(str(multilingual["runtime_root"])).resolve()),
+        "geometry_trial_number_offset": geometry_trial_number_offset,
         "selection": [
             {
                 "rank": int(row["shortlist_rank"]),
