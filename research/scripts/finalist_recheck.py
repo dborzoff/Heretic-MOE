@@ -514,7 +514,11 @@ def prepare_multilingual(
         ]
         selection_mode = "explicit_verified_shortlist"
     else:
-        selected = select_top_six(candidates, top_n=6)
+        selected = select_top_six(
+            candidates,
+            top_n=6,
+            preservation_removal_fraction=removal_fraction,
+        )
         selection_mode = "multilingual_diverse_top6"
 
     output = args.output_dir.resolve()

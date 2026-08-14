@@ -218,10 +218,20 @@ def test_multilingual_prepare_freezes_top_six_and_finalist_phase() -> None:
         source.set_user_attr("settings", json.dumps(settings))
         source.set_user_attr("constraint_names", ["ppl"])
         source.set_user_attr("finished", True)
-        for number in range(7):
-            removal = 0.9 - number * 0.05
-            loss = 0.02 + number * 0.01
-            cost = 0.8 - number * 0.01
+        candidate_scores = (
+            (1.00, 0.100, 0.95),
+            (0.95, 0.110, 0.94),
+            (0.90, 0.050, 0.70),
+            (0.85, 0.060, 0.69),
+            (0.82, 0.070, 0.68),
+            (0.81, 0.080, 0.67),
+            # These two would enter the preservation front under the helper's
+            # 0.65 default, but must be excluded by this run's explicit 0.80
+            # contract.
+            (0.70, 0.001, 0.10),
+            (0.69, 0.002, 0.09),
+        )
+        for number, (removal, loss, cost) in enumerate(candidate_scores):
             source.add_trial(create_trial(
                 params={"x": float(number)},
                 distributions={"x": optuna.distributions.FloatDistribution(0.0, 10.0)},
@@ -271,6 +281,16 @@ def test_multilingual_prepare_freezes_top_six_and_finalist_phase() -> None:
         assert manifest["contract"] == "multilingual_v3_full_recheck"
         assert manifest["top_n"] == 6
         assert (output / "top6_manifest.json").is_file()
+        top_six = json.loads(
+            (output / "top6_manifest.json").read_text(encoding="utf-8")
+        )
+        preservation_rows = [
+            row
+            for row in top_six["selection"]
+            if "preservation_front" in row["shortlist_roles"]
+        ]
+        assert preservation_rows
+        assert all(float(row["removal"]) >= 0.80 for row in preservation_rows)
         assert config_data["multilingual_search"]["evaluation_phase"] == "finalist"
         assert config_data["multilingual_search"]["runtime_root"] == runtime.as_posix()
         assert config_data["geometry_trial_number_offset"] == 1_000_000
