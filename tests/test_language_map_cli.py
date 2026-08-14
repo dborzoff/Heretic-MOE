@@ -49,6 +49,53 @@ def test_cli_dispatches_geometry_map_without_supervisor(
     assert received == [["analyze"]]
 
 
+def test_prepare_polyguard_dispatches_text_free_materializer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.parquet"
+    source.write_bytes(b"parquet-placeholder")
+    output = tmp_path / "dataset"
+    received: list[tuple[Path, Path]] = []
+
+    def materialize(source_path: Path, output_path: Path) -> dict[str, object]:
+        received.append((source_path, output_path))
+        return {
+            "status": "PASS",
+            "languages": [f"l{index}" for index in range(17)],
+            "directions": {"safe": 482, "unsafe": 238},
+            "rows": 12_240,
+        }
+
+    monkeypatch.setattr(
+        language_map_cli,
+        "materialize_polyguard_language_dataset",
+        materialize,
+        raising=False,
+    )
+
+    result = language_map_cli.main(
+        [
+            "prepare-polyguard",
+            "--source",
+            str(source),
+            "--output-dir",
+            str(output),
+        ]
+    )
+
+    assert received == [(source, output)]
+    assert result == {
+        "status": "PASS",
+        "mode": "prepare-polyguard",
+        "languages": 17,
+        "safe": 482,
+        "unsafe": 238,
+        "rows": 12_240,
+        "manifest": str((output / "manifest.json").resolve()),
+    }
+
+
 def test_geometry_findings_summarize_layers_without_corpus_text() -> None:
     findings = language_map_cli._geometry_findings(
         {

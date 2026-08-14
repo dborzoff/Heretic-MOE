@@ -33,6 +33,7 @@ from .language_map_projection import write_projection_package
 from .language_map_report import write_interactive_geometry_report
 from .language_map_trajectory import initialize_trajectory_package
 from .pipeline_ui import PipelineUI
+from .polyguard_language_dataset import materialize_polyguard_language_dataset
 from .range_work_queue import RangeWorkQueue
 
 
@@ -133,6 +134,13 @@ def _parser() -> argparse.ArgumentParser:
         description="Capture and analyze a text-free multilingual geometry map.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    prepare_polyguard = subparsers.add_parser(
+        "prepare-polyguard",
+        help="Materialize the frozen strict PolyGuard language benchmark.",
+    )
+    prepare_polyguard.add_argument("--source", required=True, type=Path)
+    prepare_polyguard.add_argument("--output-dir", required=True, type=Path)
 
     run = subparsers.add_parser("run", help="Validate, capture once, and analyze.")
     _add_input_arguments(run)
@@ -554,6 +562,26 @@ def _project(args: argparse.Namespace) -> dict[str, Any]:
 
 def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     args = _parser().parse_args(list(argv) if argv is not None else None)
+    if args.command == "prepare-polyguard":
+        manifest = materialize_polyguard_language_dataset(
+            args.source,
+            args.output_dir,
+        )
+        directions = manifest["directions"]
+        assert isinstance(directions, dict)
+        languages = manifest["languages"]
+        assert isinstance(languages, list)
+        result = {
+            "status": manifest["status"],
+            "mode": "prepare-polyguard",
+            "languages": len(languages),
+            "safe": int(directions["safe"]),
+            "unsafe": int(directions["unsafe"]),
+            "rows": int(manifest["rows"]),
+            "manifest": str((args.output_dir / "manifest.json").resolve()),
+        }
+        print(json.dumps(result, sort_keys=True))
+        return result
     if args.command == "analyze":
         result = _analyze(args.cache_dir, args.output_dir, args.seed)
         print(json.dumps(result, sort_keys=True))
