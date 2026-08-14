@@ -315,10 +315,78 @@ network dependency. It contains no prompts, answers, excerpts, or archive text.
 - no policy conclusion from a single architecture;
 - no claim of causal influence without a later controlled intervention.
 
-## Initial success criterion
+## Five-language prototype success criterion
 
 The Gemma run is successful when the 12,000-row cache verifies, the analyzer can
 reconstruct full, EN-only, non-duplicated multilingual, and every
 leave-one-language-out map without another model invocation, and produces
 text-free per-layer language, direction, category, and interaction statistics.
-Only then is the identical protocol run on Ministral and Qwen.
+Only then is the identical protocol run on Ministral and Qwen. This criterion
+describes the earlier five-language prototype; the following section defines
+the later cross-model language-selection diagnostic.
+
+## PolyGuard 17-language model-comparison diagnostic
+
+The first language-selection benchmark uses the frozen local
+`ToxicityPrompts/PolyGuardPrompts` parquet revision. It materializes only rows
+whose source annotations agree unanimously on both prompt harmfulness and
+response refusal behavior:
+
+- SAFE: 482 canonical IDs labelled `unharmful` with a `compliance` response;
+- UNSAFE: 238 canonical IDs labelled `harmful` with a `refusal` response;
+- 720 canonical IDs x 17 exactly aligned languages = 12,240 measured rows.
+
+The 17-language order is frozen in the dataset manifest, not in production
+Python defaults. Every language must contain the same ordered canonical IDs
+within SAFE and within UNSAFE. SAFE and UNSAFE may have different row counts.
+The legacy balanced `rows_per_cell` interface remains valid for existing
+five-language search artifacts; the diagnostic adds an auto-detected
+per-direction count contract.
+
+Each public index row retains a primary `category_id` for compatibility and a
+text-free `category_ids` list containing every applicable PolyGuard S1-S14 tag.
+SAFE rows without a risk tag use `benign`. Reports expose generated language
+and category filters. Original SAFE points are blue and original UNSAFE points
+are red; no report uses the neutral `group A/group B` copy for this diagnostic.
+
+Capture is performed with one generated token and all decision-position
+residual layers. Workers use every selected CUDA device through the existing
+dynamic range queue, and model weights stay resident for the complete model
+run. The protocol is run independently and sequentially for:
+
+1. `Qwen__Qwen3.5-9B`;
+2. `google__gemma-4-E4B-it`;
+3. `mistralai__Ministral-3-3B-Instruct-2512-BF16`.
+
+All three analyses use the same immutable dataset manifest and row order. A
+fourth architecture is not required for the initial language decision.
+
+Language selection uses paired canonical IDs and full-space residual metrics,
+not visual proximity alone. For every layer and language it records the
+SAFE-to-UNSAFE direction, the language offset relative to the pooled canonical
+mean, category-conditioned interaction, and pairwise direction similarity.
+Distances are normalized per layer, aggregated across the three models, and
+clustered by deterministic k-medoids for each candidate `k` in 4 through 6.
+The per-layer pair distance is `0.60 * refusal_direction_distance + 0.25 *
+language_offset_distance + 0.15 * category_interaction_distance`; every term
+is scaled to `[0, 1]` before aggregation and layers are weighted by their
+SAFE/UNSAFE separation. Cross-model aggregation is the arithmetic mean of the
+three model distance matrices.
+English is a mandatory anchor. The remaining medoids are the languages with
+the smallest total within-cluster distance; ties are resolved by frozen
+language order. The recommended `k` maximizes mean silhouette across the three
+models and the aggregate matrix, with ties resolved toward the smaller `k`.
+`recommended_languages.json` records medoids, cluster members,
+weights, per-model stability, and the evidence for excluding geometrically
+redundant languages such as a possible EN/ES overlap.
+
+The interactive package fits one pooled three-component basis per model layer.
+It automatically lists every language found in the manifest, supports
+language/category/SAFE/UNSAFE filters, and includes the pairwise heatmap and
+cluster assignment beside the 3D view. Independent per-language PCA bases are
+forbidden because their arbitrary rotations make language distances visually
+incomparable.
+
+Success requires three verified 12,240-row caches, three text-free HTML maps,
+one cross-model k-medoids recommendation, exact source and cache hashes, and no
+prompt or response text in console, public JSON, HTML, or logs.
