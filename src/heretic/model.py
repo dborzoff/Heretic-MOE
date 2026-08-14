@@ -1949,6 +1949,8 @@ class Model:
             )
         if tuning:
             self._emit_batch_event("batch_probe", "conditional NLL", batch_size=batch_size)
+        largest_passing_batch = 0
+        smallest_failing_batch: int | None = None
         values: list[float | None] = [None] * len(pairs)
         position = 0
         while position < len(order):
@@ -2023,7 +2025,19 @@ class Model:
                 del input_ids, attention_mask, labels, outputs
                 if not automatic or batch_size == 1 or not self._is_cuda_oom(error):
                     raise
-                next_batch_size = max(1, batch_size // 2)
+                smallest_failing_batch = (
+                    batch_size
+                    if smallest_failing_batch is None
+                    else min(smallest_failing_batch, batch_size)
+                )
+                next_batch_size = (
+                    max(
+                        largest_passing_batch,
+                        (largest_passing_batch + smallest_failing_batch) // 2,
+                    )
+                    if largest_passing_batch > 0
+                    else max(1, batch_size // 2)
+                )
                 if tuning:
                     self._emit_batch_event(
                         "batch_backoff",
@@ -2066,7 +2080,19 @@ class Model:
                         "conditional NLL cannot preserve the configured VRAM reserve "
                         "at batch size 1"
                     )
-                next_batch_size = max(1, batch_size // 2)
+                smallest_failing_batch = (
+                    batch_size
+                    if smallest_failing_batch is None
+                    else min(smallest_failing_batch, batch_size)
+                )
+                next_batch_size = (
+                    max(
+                        largest_passing_batch,
+                        (largest_passing_batch + smallest_failing_batch) // 2,
+                    )
+                    if largest_passing_batch > 0
+                    else max(1, batch_size // 2)
+                )
                 if tuning:
                     self._emit_batch_event(
                         "batch_backoff",
@@ -2079,6 +2105,22 @@ class Model:
                 self._adaptive_nll_batch_size = batch_size
                 self._release_failed_cuda_batch()
                 continue
+            if automatic and tuning and smallest_failing_batch is not None:
+                largest_passing_batch = max(largest_passing_batch, batch_size)
+                if smallest_failing_batch - largest_passing_batch > 1:
+                    next_batch_size = (
+                        largest_passing_batch + smallest_failing_batch
+                    ) // 2
+                    del input_ids, attention_mask, labels, outputs, batch_values
+                    self._emit_batch_event(
+                        "batch_probe",
+                        "conditional NLL",
+                        batch_size=next_batch_size,
+                    )
+                    batch_size = next_batch_size
+                    self._adaptive_nll_batch_size = batch_size
+                    self._release_failed_cuda_batch()
+                    continue
             del input_ids, attention_mask, labels, outputs
             if automatic:
                 # NLL logits can leave a multi-GiB CUDA allocator cache (and a

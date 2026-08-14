@@ -230,6 +230,7 @@ def test_conditional_nll_reduces_batch_until_vram_headroom_is_ten_percent(
         [
             (50, 1000, 0),
             (200, 1000, 0),
+            (150, 1000, 0),
             (200, 1000, 0),
         ]
     )
@@ -242,8 +243,8 @@ def test_conditional_nll_reduces_batch_until_vram_headroom_is_ten_percent(
     )
 
     assert len(values) == 4
-    assert wrapper._adaptive_nll_batch_size == 2
-    assert wrapper.model.batch_sizes[:2] == [4, 2]
+    assert wrapper._adaptive_nll_batch_size == 3
+    assert wrapper.model.batch_sizes[:3] == [4, 2, 3]
 
 
 def test_automatic_conditional_nll_starts_from_quarter_generation_batch() -> None:
