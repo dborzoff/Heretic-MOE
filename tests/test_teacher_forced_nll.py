@@ -134,7 +134,7 @@ def test_fixed_prompt_tokenization_is_cached_across_nll_trials() -> None:
     assert wrapper.tokenizer.calls == 1
 
 
-def test_fixed_conditional_nll_releases_transient_cuda_cache_per_batch() -> None:
+def test_fixed_conditional_nll_releases_transient_cuda_cache_once_per_call() -> None:
     wrapper = object.__new__(Model)
     wrapper.model = _CausalModel()
     wrapper.tokenizer = _Tokenizer()
@@ -157,7 +157,46 @@ def test_fixed_conditional_nll_releases_transient_cuda_cache_per_batch() -> None
     )
 
     assert len(values) == 4
-    assert len(releases) == 2
+    assert len(releases) == 1
+
+
+class _LengthCausalModel(_CausalModel):
+    def __init__(self):
+        super().__init__()
+        self.sequence_lengths: list[int] = []
+
+    def forward(self, *, input_ids, attention_mask, use_cache):
+        self.sequence_lengths.append(int(input_ids.shape[1]))
+        return super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=use_cache,
+        )
+
+
+def test_conditional_nll_processes_longest_sequences_first_for_allocator_reuse() -> None:
+    wrapper = object.__new__(Model)
+    wrapper.model = _LengthCausalModel()
+    wrapper.tokenizer = _Tokenizer()
+    wrapper.settings = type(
+        "Settings",
+        (),
+        {
+            "batch_size": 1,
+            "conditional_nll_batch_size": 1,
+            "response_prefix": None,
+        },
+    )()
+    wrapper._render_chat_prompts = lambda prompts: [prompt.user for prompt in prompts]
+    wrapper._release_failed_cuda_batch = lambda: None
+
+    values = wrapper.get_conditional_nll(
+        [Prompt(system="", user=str(index)) for index in range(3)],
+        [[3], [3, 4, 3, 4], [3, 4]],
+    )
+
+    assert len(values) == 3
+    assert wrapper.model.sequence_lengths == [6, 4, 3]
 
 
 class _OomCausalModel(_CausalModel):
