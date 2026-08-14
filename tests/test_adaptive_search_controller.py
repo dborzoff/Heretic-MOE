@@ -887,6 +887,49 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["0"].memory_used_gib, 15.5)
         self.assertAlmostEqual(metrics["1"].memory_total_gib, 24564 / 1024)
 
+    def test_live_leaderboard_ranks_feasible_then_nearest_gate_candidates(self) -> None:
+        def trial(
+            number: int,
+            removal: float,
+            loss: float,
+            constraints: list[float],
+            ppl: float,
+        ) -> SimpleNamespace:
+            return SimpleNamespace(
+                number=number,
+                state=controller.optuna.trial.TrialState.COMPLETE,
+                values=[removal, loss],
+                user_attrs={
+                    "constraints": constraints,
+                    "scores": [
+                        {
+                            "name": "Removal",
+                            "score": {
+                                "diagnostics": {
+                                    "metrics": {"safe_ppl_drift": ppl}
+                                }
+                            },
+                        }
+                    ],
+                },
+            )
+
+        rows = controller.build_live_leaderboard(
+            [
+                trial(10, 0.50, 0.02, [0.0, 0.0], 0.003),
+                trial(11, 0.60, 0.01, [0.002, 0.0], 0.007),
+                trial(12, 0.40, 0.005, [0.0, 0.0], 0.002),
+            ],
+            constraint_names=("Safe PPL drift <= 0.005", "Empty <= 0"),
+            top_n=6,
+        )
+
+        self.assertEqual([row["trial"] for row in rows], [10, 12, 11])
+        self.assertEqual([row["feasible"] for row in rows], [True, True, False])
+        self.assertEqual(rows[2]["gate"], "Safe PPL drift +0.002")
+        self.assertEqual(rows[0]["ppl_drift"], 0.003)
+        self.assertEqual([row["rank"] for row in rows], [1, 2, 3])
+
     def test_uninitialized_journal_does_not_require_constraint_backfill(self) -> None:
         self.assertFalse(
             controller.should_require_constraint_metadata(

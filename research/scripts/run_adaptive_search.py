@@ -1308,6 +1308,7 @@ def _monitor_dynamic_workers(
     )
     gpu_metrics: dict[str, GPUMetrics] = {}
     last_gpu_metrics_at = 0.0
+    last_leaderboard_complete = -1
     try:
         while active:
             next_active: list[
@@ -1457,6 +1458,15 @@ def _monitor_dynamic_workers(
                 estimated_total_seconds=progress.total_seconds,
                 eta_seconds=progress.eta_seconds,
             )
+            if stats.complete != last_leaderboard_complete:
+                try:
+                    ui.update_leaderboard(
+                        load_live_leaderboard(workers[0][0].journal, top_n=6)
+                    )
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    pass
+                else:
+                    last_leaderboard_complete = stats.complete
             if not active and (
                 stats.pending
                 or stats.claimed
@@ -1594,6 +1604,112 @@ def query_nvidia_smi_metrics() -> dict[str, GPUMetrics]:
         return {}
 
 
+def _trial_ppl_drift(trial: Any) -> float:
+    for record in trial.user_attrs.get("scores", []):
+        if record.get("name") != "Removal":
+            continue
+        score = record.get("score")
+        diagnostics = score.get("diagnostics") if isinstance(score, dict) else None
+        metrics = (
+            diagnostics.get("metrics") if isinstance(diagnostics, dict) else None
+        )
+        if isinstance(metrics, dict) and "safe_ppl_drift" in metrics:
+            return float(metrics["safe_ppl_drift"])
+    return math.nan
+
+
+def _trial_cost_up(trial: Any, removal: float, preservation_loss: float) -> float:
+    for record in trial.user_attrs.get("scores", []):
+        if record.get("name") not in {"Cost↑", "Cost"}:
+            continue
+        score = record.get("score")
+        if isinstance(score, dict) and "value" in score:
+            return float(score["value"])
+    return (1.0 / (1.0 + math.exp(-4.0 * removal))) / (1.0 + preservation_loss)
+
+
+def build_live_leaderboard(
+    trials: list[Any],
+    *,
+    constraint_names: tuple[str, ...] | list[str],
+    top_n: int = 6,
+) -> list[dict[str, Any]]:
+    """Build a shared numeric leaderboard without exposing corpus payloads."""
+
+    if top_n <= 0:
+        raise ValueError("top_n must be positive")
+    rows: list[dict[str, Any]] = []
+    for trial in trials:
+        if trial.state != optuna.trial.TrialState.COMPLETE or trial.values is None:
+            continue
+        if len(trial.values) < 2:
+            continue
+        constraints = trial.user_attrs.get("constraints")
+        if not isinstance(constraints, (list, tuple)) or len(constraints) != len(
+            constraint_names
+        ):
+            continue
+        values = [float(value) for value in constraints]
+        if any(not math.isfinite(value) for value in values):
+            continue
+        removal = float(trial.values[0])
+        preservation_loss = float(trial.values[1])
+        ppl_drift = _trial_ppl_drift(trial)
+        cost_up = _trial_cost_up(trial, removal, preservation_loss)
+        if not all(
+            math.isfinite(value)
+            for value in (removal, preservation_loss, ppl_drift, cost_up)
+        ):
+            continue
+        violations = [
+            (float(value), str(name))
+            for name, value in zip(constraint_names, values, strict=True)
+            if float(value) > 0.0
+        ]
+        violations.sort(reverse=True)
+        feasible = not violations
+        gate = "PASS"
+        if violations:
+            value, name = violations[0]
+            gate = f"{name.split(' <=', 1)[0]} +{value:.4g}"
+        rows.append(
+            {
+                "trial": int(trial.number),
+                "feasible": feasible,
+                "cost_up": cost_up,
+                "removal": removal,
+                "preservation_loss": preservation_loss,
+                "ppl_drift": ppl_drift,
+                "gate": gate,
+                "constraint_penalty": sum(value for value, _ in violations),
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            not bool(row["feasible"]),
+            0.0 if row["feasible"] else float(row["constraint_penalty"]),
+            -float(row["cost_up"]),
+            -float(row["removal"]),
+            float(row["preservation_loss"]),
+            int(row["trial"]),
+        )
+    )
+    selected = rows[:top_n]
+    for rank, row in enumerate(selected, start=1):
+        row["rank"] = rank
+    return selected
+
+
+def load_live_leaderboard(journal: Path, *, top_n: int = 6) -> list[dict[str, Any]]:
+    study = load_journal_study(journal)
+    names = tuple(str(name) for name in study.user_attrs.get("constraint_names", []))
+    return build_live_leaderboard(
+        list(study.get_trials(deepcopy=False)),
+        constraint_names=names,
+        top_n=top_n,
+    )
+
+
 def wait_dynamic_workers(
     workers: list[tuple[Stage, subprocess.Popen, str, tuple[str, ...], int]],
     *,
@@ -1714,11 +1830,11 @@ def controller_trial_counts(
     return JournalTrialCounts(total=0, complete=0, waiting=0)
 
 
-def load_journal_trials(journal: Path) -> list[optuna.trial.FrozenTrial]:
-    """Load one journal's text-free Optuna trial metadata."""
+def load_journal_study(journal: Path) -> optuna.study.Study:
+    """Load one text-private journal without rendering user attributes."""
 
     if journal.is_file() and journal.stat().st_size == 0:
-        return []
+        raise ValueError(f"Journal is empty: {journal}")
 
     storage = JournalStorage(
         JournalFileBackend(
@@ -1729,8 +1845,15 @@ def load_journal_trials(journal: Path) -> list[optuna.trial.FrozenTrial]:
     summaries = storage.get_all_studies()
     if len(summaries) != 1:
         raise ValueError(f"Expected one study in {journal}, found {len(summaries)}")
-    study = optuna.load_study(study_name=summaries[0].study_name, storage=storage)
-    return list(study.get_trials(deepcopy=False))
+    return optuna.load_study(study_name=summaries[0].study_name, storage=storage)
+
+
+def load_journal_trials(journal: Path) -> list[optuna.trial.FrozenTrial]:
+    """Load one journal's text-free Optuna trial metadata."""
+
+    if journal.is_file() and journal.stat().st_size == 0:
+        return []
+    return list(load_journal_study(journal).get_trials(deepcopy=False))
 
 
 def verify_queue_against_journal(

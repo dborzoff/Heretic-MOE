@@ -17,8 +17,27 @@ from rich.progress import (
     TaskProgressColumn,
     TextColumn,
 )
+from rich.table import Table
 
 _SENSITIVE_KEY_PARTS = ("prompt", "response", "answer", "text", "payload")
+
+
+class _PipelineProgress(Progress):
+    """Progress rows with one optional persistent footer renderable."""
+
+    def __init__(self, *columns: Any, **kwargs: Any) -> None:
+        self.footer: Any | None = None
+        super().__init__(*columns, **kwargs)
+
+    def set_footer(self, renderable: Any | None) -> None:
+        self.footer = renderable
+        if self.live.is_started:
+            self.refresh()
+
+    def get_renderables(self) -> Any:
+        yield self.make_tasks_table(self.tasks)
+        if self.footer is not None:
+            yield self.footer
 
 
 def _clean_label(value: object, *, fallback: str, max_length: int = 64) -> str:
@@ -77,7 +96,7 @@ class PipelineUI:
         self.console = console or Console()
         self.non_tty_update_interval = max(0.0, float(non_tty_update_interval))
         self._rich = bool(self.console.is_terminal)
-        self._progress = Progress(
+        self._progress = _PipelineProgress(
             SpinnerColumn(),
             TextColumn("[bold]{task.description}"),
             BarColumn(),
@@ -334,6 +353,61 @@ class PipelineUI:
                 f"{worker_suffix} | {detail}"
             )
             self._last_compact_update = now
+
+    def update_leaderboard(self, rows: Sequence[Mapping[str, object]]) -> None:
+        """Render a shared text-private TOP list below the active progress."""
+
+        self._require_active()
+        normalized: list[dict[str, object]] = []
+        for source in rows[:6]:
+            row = {
+                "rank": int(source["rank"]),
+                "trial": int(source["trial"]),
+                "feasible": bool(source["feasible"]),
+                "cost_up": float(source["cost_up"]),
+                "removal": float(source["removal"]),
+                "preservation_loss": float(source["preservation_loss"]),
+                "ppl_drift": float(source["ppl_drift"]),
+                "gate": _clean_label(source["gate"], fallback="unknown", max_length=52),
+            }
+            numeric = (
+                row["cost_up"],
+                row["removal"],
+                row["preservation_loss"],
+                row["ppl_drift"],
+            )
+            if any(not math.isfinite(float(value)) for value in numeric):
+                raise ValueError("leaderboard metrics must be finite")
+            normalized.append(row)
+
+        if not self._rich:
+            return
+        table = Table(
+            title=f"Current TOP-{len(normalized)}",
+            show_edge=False,
+            pad_edge=False,
+            collapse_padding=True,
+        )
+        table.add_column("#", justify="right")
+        table.add_column("Trial", justify="right")
+        table.add_column("Cost↑", justify="right")
+        table.add_column("Removal↑", justify="right")
+        table.add_column("Preserve↓", justify="right")
+        table.add_column("PPL↓", justify="right")
+        table.add_column("Gate")
+        for row in normalized:
+            feasible = bool(row["feasible"])
+            table.add_row(
+                str(row["rank"]),
+                f"T{row['trial']}",
+                f"{float(row['cost_up']):.3f}",
+                f"{float(row['removal']):+.5f}",
+                f"{float(row['preservation_loss']):.5f}",
+                f"{float(row['ppl_drift']) * 100:.2f}%",
+                "PASS" if feasible else str(row["gate"]),
+                style=None if feasible else "yellow",
+            )
+        self._progress.set_footer(table)
 
     def finish_stage(self, summary: Mapping[object, object]) -> dict[str, str]:
         """Stop the stage and render a concise sanitized PASS/FAIL summary."""

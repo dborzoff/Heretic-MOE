@@ -197,6 +197,51 @@ def test_search_progress_uses_total_eta_and_gpu_telemetry_not_rows_per_second() 
     ui.close()
 
 
+def test_search_progress_renders_one_shared_text_private_top_six_table() -> None:
+    console, _ = _console(terminal=True)
+    ui = PipelineUI(console=console, non_tty_update_interval=0.0)
+
+    ui.stage("Adaptive search", total=600, workers=("gpu-0", "gpu-1"))
+    ui.update_leaderboard(
+        [
+            {
+                "rank": 1,
+                "trial": 255,
+                "feasible": False,
+                "cost_up": 0.734,
+                "removal": 0.276384,
+                "preservation_loss": 0.015165,
+                "ppl_drift": 0.006665,
+                "gate": "PPL +0.17 pp",
+                "prompt": "must-not-render",
+            },
+            {
+                "rank": 2,
+                "trial": 303,
+                "feasible": True,
+                "cost_up": 0.551,
+                "removal": 0.061309,
+                "preservation_loss": 0.005802,
+                "ppl_drift": 0.002112,
+                "gate": "PASS",
+            },
+        ]
+    )
+    console.print(ui._progress.get_renderable())
+
+    output = console.export_text(styles=False)
+    assert "Current TOP-2" in output
+    assert "T255" in output
+    assert "Cost" in output
+    assert "Removal" in output
+    assert "Preserve" in output
+    assert "PPL" in output
+    assert "PPL +0.17 pp" in output
+    assert "must-not-render" not in output
+    ui.finish_stage({"status": "PASS"})
+    ui.close()
+
+
 def test_non_tty_overall_progress_prints_one_global_multi_gpu_line() -> None:
     console, stream = _console(terminal=False)
     ui = PipelineUI(console=console, non_tty_update_interval=0.0)
