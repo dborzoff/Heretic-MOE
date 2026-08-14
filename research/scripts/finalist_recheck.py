@@ -28,7 +28,7 @@ from heretic.multilingual_finalists import (
 )
 from heretic.trial_selection import candidate_trials
 
-_MULTILINGUAL_CONSTRAINT_OVERRIDES = {
+_MULTILINGUAL_RATE_CONSTRAINTS = {
     "max_truncated_response_rate": "Truncated response rate",
     "max_safe_d_to_r_rate": "SAFE D->R rate",
 }
@@ -168,6 +168,8 @@ def load_finalization_overrides(source_journal: Path) -> tuple[dict[str, Any], P
         "balanced_srg_gate",
         "baseline_srg",
         "balanced_removal_fraction",
+        "source_constraints",
+        "finalist_constraints",
         "max_truncated_response_rate",
         "max_safe_d_to_r_rate",
         "provenance",
@@ -175,7 +177,32 @@ def load_finalization_overrides(source_journal: Path) -> tuple[dict[str, Any], P
     extras = sorted(set(record) - allowed)
     if extras:
         raise RuntimeError(f"Unknown finalization override keys: {extras}")
-    if set(record) & set(_MULTILINGUAL_CONSTRAINT_OVERRIDES):
+    legacy_source = {
+        key: record[key]
+        for key in _MULTILINGUAL_RATE_CONSTRAINTS
+        if key in record
+    }
+    if legacy_source:
+        if "source_constraints" in record:
+            raise RuntimeError(
+                "Legacy rate keys cannot be combined with source_constraints"
+            )
+        record = dict(record)
+        record["source_constraints"] = legacy_source
+        for key in legacy_source:
+            record.pop(key)
+    recovery_sections = {
+        name: record[name]
+        for name in ("source_constraints", "finalist_constraints")
+        if name in record
+    }
+    for name, section in recovery_sections.items():
+        if not isinstance(section, dict):
+            raise TypeError(f"{name} must be an object")
+        extras = sorted(set(section) - set(_MULTILINGUAL_RATE_CONSTRAINTS))
+        if extras:
+            raise RuntimeError(f"Unknown {name} keys: {extras}")
+    if recovery_sections:
         provenance = record.get("provenance")
         if not isinstance(provenance, dict) or not str(
             provenance.get("reason", "")
@@ -184,12 +211,17 @@ def load_finalization_overrides(source_journal: Path) -> tuple[dict[str, Any], P
     return record, path
 
 
-def _constraint_override_values(overrides: dict[str, Any]) -> dict[str, float]:
+def _constraint_override_values(
+    overrides: dict[str, Any], section_name: str
+) -> dict[str, float]:
+    section = overrides.get(section_name, {})
+    if not isinstance(section, dict):
+        raise TypeError(f"{section_name} must be an object")
     values: dict[str, float] = {}
-    for key in _MULTILINGUAL_CONSTRAINT_OVERRIDES:
-        if key not in overrides:
+    for key in _MULTILINGUAL_RATE_CONSTRAINTS:
+        if key not in section:
             continue
-        value = float(overrides[key])
+        value = float(section[key])
         if not 0.0 <= value <= 1.0:
             raise RuntimeError(f"{key} must be in [0, 1]")
         values[key] = value
@@ -203,7 +235,7 @@ def apply_multilingual_constraint_overrides(
 ) -> list[str]:
     """Apply explicit run-local rate gates to finalist settings and labels."""
 
-    values = _constraint_override_values(overrides)
+    values = _constraint_override_values(overrides, "finalist_constraints")
     if not values:
         return list(constraint_names)
     contract = settings_data.get("multilingual_search")
@@ -211,7 +243,7 @@ def apply_multilingual_constraint_overrides(
         raise TypeError("multilingual settings are missing for constraint recovery")
     updated = list(constraint_names)
     for key, value in values.items():
-        label = _MULTILINGUAL_CONSTRAINT_OVERRIDES[key]
+        label = _MULTILINGUAL_RATE_CONSTRAINTS[key]
         matches = [
             index
             for index, name in enumerate(updated)
@@ -232,9 +264,9 @@ def _constraints_with_overrides(
     if not isinstance(constraints, (list, tuple)):
         return None
     adjusted = [float(value) for value in constraints]
-    values = _constraint_override_values(overrides)
+    values = _constraint_override_values(overrides, "source_constraints")
     for key, new_limit in values.items():
-        label = _MULTILINGUAL_CONSTRAINT_OVERRIDES[key]
+        label = _MULTILINGUAL_RATE_CONSTRAINTS[key]
         matches = [
             index
             for index, name in enumerate(constraint_names)
@@ -453,13 +485,22 @@ def prepare_multilingual(
     )
     if not 0.0 <= removal_fraction <= 1.0:
         raise RuntimeError("balanced_removal_fraction must be in [0, 1]")
-    constraint_overrides = _constraint_override_values(overrides)
+    source_constraint_overrides = {
+        "source_constraints": _constraint_override_values(
+            overrides, "source_constraints"
+        )
+    }
+    finalist_constraint_overrides = {
+        "finalist_constraints": _constraint_override_values(
+            overrides, "finalist_constraints"
+        )
+    }
     constraint_names = apply_multilingual_constraint_overrides(
         settings_data,
         list(source.user_attrs.get("constraint_names", [])),
-        constraint_overrides,
+        finalist_constraint_overrides,
     )
-    candidates = _multilingual_source_rows(source, constraint_overrides)
+    candidates = _multilingual_source_rows(source, source_constraint_overrides)
     if args.trial_indices:
         if len(args.trial_indices) != 6 or len(set(args.trial_indices)) != 6:
             raise RuntimeError("--trial-indices must contain six distinct entries")
@@ -527,7 +568,7 @@ def prepare_multilingual(
         "runtime_root",
         json.dumps(str(multilingual["runtime_root"]).replace("\\", "/")),
     )
-    for key, value in constraint_overrides.items():
+    for key, value in finalist_constraint_overrides["finalist_constraints"].items():
         config_text = replace_table_value(
             config_text,
             "multilingual_search",
@@ -580,7 +621,12 @@ def prepare_multilingual(
         "devices": list(args.devices),
         "gates": {
             "balanced_removal_fraction": removal_fraction,
-            "constraint_overrides": constraint_overrides,
+            "source_constraint_overrides": source_constraint_overrides[
+                "source_constraints"
+            ],
+            "finalist_constraint_overrides": finalist_constraint_overrides[
+                "finalist_constraints"
+            ],
         },
         "finalization_overrides": None
         if override_path is None

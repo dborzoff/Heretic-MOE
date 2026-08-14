@@ -2443,6 +2443,8 @@ def load_finalization_overrides_contract(
         "balanced_srg_gate",
         "baseline_srg",
         "balanced_removal_fraction",
+        "source_constraints",
+        "finalist_constraints",
         "max_truncated_response_rate",
         "max_safe_d_to_r_rate",
         "provenance",
@@ -2454,7 +2456,28 @@ def load_finalization_overrides_contract(
         "max_truncated_response_rate",
         "max_safe_d_to_r_rate",
     }
-    if set(record) & rate_keys:
+    legacy_source = {key: record[key] for key in rate_keys if key in record}
+    if legacy_source:
+        if "source_constraints" in record:
+            raise RuntimeError(
+                "Legacy rate keys cannot be combined with source_constraints"
+            )
+        record = dict(record)
+        record["source_constraints"] = legacy_source
+        for key in legacy_source:
+            record.pop(key)
+    recovery_sections = {
+        name: record[name]
+        for name in ("source_constraints", "finalist_constraints")
+        if name in record
+    }
+    for name, section in recovery_sections.items():
+        if not isinstance(section, dict):
+            raise TypeError(f"{name} must be an object")
+        extras = sorted(set(section) - rate_keys)
+        if extras:
+            raise RuntimeError(f"Unknown {name} keys: {extras}")
+    if recovery_sections:
         provenance = record.get("provenance")
         if not isinstance(provenance, dict) or not str(
             provenance.get("reason", "")
@@ -2482,17 +2505,18 @@ def build_finalization_contract(
         )
     )
     if getattr(args, "multilingual_v3_enabled", False):
-        constraint_overrides = {
-            key: float(overrides[key])
-            for key in (
-                "max_truncated_response_rate",
-                "max_safe_d_to_r_rate",
-            )
-            if key in overrides
+        source_constraint_overrides = {
+            key: float(value)
+            for key, value in dict(overrides.get("source_constraints", {})).items()
+        }
+        finalist_constraint_overrides = {
+            key: float(value)
+            for key, value in dict(overrides.get("finalist_constraints", {})).items()
         }
         gates = {
             "balanced_removal_fraction": removal_fraction,
-            "constraint_overrides": constraint_overrides,
+            "source_constraint_overrides": source_constraint_overrides,
+            "finalist_constraint_overrides": finalist_constraint_overrides,
         }
         ppl = None
     else:

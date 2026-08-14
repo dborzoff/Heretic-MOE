@@ -28,6 +28,32 @@ def load_recheck_module():
 recheck = load_recheck_module()
 
 
+def test_legacy_rate_recovery_is_normalized_as_source_only(tmp_path: Path) -> None:
+    journal = tmp_path / "run" / "shared_tpe" / "checkpoints" / "source.jsonl"
+    journal.parent.mkdir(parents=True)
+    override = tmp_path / "run" / "finalization_overrides.json"
+    override.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "max_truncated_response_rate": 1.0,
+                "max_safe_d_to_r_rate": 0.025,
+                "provenance": {"reason": "legacy source recovery"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    record, path = recheck.load_finalization_overrides(journal)
+
+    assert path == override
+    assert record["source_constraints"] == {
+        "max_truncated_response_rate": 1.0,
+        "max_safe_d_to_r_rate": 0.025,
+    }
+    assert "finalist_constraints" not in record
+
+
 def test_multilingual_holdout_hash_uses_frozen_runtime_manifest(tmp_path: Path) -> None:
     dataset = tmp_path / "dataset"
     dataset.mkdir()
@@ -287,8 +313,10 @@ def test_multilingual_source_rows_apply_explicit_constraint_overrides() -> None:
     rows = recheck._multilingual_source_rows(
         study,
         {
-            "max_truncated_response_rate": 1.0,
-            "max_safe_d_to_r_rate": 0.025,
+            "source_constraints": {
+                "max_truncated_response_rate": 1.0,
+                "max_safe_d_to_r_rate": 0.025,
+            }
         },
     )
 
@@ -311,16 +339,18 @@ def test_multilingual_constraint_overrides_update_finalist_settings_and_names() 
         settings,
         names,
         {
-            "max_truncated_response_rate": 1.0,
-            "max_safe_d_to_r_rate": 0.025,
+            "finalist_constraints": {
+                "max_truncated_response_rate": 0.0,
+                "max_safe_d_to_r_rate": 0.02,
+            }
         },
     )
 
-    assert settings["multilingual_search"]["max_truncated_response_rate"] == 1.0
-    assert settings["multilingual_search"]["max_safe_d_to_r_rate"] == 0.025
+    assert settings["multilingual_search"]["max_truncated_response_rate"] == 0.0
+    assert settings["multilingual_search"]["max_safe_d_to_r_rate"] == 0.02
     assert updated_names == [
-        "Truncated response rate <= 1.0",
-        "SAFE D->R rate <= 0.025",
+        "Truncated response rate <= 0.0",
+        "SAFE D->R rate <= 0.02",
     ]
 
 

@@ -200,7 +200,8 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
                 "selection_policy": "feasible_cost",
                 "gates": {
                     "balanced_removal_fraction": 0.8,
-                    "constraint_overrides": {},
+                    "source_constraint_overrides": {},
+                    "finalist_constraint_overrides": {},
                 },
                 "finalization_overrides": None,
             }
@@ -208,7 +209,11 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
             self.assertIsNone(contract["ppl"])
             self.assertEqual(
                 contract["gates"],
-                {"balanced_removal_fraction": 0.8, "constraint_overrides": {}},
+                {
+                    "balanced_removal_fraction": 0.8,
+                    "source_constraint_overrides": {},
+                    "finalist_constraint_overrides": {},
+                },
             )
             self.assertTrue(controller.finalization_manifest_matches(manifest, contract))
             wrong_contract_manifest = {**manifest, "contract": "legacy_recheck"}
@@ -236,8 +241,14 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
                 json.dumps(
                     {
                         "schema_version": 1,
-                        "max_truncated_response_rate": 1.0,
-                        "max_safe_d_to_r_rate": 0.025,
+                        "source_constraints": {
+                            "max_truncated_response_rate": 1.0,
+                            "max_safe_d_to_r_rate": 0.025,
+                        },
+                        "finalist_constraints": {
+                            "max_truncated_response_rate": 0.0,
+                            "max_safe_d_to_r_rate": 0.02,
+                        },
                         "provenance": {"reason": "legacy metric recovery"},
                     }
                 ),
@@ -269,10 +280,17 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                contract["gates"]["constraint_overrides"],
+                contract["gates"]["source_constraint_overrides"],
                 {
                     "max_truncated_response_rate": 1.0,
                     "max_safe_d_to_r_rate": 0.025,
+                },
+            )
+            self.assertEqual(
+                contract["gates"]["finalist_constraint_overrides"],
+                {
+                    "max_truncated_response_rate": 0.0,
+                    "max_safe_d_to_r_rate": 0.02,
                 },
             )
             self.assertIsNotNone(contract["overrides"])
