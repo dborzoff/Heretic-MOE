@@ -190,9 +190,14 @@ def test_search_progress_uses_total_eta_and_gpu_telemetry_not_rows_per_second() 
     assert worker.fields["detail"] == (
         "last 38.6s | GPU 68% | VRAM 15.5/24.0 GiB"
     )
+    ui._progress.stop()
+    console.print(ui._progress.get_renderable())
     output = console.export_text(styles=False)
     assert "rows/s" not in output
     assert "--:--:--" not in output
+    assert "220/600" in output
+    assert "109 trials" in output
+    assert "109/600" not in output
     ui.finish_stage({"status": "PASS"})
     ui.close()
 

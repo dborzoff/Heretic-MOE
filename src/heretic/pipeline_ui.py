@@ -12,12 +12,15 @@ from rich.console import Console
 from rich.progress import (
     BarColumn,
     Progress,
+    ProgressColumn,
     SpinnerColumn,
+    Task,
     TaskID,
     TaskProgressColumn,
     TextColumn,
 )
-from rich.table import Table
+from rich.table import Column, Table
+from rich.text import Text
 
 _SENSITIVE_KEY_PARTS = ("prompt", "response", "answer", "text", "payload")
 
@@ -38,6 +41,32 @@ class _PipelineProgress(Progress):
         yield self.make_tasks_table(self.tasks)
         if self.footer is not None:
             yield self.footer
+
+
+class _OverallBarColumn(BarColumn):
+    def render(self, task: Task) -> Any:
+        if task.fields.get("worker"):
+            return Text("")
+        return super().render(task)
+
+
+class _OverallPercentColumn(TaskProgressColumn):
+    def render(self, task: Task) -> Text:
+        if task.fields.get("worker"):
+            return Text("")
+        return super().render(task)
+
+
+class _QueueCountColumn(ProgressColumn):
+    def __init__(self) -> None:
+        super().__init__(table_column=Column(min_width=8, no_wrap=True))
+
+    def render(self, task: Task) -> Text:
+        completed = int(task.completed)
+        if task.fields.get("worker"):
+            return Text(f"{completed} trials")
+        total = int(task.total or 0)
+        return Text(f"{completed}/{total}")
 
 
 def _clean_label(value: object, *, fallback: str, max_length: int = 64) -> str:
@@ -98,11 +127,19 @@ class PipelineUI:
         self._rich = bool(self.console.is_terminal)
         self._progress = _PipelineProgress(
             SpinnerColumn(),
-            TextColumn("[bold]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TextColumn("{task.completed}/{task.total}"),
-            TextColumn("{task.fields[detail]}"),
+            TextColumn(
+                "[bold]{task.description}",
+                table_column=Column(min_width=7, max_width=18, no_wrap=True),
+            ),
+            _OverallBarColumn(bar_width=16),
+            _OverallPercentColumn(
+                table_column=Column(width=4, no_wrap=True, justify="right")
+            ),
+            _QueueCountColumn(),
+            TextColumn(
+                "{task.fields[detail]}",
+                table_column=Column(ratio=1, overflow="ellipsis", no_wrap=True),
+            ),
             console=self.console,
             transient=transient,
             refresh_per_second=refresh_per_second,
@@ -155,7 +192,7 @@ class PipelineUI:
             self.console.print(f"▶ {self._stage} | {title}", style="bold cyan")
             self._progress.start()
             self._overall = self._progress.add_task(
-                self._stage, total=int(total), detail="starting"
+                self._stage, total=int(total), detail="starting", worker=False
             )
         else:
             self.console.print(f"STAGE {self._stage} | total {int(total)}")
@@ -193,7 +230,7 @@ class PipelineUI:
         }
         if self._rich:
             state["task"] = self._progress.add_task(
-                display, total=int(total), detail="waiting"
+                display, total=int(total), detail="waiting", worker=True
             )
         else:
             self.console.print(f"WORKER {self._stage} | {display} | total {int(total)}")
