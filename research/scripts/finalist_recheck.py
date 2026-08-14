@@ -29,6 +29,7 @@ from heretic.multilingual_finalists import (
 from heretic.trial_selection import candidate_trials
 
 _MULTILINGUAL_RATE_CONSTRAINTS = {
+    "max_safe_ppl_drift": "Safe PPL drift",
     "max_truncated_response_rate": "Truncated response rate",
     "max_safe_d_to_r_rate": "SAFE D->R rate",
 }
@@ -170,6 +171,7 @@ def load_finalization_overrides(source_journal: Path) -> tuple[dict[str, Any], P
         "balanced_removal_fraction",
         "source_constraints",
         "finalist_constraints",
+        "max_safe_ppl_drift",
         "max_truncated_response_rate",
         "max_safe_d_to_r_rate",
         "provenance",

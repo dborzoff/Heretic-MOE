@@ -242,10 +242,12 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
                     {
                         "schema_version": 1,
                         "source_constraints": {
+                            "max_safe_ppl_drift": 0.009,
                             "max_truncated_response_rate": 1.0,
                             "max_safe_d_to_r_rate": 0.025,
                         },
                         "finalist_constraints": {
+                            "max_safe_ppl_drift": 0.007,
                             "max_truncated_response_rate": 0.0,
                             "max_safe_d_to_r_rate": 0.02,
                         },
@@ -282,6 +284,7 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
             self.assertEqual(
                 contract["gates"]["source_constraint_overrides"],
                 {
+                    "max_safe_ppl_drift": 0.009,
                     "max_truncated_response_rate": 1.0,
                     "max_safe_d_to_r_rate": 0.025,
                 },
@@ -289,6 +292,7 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
             self.assertEqual(
                 contract["gates"]["finalist_constraint_overrides"],
                 {
+                    "max_safe_ppl_drift": 0.007,
                     "max_truncated_response_rate": 0.0,
                     "max_safe_d_to_r_rate": 0.02,
                 },

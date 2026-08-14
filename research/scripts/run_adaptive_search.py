@@ -2719,6 +2719,7 @@ def load_finalization_overrides_contract(
         "balanced_removal_fraction",
         "source_constraints",
         "finalist_constraints",
+        "max_safe_ppl_drift",
         "max_truncated_response_rate",
         "max_safe_d_to_r_rate",
         "provenance",
@@ -2727,6 +2728,7 @@ def load_finalization_overrides_contract(
     if extras:
         raise RuntimeError(f"Unknown finalization override keys: {extras}")
     rate_keys = {
+        "max_safe_ppl_drift",
         "max_truncated_response_rate",
         "max_safe_d_to_r_rate",
     }

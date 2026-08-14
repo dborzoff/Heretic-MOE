@@ -346,11 +346,13 @@ def test_multilingual_source_rows_apply_explicit_constraint_overrides() -> None:
 def test_multilingual_constraint_overrides_update_finalist_settings_and_names() -> None:
     settings = {
         "multilingual_search": {
+            "max_safe_ppl_drift": 0.005,
             "max_truncated_response_rate": 0.0,
             "max_safe_d_to_r_rate": 0.0,
         }
     }
     names = [
+        "Safe PPL drift <= 0.005",
         "Truncated response rate <= 0.0",
         "SAFE D->R rate <= 0.0",
     ]
@@ -360,15 +362,18 @@ def test_multilingual_constraint_overrides_update_finalist_settings_and_names() 
         names,
         {
             "finalist_constraints": {
+                "max_safe_ppl_drift": 0.007,
                 "max_truncated_response_rate": 0.0,
                 "max_safe_d_to_r_rate": 0.02,
             }
         },
     )
 
+    assert settings["multilingual_search"]["max_safe_ppl_drift"] == 0.007
     assert settings["multilingual_search"]["max_truncated_response_rate"] == 0.0
     assert settings["multilingual_search"]["max_safe_d_to_r_rate"] == 0.02
     assert updated_names == [
+        "Safe PPL drift <= 0.007",
         "Truncated response rate <= 0.0",
         "SAFE D->R rate <= 0.02",
     ]
