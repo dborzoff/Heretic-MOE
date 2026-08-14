@@ -10,7 +10,7 @@ from heretic.language_map_cache import (
     load_residual_cache,
 )
 from heretic.language_map_data import GeometryRow
-from heretic.model import Model
+from heretic.model import Model, residual_batch_with_headroom
 from heretic.utils import Prompt
 
 
@@ -273,3 +273,80 @@ def test_model_residual_iterator_buckets_cached_token_lengths_and_restores_order
 
     assert seen == [["one", "three", "two", "zero"]]
     assert batches[0].flatten().tolist() == [31.0, 0.0, 20.0, 10.0]
+
+
+def test_model_residual_iterator_respects_cached_token_budget() -> None:
+    model = object.__new__(Model)
+    model.settings = SimpleNamespace(max_batch_size=8)
+    model.tokenizer = object()
+    model._adaptive_residual_batch_size = 4
+    model._adaptive_residual_token_budget = 8
+    seen: list[list[str]] = []
+    lengths = {"a": 1, "b": 1, "c": 1, "long": 10}
+
+    model._cached_prompt_token_ids = lambda prompts: [
+        torch.zeros(lengths[prompt.user], dtype=torch.int32) for prompt in prompts
+    ]
+
+    def residuals(prompts):
+        seen.append([prompt.user for prompt in prompts])
+        return torch.zeros((len(prompts), 1, 1), dtype=torch.float32)
+
+    model.get_residuals = residuals
+    prompts = [
+        Prompt(system="", user="a"),
+        Prompt(system="", user="b"),
+        Prompt(system="", user="c"),
+        Prompt(system="", user="long"),
+    ]
+
+    batches = list(model.iter_residual_batches(prompts, batch_size=0))
+
+    assert seen == [["a", "b", "c"], ["long"]]
+    assert [len(batch) for batch in batches] == [3, 1]
+
+
+def test_first_auto_residual_batch_uses_typical_width_not_outlier_width() -> None:
+    model = object.__new__(Model)
+    model.settings = SimpleNamespace(max_batch_size=8)
+    model.tokenizer = object()
+    model._adaptive_residual_batch_size = 0
+    seen: list[list[str]] = []
+    lengths = {"a": 1, "b": 1, "c": 1, "long": 10}
+    model._cached_prompt_token_ids = lambda prompts: [
+        torch.zeros(lengths[prompt.user], dtype=torch.int32) for prompt in prompts
+    ]
+
+    def residuals(prompts):
+        seen.append([prompt.user for prompt in prompts])
+        return torch.zeros((len(prompts), 1, 1), dtype=torch.float32)
+
+    model.get_residuals = residuals
+    prompts = [Prompt(system="", user=value) for value in ("a", "b", "c", "long")]
+
+    list(model.iter_residual_batches(prompts, batch_size=0))
+
+    assert seen == [["a", "b", "c"], ["long"]]
+
+
+def test_residual_headroom_scales_batch_from_measured_working_set() -> None:
+    gib = 1024**3
+
+    selected = residual_batch_with_headroom(
+        128,
+        baseline_free_bytes=16 * gib,
+        measured_free_bytes=gib // 10,
+        total_bytes=24 * gib,
+        headroom_fraction=0.10,
+        headroom_gib=2.0,
+    )
+
+    assert 90 <= selected <= 110
+    assert residual_batch_with_headroom(
+        64,
+        baseline_free_bytes=16 * gib,
+        measured_free_bytes=4 * gib,
+        total_bytes=24 * gib,
+        headroom_fraction=0.10,
+        headroom_gib=2.0,
+    ) == 64

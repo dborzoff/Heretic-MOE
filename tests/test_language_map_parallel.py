@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from safetensors.torch import load_file
 
 from heretic.language_map_cache import load_residual_cache
 from heretic.language_map_data import GeometryRow
@@ -20,6 +21,12 @@ class IndexedResidualModel:
     def __init__(self, delay: float = 0.0):
         self.delay = delay
         self.measured: list[int] = []
+
+    def _cached_prompt_token_ids(self, prompts):
+        return [
+            torch.zeros(1000 - int(prompt.user.removeprefix("row-")))
+            for prompt in prompts
+        ]
 
     def iter_residual_batches(self, prompts, batch_size):
         for start in range(0, len(prompts), batch_size):
@@ -128,8 +135,12 @@ def test_one_range_contains_multiple_model_batches_but_writes_one_part(
     )
 
     assert result == {"worker_id": "gpu-0", "tasks": 1, "rows": 5}
-    assert model.measured == [0, 1, 2, 3, 4]
-    assert len(list(parts.glob("*.safetensors"))) == 1
+    assert model.measured == [4, 3, 2, 1, 0]
+    part_files = list(parts.glob("*.safetensors"))
+    assert len(part_files) == 1
+    assert load_file(str(part_files[0]))["residuals"][:, 0, 0].tolist() == list(
+        range(5)
+    )
 
 
 def test_finalization_rejects_tampered_range_before_publishing_manifest(

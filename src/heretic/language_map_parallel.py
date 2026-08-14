@@ -73,6 +73,18 @@ def capture_claimed_ranges(
                 Prompt(system=system_prompt, user=row.prompt)
                 for row in rows[item.start : item.end]
             ]
+            restore_order: list[int] | None = None
+            cached_tokens = getattr(model, "_cached_prompt_token_ids", None)
+            if callable(cached_tokens):
+                token_lengths = [
+                    int(value.numel()) for value in cached_tokens(prompts)
+                ]
+                order = sorted(range(len(prompts)), key=token_lengths.__getitem__)
+                if order != list(range(len(prompts))):
+                    prompts = [prompts[position] for position in order]
+                    restore_order = [0] * len(order)
+                    for sorted_position, original_position in enumerate(order):
+                        restore_order[original_position] = sorted_position
             batches: list[Tensor] = []
             expected_shape: tuple[int, int] | None = None
             for batch in model.iter_residual_batches(prompts, batch_size):
@@ -94,6 +106,8 @@ def capture_claimed_ranges(
             if not batches:
                 raise ValueError("model returned no residual batches")
             residuals = torch.cat(batches, dim=0).contiguous()
+            if restore_order is not None:
+                residuals = residuals[restore_order].contiguous()
             expected_rows = item.end - item.start
             if residuals.shape[0] != expected_rows:
                 raise ValueError(

@@ -131,6 +131,29 @@ def low_rank_frobenius_squared(left: Tensor, right: Tensor) -> float:
     return float(torch.sum(left_gram * right_gram.T))
 
 
+def residual_batch_with_headroom(
+    batch_size: int,
+    *,
+    baseline_free_bytes: int,
+    measured_free_bytes: int,
+    total_bytes: int,
+    headroom_fraction: float,
+    headroom_gib: float,
+) -> int:
+    """Scale a residual batch so its measured working set leaves VRAM reserve."""
+
+    required = max(
+        int(headroom_gib * 1024**3),
+        int(headroom_fraction * total_bytes),
+    )
+    if measured_free_bytes >= required:
+        return int(batch_size)
+    working_set = max(1, baseline_free_bytes - measured_free_bytes)
+    allowed_working_set = max(0, baseline_free_bytes - required)
+    ratio = min(1.0, allowed_working_set / working_set)
+    return max(1, math.floor(batch_size * ratio * 0.95))
+
+
 class Model:
     model: PreTrainedModel | PeftModel
     tokenizer: PreTrainedTokenizerBase
@@ -2328,9 +2351,30 @@ class Model:
             token_lengths = [
                 int(row.numel()) for row in self._cached_prompt_token_ids(prompts)
             ]
+        token_budget = (
+            int(getattr(self, "_adaptive_residual_token_budget", 0))
+            if automatic
+            else 0
+        )
+        if automatic and token_lengths is not None and token_budget <= 0:
+            ordered_lengths = sorted(token_lengths)
+            typical_index = max(0, math.ceil(len(ordered_lengths) * 0.75) - 1)
+            token_budget = batch_size * ordered_lengths[typical_index]
         position = 0
         while position < len(prompts):
-            batch = prompts[position : position + batch_size]
+            active_batch_size = min(batch_size, len(prompts) - position)
+            if token_lengths is not None and token_budget > 0:
+                low, high, best = 1, active_batch_size, 1
+                while low <= high:
+                    candidate = (low + high) // 2
+                    maximum = max(token_lengths[position : position + candidate])
+                    if candidate * maximum <= token_budget:
+                        best = candidate
+                        low = candidate + 1
+                    else:
+                        high = candidate - 1
+                active_batch_size = best
+            batch = prompts[position : position + active_batch_size]
             restore_order = None
             if token_lengths is not None:
                 local_lengths = token_lengths[position : position + len(batch)]
@@ -2340,6 +2384,19 @@ class Model:
                     restore_order = [0] * len(order)
                     for sorted_index, original_index in enumerate(order):
                         restore_order[original_index] = sorted_index
+            cuda_probe: tuple[int, int] | None = None
+            model_device = getattr(getattr(self, "model", None), "device", None)
+            if (
+                automatic
+                and tuning
+                and torch.cuda.is_available()
+                and model_device is not None
+                and torch.device(model_device).type == "cuda"
+            ):
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                free_bytes, total_bytes = torch.cuda.mem_get_info()
+                cuda_probe = (int(free_bytes), int(total_bytes))
             try:
                 residuals = self.get_residuals(batch)
             except BaseException as error:
@@ -2359,6 +2416,50 @@ class Model:
                 self._release_failed_cuda_batch()
                 continue
             if tuning:
+                if cuda_probe is not None:
+                    torch.cuda.synchronize()
+                    measured_free, measured_total = torch.cuda.mem_get_info()
+                    if int(measured_total) != cuda_probe[1]:
+                        raise RuntimeError(
+                            "CUDA device memory total changed during residual tuning"
+                        )
+                    headroom_batch = residual_batch_with_headroom(
+                        len(batch),
+                        baseline_free_bytes=cuda_probe[0],
+                        measured_free_bytes=int(measured_free),
+                        total_bytes=int(measured_total),
+                        headroom_fraction=float(
+                            getattr(
+                                self.settings,
+                                "batch_size_vram_headroom_fraction",
+                                0.10,
+                            )
+                        ),
+                        headroom_gib=float(
+                            getattr(
+                                self.settings,
+                                "batch_size_vram_headroom_gib",
+                                2.0,
+                            )
+                        ),
+                    )
+                    if headroom_batch < batch_size:
+                        self._emit_batch_event(
+                            "batch_headroom",
+                            "residual",
+                            batch_size=batch_size,
+                            next_batch_size=headroom_batch,
+                            free_gib=round(int(measured_free) / 1024**3, 3),
+                        )
+                        batch_size = headroom_batch
+                        self._release_failed_cuda_batch()
+                if token_lengths is not None:
+                    token_budget = min(
+                        token_budget,
+                        batch_size
+                        * max(token_lengths[position : position + len(batch)]),
+                    )
+                    self._adaptive_residual_token_budget = token_budget
                 self._emit_batch_event(
                     "batch_selected", "residual", batch_size=batch_size
                 )
