@@ -502,6 +502,7 @@ def prepare_multilingual(
     args: argparse.Namespace,
     source: optuna.study.Study,
     settings_data: dict[str, Any],
+    base_config_data: dict[str, Any],
 ) -> None:
     if args.top_n != 6:
         raise RuntimeError("multilingual v3 finalization requires exactly TOP-6")
@@ -563,7 +564,10 @@ def prepare_multilingual(
 
     multilingual = dict(settings_data["multilingual_search"])
     multilingual["evaluation_phase"] = "finalist"
-    geometry_package_value = settings_data.get("geometry_trajectory_package")
+    geometry_package_value = settings_data.get(
+        "geometry_trajectory_package",
+        base_config_data.get("geometry_trajectory_package"),
+    )
     geometry_trial_number_offset = (
         next_geometry_trial_number_offset(Path(str(geometry_package_value)))
         if geometry_package_value
@@ -697,7 +701,7 @@ def prepare(args: argparse.Namespace) -> None:
         base_config_data = tomllib.load(stream)
     settings_data = json.loads(source.user_attrs["settings"])
     if _multilingual_enabled(settings_data):
-        prepare_multilingual(args, source, settings_data)
+        prepare_multilingual(args, source, settings_data, base_config_data)
         return
     overrides, override_path = load_finalization_overrides(args.source_journal)
     balanced_srg_gate = overrides.get("balanced_srg_gate", args.balanced_srg_gate)

@@ -268,8 +268,16 @@ def test_multilingual_prepare_freezes_top_six_and_finalist_phase() -> None:
                 },
             ))
         config = root / "config.toml"
+        geometry_package = runtime / "geometry_3d"
+        geometry_package.mkdir(parents=True)
+        (geometry_package / "trial_index.jsonl").write_text(
+            json.dumps({"trial_number": 1_000_005}) + "\n",
+            encoding="utf-8",
+        )
         config.write_text(
-            'model = "F:/models/example"\n\n[multilingual_search]\n'
+            'model = "F:/models/example"\n'
+            f'geometry_trajectory_package = "{geometry_package.as_posix()}"\n\n'
+            '[multilingual_search]\n'
             'enabled = true\ndataset_root = "' + dataset.as_posix() + '"\n',
             encoding="utf-8",
         )
@@ -313,7 +321,8 @@ def test_multilingual_prepare_freezes_top_six_and_finalist_phase() -> None:
         assert all(float(row["removal"]) >= 0.80 for row in preservation_rows)
         assert config_data["multilingual_search"]["evaluation_phase"] == "finalist"
         assert config_data["multilingual_search"]["runtime_root"] == runtime.as_posix()
-        assert config_data["geometry_trial_number_offset"] == 1_000_000
+        assert config_data["geometry_trial_number_offset"] == 2_000_000
+        assert manifest["geometry_trial_number_offset"] == 2_000_000
         assert len(prepared.trials) == 6
         assert all(trial.state == optuna.trial.TrialState.WAITING for trial in prepared.trials)
 
