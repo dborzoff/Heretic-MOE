@@ -160,6 +160,43 @@ def test_overall_total_stays_global_for_multiple_worker_rows() -> None:
     ui.close()
 
 
+def test_search_progress_uses_total_eta_and_gpu_telemetry_not_rows_per_second() -> None:
+    console, _ = _console(terminal=True)
+    ui = PipelineUI(console=console, non_tty_update_interval=0.0)
+
+    ui.stage("Adaptive search", total=600, workers=("gpu-0", "gpu-1"))
+    ui.update_worker(
+        "gpu-0",
+        completed=109,
+        total=600,
+        last_trial_seconds=38.6,
+        gpu_utilization=68.0,
+        memory_used_gib=15.5,
+        memory_total_gib=24.0,
+    )
+    ui.update_overall(
+        completed=220,
+        total=600,
+        rate=3.2 / 60.0,
+        elapsed_seconds=4_125.0,
+        estimated_total_seconds=11_250.0,
+        eta_seconds=7_125.0,
+    )
+
+    overall, worker = ui._progress.tasks[:2]
+    assert overall.fields["detail"] == (
+        "3.2 trials/min | elapsed 1h 9m | total 3h 8m | ETA 1h 59m"
+    )
+    assert worker.fields["detail"] == (
+        "last 38.6s | GPU 68% | VRAM 15.5/24.0 GiB"
+    )
+    output = console.export_text(styles=False)
+    assert "rows/s" not in output
+    assert "--:--:--" not in output
+    ui.finish_stage({"status": "PASS"})
+    ui.close()
+
+
 def test_non_tty_overall_progress_prints_one_global_multi_gpu_line() -> None:
     console, stream = _console(terminal=False)
     ui = PipelineUI(console=console, non_tty_update_interval=0.0)

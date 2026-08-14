@@ -53,6 +53,21 @@ class JournalTrialCounts:
     waiting: int
 
 
+@dataclass(frozen=True)
+class GPUMetrics:
+    utilization: float
+    memory_used_gib: float
+    memory_total_gib: float
+
+
+@dataclass(frozen=True)
+class SearchProgressEstimate:
+    rate: float
+    elapsed_seconds: float
+    total_seconds: float
+    eta_seconds: float
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -1291,6 +1306,8 @@ def _monitor_dynamic_workers(
         workers=worker_ids,
         description=f"Dynamic queue on {len(worker_ids)} resident GPU(s)",
     )
+    gpu_metrics: dict[str, GPUMetrics] = {}
+    last_gpu_metrics_at = 0.0
     try:
         while active:
             next_active: list[
@@ -1394,14 +1411,52 @@ def _monitor_dynamic_workers(
 
             active = next_active
             stats = queue.stats()
-            counts = worker_completion_counts(queue.task_records())
+            records = queue.task_records()
+            counts = worker_completion_counts(records)
+            durations = worker_latest_durations(records)
+            now = time.monotonic()
+            if now - last_gpu_metrics_at >= 1.0:
+                gpu_metrics = query_nvidia_smi_metrics()
+                last_gpu_metrics_at = now
+            active_devices = {
+                worker_id: str(stage.device)
+                for stage, _, worker_id, _, _ in active
+                if stage.device is not None
+            }
             for worker_id in worker_ids:
+                metrics = gpu_metrics.get(active_devices.get(worker_id, ""))
                 ui.update_worker(
                     worker_id,
                     completed=counts.get(worker_id, 0),
                     total=expected_tasks,
+                    last_trial_seconds=durations.get(worker_id),
+                    gpu_utilization=(
+                        None if metrics is None else metrics.utilization
+                    ),
+                    memory_used_gib=(
+                        None if metrics is None else metrics.memory_used_gib
+                    ),
+                    memory_total_gib=(
+                        None if metrics is None else metrics.memory_total_gib
+                    ),
                 )
-            ui.update_overall(completed=stats.complete, total=expected_tasks)
+            progress = estimate_search_progress(
+                completed=stats.complete,
+                total=expected_tasks,
+                worker_durations={
+                    worker_id: durations[worker_id]
+                    for worker_id in active_devices
+                    if worker_id in durations
+                },
+            )
+            ui.update_overall(
+                completed=stats.complete,
+                total=expected_tasks,
+                rate=progress.rate,
+                elapsed_seconds=progress.elapsed_seconds,
+                estimated_total_seconds=progress.total_seconds,
+                eta_seconds=progress.eta_seconds,
+            )
             if not active and (
                 stats.pending
                 or stats.claimed
@@ -1441,6 +1496,102 @@ def worker_completion_counts(records: list[Any]) -> dict[str, int]:
             continue
         counts[str(worker_id)] = counts.get(str(worker_id), 0) + 1
     return counts
+
+
+def worker_latest_durations(records: list[Any]) -> dict[str, float]:
+    """Return the latest durable wall time for each worker."""
+
+    latest: dict[str, tuple[int, float]] = {}
+    for record in records:
+        worker_id = getattr(record, "worker_id", None)
+        claimed_at = getattr(record, "claimed_at", None)
+        finished_at = getattr(record, "finished_at", None)
+        if (
+            getattr(record, "state", None) != "complete"
+            or not worker_id
+            or claimed_at is None
+            or finished_at is None
+        ):
+            continue
+        duration = float(finished_at) - float(claimed_at)
+        if not math.isfinite(duration) or duration <= 0:
+            continue
+        task_id = int(getattr(record, "task_id", -1))
+        previous = latest.get(str(worker_id))
+        if previous is None or task_id > previous[0]:
+            latest[str(worker_id)] = (task_id, duration)
+    return {worker_id: value[1] for worker_id, value in latest.items()}
+
+
+def estimate_search_progress(
+    *,
+    completed: int,
+    total: int,
+    worker_durations: dict[str, float],
+) -> SearchProgressEstimate:
+    """Estimate whole-search duration from resident workers' latest trials."""
+
+    if total <= 0 or not 0 <= completed <= total:
+        raise ValueError("search progress must be within [0, total]")
+    usable = [
+        float(duration)
+        for duration in worker_durations.values()
+        if math.isfinite(float(duration)) and float(duration) > 0
+    ]
+    if not usable:
+        return SearchProgressEstimate(0.0, 0.0, math.inf, math.inf)
+    rate = sum(1.0 / duration for duration in usable)
+    return SearchProgressEstimate(
+        rate=rate,
+        elapsed_seconds=completed / rate,
+        total_seconds=total / rate,
+        eta_seconds=(total - completed) / rate,
+    )
+
+
+def parse_nvidia_smi_metrics(output: str) -> dict[str, GPUMetrics]:
+    """Parse numeric nvidia-smi telemetry without model or dataset content."""
+
+    metrics: dict[str, GPUMetrics] = {}
+    for raw_line in output.splitlines():
+        if not raw_line.strip():
+            continue
+        fields = [part.strip() for part in raw_line.split(",")]
+        if len(fields) != 4:
+            raise ValueError(f"invalid nvidia-smi metric row: {raw_line!r}")
+        device, utilization, used_mib, total_mib = fields
+        metrics[device] = GPUMetrics(
+            utilization=float(utilization),
+            memory_used_gib=float(used_mib) / 1024,
+            memory_total_gib=float(total_mib) / 1024,
+        )
+    return metrics
+
+
+def query_nvidia_smi_metrics() -> dict[str, GPUMetrics]:
+    executable = shutil.which("nvidia-smi")
+    if executable is None:
+        return {}
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "--query-gpu=index,utilization.gpu,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if result.returncode != 0:
+        return {}
+    try:
+        return parse_nvidia_smi_metrics(result.stdout)
+    except (TypeError, ValueError):
+        return {}
 
 
 def wait_dynamic_workers(

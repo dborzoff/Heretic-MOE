@@ -841,6 +841,52 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
             {"gpu-0": 1, "gpu-2": 1, "gpu-7": 1},
         )
 
+    def test_worker_latest_durations_and_search_estimate_use_recent_trials(self) -> None:
+        records = [
+            SimpleNamespace(
+                task_id=1,
+                worker_id="gpu-0",
+                state="complete",
+                claimed_at=10.0,
+                finished_at=50.0,
+            ),
+            SimpleNamespace(
+                task_id=2,
+                worker_id="gpu-1",
+                state="complete",
+                claimed_at=20.0,
+                finished_at=58.0,
+            ),
+            SimpleNamespace(
+                task_id=3,
+                worker_id="gpu-0",
+                state="complete",
+                claimed_at=60.0,
+                finished_at=98.5,
+            ),
+        ]
+
+        durations = controller.worker_latest_durations(records)
+        estimate = controller.estimate_search_progress(
+            completed=220,
+            total=600,
+            worker_durations=durations,
+        )
+
+        self.assertEqual(durations, {"gpu-0": 38.5, "gpu-1": 38.0})
+        self.assertAlmostEqual(estimate.rate, 1 / 38.5 + 1 / 38.0)
+        self.assertAlmostEqual(estimate.eta_seconds, 380 / estimate.rate)
+        self.assertAlmostEqual(estimate.total_seconds, 600 / estimate.rate)
+
+    def test_parse_nvidia_smi_metrics_is_text_free_and_indexed(self) -> None:
+        metrics = controller.parse_nvidia_smi_metrics(
+            "0, 68, 15872, 24564\n1, 52, 14336, 24564\n"
+        )
+
+        self.assertEqual(metrics["0"].utilization, 68.0)
+        self.assertAlmostEqual(metrics["0"].memory_used_gib, 15.5)
+        self.assertAlmostEqual(metrics["1"].memory_total_gib, 24564 / 1024)
+
     def test_uninitialized_journal_does_not_require_constraint_backfill(self) -> None:
         self.assertFalse(
             controller.should_require_constraint_metadata(

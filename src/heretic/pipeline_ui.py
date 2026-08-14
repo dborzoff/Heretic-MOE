@@ -16,7 +16,6 @@ from rich.progress import (
     TaskID,
     TaskProgressColumn,
     TextColumn,
-    TimeRemainingColumn,
 )
 
 _SENSITIVE_KEY_PARTS = ("prompt", "response", "answer", "text", "payload")
@@ -55,6 +54,10 @@ def _public_value(value: object) -> str:
 def _format_duration(seconds: float) -> str:
     if not math.isfinite(seconds) or seconds < 0:
         return "unknown"
+    if seconds >= 3_600:
+        total_minutes = int((seconds + 30) // 60)
+        hours, minutes = divmod(total_minutes, 60)
+        return f"{hours}h {minutes}m"
     if seconds >= 90:
         return f"{seconds / 60:.1f}m"
     return f"{seconds:.0f}s"
@@ -80,8 +83,7 @@ class PipelineUI:
             BarColumn(),
             TaskProgressColumn(),
             TextColumn("{task.completed}/{task.total}"),
-            TextColumn("{task.fields[rate]:.1f} rows/s"),
-            TimeRemainingColumn(),
+            TextColumn("{task.fields[detail]}"),
             console=self.console,
             transient=transient,
             refresh_per_second=refresh_per_second,
@@ -134,7 +136,7 @@ class PipelineUI:
             self.console.print(f"▶ {self._stage} | {title}", style="bold cyan")
             self._progress.start()
             self._overall = self._progress.add_task(
-                self._stage, total=int(total), rate=0.0
+                self._stage, total=int(total), detail="starting"
             )
         else:
             self.console.print(f"STAGE {self._stage} | total {int(total)}")
@@ -171,7 +173,9 @@ class PipelineUI:
             "label": display,
         }
         if self._rich:
-            state["task"] = self._progress.add_task(display, total=int(total), rate=0.0)
+            state["task"] = self._progress.add_task(
+                display, total=int(total), detail="waiting"
+            )
         else:
             self.console.print(f"WORKER {self._stage} | {display} | total {int(total)}")
         self._workers[worker] = state
@@ -185,12 +189,10 @@ class PipelineUI:
             return
         completed = sum(int(state["completed"]) for state in self._workers.values())
         total = self._overall_total
-        elapsed = max(time.monotonic() - self._started, 1e-6)
         self._progress.update(
             self._overall,
             completed=min(completed, total),
             total=total,
-            rate=completed / elapsed,
         )
 
     def update_worker(
@@ -200,6 +202,10 @@ class PipelineUI:
         completed: int,
         total: int | None = None,
         rate: float | None = None,
+        last_trial_seconds: float | None = None,
+        gpu_utilization: float | None = None,
+        memory_used_gib: float | None = None,
+        memory_total_gib: float | None = None,
     ) -> None:
         """Update one worker row and the shared overall progress."""
         self._require_active()
@@ -218,12 +224,31 @@ class PipelineUI:
         effective_rate = self._worker_rate(state) if rate is None else float(rate)
         if not math.isfinite(effective_rate) or effective_rate < 0:
             raise ValueError("worker rate must be a nonnegative finite value")
+        telemetry = (
+            last_trial_seconds,
+            gpu_utilization,
+            memory_used_gib,
+            memory_total_gib,
+        )
+        if all(value is not None for value in telemetry):
+            if any(not math.isfinite(float(value)) for value in telemetry):
+                raise ValueError("worker telemetry must be finite")
+            detail = (
+                f"last {float(last_trial_seconds):.1f}s | "
+                f"GPU {float(gpu_utilization):.0f}% | "
+                f"VRAM {float(memory_used_gib):.1f}/"
+                f"{float(memory_total_gib):.1f} GiB"
+            )
+        else:
+            remaining = max(new_total - new_completed, 0)
+            eta = remaining / effective_rate if effective_rate > 0 else math.inf
+            detail = f"{effective_rate:.1f} rows/s | ETA {_format_duration(eta)}"
         if self._rich:
             self._progress.update(
                 state["task"],
                 completed=new_completed,
                 total=new_total,
-                rate=effective_rate,
+                detail=detail,
             )
             self._refresh_overall()
             return
@@ -238,11 +263,9 @@ class PipelineUI:
             or new_completed == new_total
             or now - self._last_compact_update >= self.non_tty_update_interval
         ):
-            remaining = max(new_total - new_completed, 0)
-            eta = remaining / effective_rate if effective_rate > 0 else math.inf
             self.console.print(
                 f"PROGRESS {self._stage} | {state['label']} {new_completed}/{new_total} | "
-                f"{effective_rate:.1f} rows/s | ETA {_format_duration(eta)}"
+                f"{detail}"
             )
             self._last_compact_update = now
 
@@ -252,6 +275,9 @@ class PipelineUI:
         completed: int,
         total: int | None = None,
         rate: float | None = None,
+        elapsed_seconds: float | None = None,
+        estimated_total_seconds: float | None = None,
+        eta_seconds: float | None = None,
     ) -> None:
         """Set authoritative global progress for dynamic shared queues."""
 
@@ -265,12 +291,31 @@ class PipelineUI:
         effective_rate = new_completed / elapsed if rate is None else float(rate)
         if not math.isfinite(effective_rate) or effective_rate < 0:
             raise ValueError("overall rate must be a nonnegative finite value")
+        explicit_times = (
+            elapsed_seconds,
+            estimated_total_seconds,
+            eta_seconds,
+        )
+        if all(value is not None for value in explicit_times):
+            detail = (
+                f"{effective_rate * 60:.1f} trials/min | "
+                f"elapsed {_format_duration(float(elapsed_seconds))} | "
+                f"total {_format_duration(float(estimated_total_seconds))} | "
+                f"ETA {_format_duration(float(eta_seconds))}"
+            )
+        else:
+            remaining = max(new_total - new_completed, 0)
+            eta = remaining / effective_rate if effective_rate > 0 else math.inf
+            detail = (
+                f"{effective_rate * 60:.1f} trials/min | "
+                f"ETA {_format_duration(eta)}"
+            )
         if self._rich and self._overall is not None:
             self._progress.update(
                 self._overall,
                 completed=new_completed,
                 total=new_total,
-                rate=effective_rate,
+                detail=detail,
             )
             return
         now = time.monotonic()
@@ -284,12 +329,9 @@ class PipelineUI:
                 for state in self._workers.values()
             )
             worker_suffix = f" | {workers}" if workers else ""
-            remaining = max(new_total - new_completed, 0)
-            eta = remaining / effective_rate if effective_rate > 0 else math.inf
             self.console.print(
                 f"PROGRESS {self._stage} | {new_completed}/{new_total}"
-                f"{worker_suffix} | {effective_rate * 60:.1f} trials/min | "
-                f"ETA {_format_duration(eta)}"
+                f"{worker_suffix} | {detail}"
             )
             self._last_compact_update = now
 

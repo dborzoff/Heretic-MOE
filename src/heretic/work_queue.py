@@ -55,6 +55,8 @@ class QueueTaskRecord:
     attempt: int
     trial_number: int | None
     trial_state: str | None
+    claimed_at: float | None
+    finished_at: float | None
 
 
 class TrialWorkQueue:
@@ -445,7 +447,7 @@ class TrialWorkQueue:
             rows = connection.execute(
                 """
                 SELECT task_id, task_kind, state, worker_id, attempt,
-                    trial_number, trial_state
+                    trial_number, trial_state, claimed_at, finished_at
                 FROM tasks
                 ORDER BY task_id
                 """
@@ -462,6 +464,12 @@ class TrialWorkQueue:
                 ),
                 trial_state=(
                     None if row["trial_state"] is None else str(row["trial_state"])
+                ),
+                claimed_at=(
+                    None if row["claimed_at"] is None else float(row["claimed_at"])
+                ),
+                finished_at=(
+                    None if row["finished_at"] is None else float(row["finished_at"])
                 ),
             )
             for row in rows

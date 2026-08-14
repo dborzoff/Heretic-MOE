@@ -60,3 +60,19 @@ def test_only_complete_optuna_trials_can_complete_a_permit(tmp_path: Path) -> No
         queue.finish(item, trial_number=0, trial_state="PRUNED")
 
     assert queue.task_records()[0].state == "claimed"
+
+
+def test_completed_task_record_exposes_text_free_wall_duration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = iter((100.0, 100.0, 138.5))
+    monkeypatch.setattr("heretic.work_queue.time.time", lambda: next(clock))
+    queue = _queue(tmp_path)
+    item = queue.claim("gpu-0")
+    assert item is not None
+
+    queue.finish(item, trial_number=7, trial_state="COMPLETE")
+
+    record = queue.task_records()[0]
+    assert record.claimed_at == 100.0
+    assert record.finished_at == 138.5
