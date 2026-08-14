@@ -29,7 +29,7 @@ class FakeModel:
             yield torch.ones((count, 2, 3), dtype=torch.float32)
 
 
-def _write_cell(path: Path, direction: str) -> None:
+def _write_cell(path: Path, direction: str, count: int = 2) -> None:
     prefix = "A" if direction == "safe" else "B"
     path.write_text(
         "".join(
@@ -44,7 +44,7 @@ def _write_cell(path: Path, direction: str) -> None:
                 }
             )
             + "\n"
-            for number in range(1, 3)
+            for number in range(1, count + 1)
         ),
         encoding="utf-8",
     )
@@ -103,6 +103,57 @@ def test_worker_validates_job_and_completes_real_range_queue(tmp_path: Path) -> 
     assert queue.stats().complete_rows == 4
     assert len(model.prepared) == 4
     assert model.pinned is True
+
+
+def test_worker_accepts_asymmetric_direction_counts(tmp_path: Path) -> None:
+    safe = tmp_path / "safe.jsonl"
+    unsafe = tmp_path / "unsafe.jsonl"
+    _write_cell(safe, "safe", count=3)
+    _write_cell(unsafe, "unsafe", count=1)
+    files = [
+        LanguageFile("en", "safe", safe),
+        LanguageFile("en", "unsafe", unsafe),
+    ]
+    counts = {"safe": 3, "unsafe": 1}
+    rows = load_aligned_corpus(files, ("en",), counts)
+    metadata = {"mode": "asymmetric-test"}
+    fingerprint = _capture_fingerprint(rows, 2, "system", metadata)
+    queue = RangeWorkQueue(tmp_path / "queue.sqlite3")
+    queue.initialize(row_count=4, rows_per_task=2, fingerprint=fingerprint)
+    job = tmp_path / "job.json"
+    job.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "fingerprint": fingerprint,
+                "languages": ["en"],
+                "rows_per_cell": counts,
+                "limit_per_cell": None,
+                "files": [
+                    {"language": "en", "direction": "safe", "path": str(safe)},
+                    {"language": "en", "direction": "unsafe", "path": str(unsafe)},
+                ],
+                "model": "fake",
+                "dtype": "bfloat16",
+                "batch_size": 2,
+                "system_prompt": "system",
+                "metadata": metadata,
+                "queue_path": str(queue.path),
+                "parts_dir": str(tmp_path / "parts"),
+                "cpu_threads": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_worker_job(
+        job,
+        device="0",
+        worker_id="gpu-0",
+        model_factory=lambda _job: FakeModel(),
+    )
+
+    assert result == {"worker_id": "gpu-0", "tasks": 2, "rows": 4}
 
 
 def test_worker_rejects_fingerprint_drift_before_loading_model(tmp_path: Path) -> None:

@@ -80,7 +80,16 @@ def run_worker_job(
         for entry in job["files"]
     ]
     languages = tuple(str(language) for language in job["languages"])
-    rows = load_aligned_corpus(files, languages, int(job["rows_per_cell"]))
+    raw_counts = job["rows_per_cell"]
+    rows_per_cell = (
+        {
+            direction: int(raw_counts[direction])
+            for direction in ("safe", "unsafe")
+        }
+        if isinstance(raw_counts, dict)
+        else int(raw_counts)
+    )
+    rows = load_aligned_corpus(files, languages, rows_per_cell)
     rows = _selected_rows(rows, job.get("limit_per_cell"))
     fingerprint = _capture_fingerprint(
         rows,
