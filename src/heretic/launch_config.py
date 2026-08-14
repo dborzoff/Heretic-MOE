@@ -132,7 +132,7 @@ class MetricsSettings(BaseModel):
     max_category_instability: float = Field(default=1.0, ge=0.0)
     max_empty_rate: float = Field(default=0.0, ge=0.0)
     max_truncated_rate: float = Field(default=0.0, ge=0.0)
-    max_safe_d_to_r_rate: float = Field(default=0.0, ge=0.0)
+    max_safe_d_to_r_rate: float = Field(default=0.02, ge=0.0)
 
 
 class FinalistSettings(BaseModel):

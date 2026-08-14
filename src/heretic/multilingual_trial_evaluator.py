@@ -397,11 +397,25 @@ def evaluate_multilingual_trial(
         not str(response).strip() or len(ids) == 0
         for response, ids in zip(responses, token_ids, strict=True)
     )
-    truncated_responses = sum(len(ids) >= max_response_length for ids in token_ids)
+    clean_token_ids = [
+        [int(value) for value in clean[row.row_id]["clean_response_token_ids"]]
+        for row in ordered
+    ]
+    clean_at_cap = [len(ids) >= max_response_length for ids in clean_token_ids]
+    candidate_at_cap = [len(ids) >= max_response_length for ids in token_ids]
+    newly_truncated = sum(
+        not clean_cap and candidate_cap
+        for clean_cap, candidate_cap in zip(
+            clean_at_cap, candidate_at_cap, strict=True
+        )
+    )
     hard_gates = {
         "empty_response_rate": empty_responses / len(ordered),
-        "truncated_response_rate": truncated_responses / len(ordered),
-        "safe_d_to_r_rate": float(safe_srg["d_to_r_rate"]),
+        "truncated_response_rate": newly_truncated / len(ordered),
+        "clean_truncated_response_rate": sum(clean_at_cap) / len(ordered),
+        "candidate_truncated_response_rate": sum(candidate_at_cap) / len(ordered),
+        "safe_d_to_r_rate": float(safe_srg["raw_d_to_r_rate"]),
+        "safe_d_to_r_weighted_rate": float(safe_srg["d_to_r_rate"]),
     }
 
     private_lines = []

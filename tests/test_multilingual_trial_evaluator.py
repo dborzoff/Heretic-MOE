@@ -149,7 +149,10 @@ def test_one_trial_phase_produces_all_metrics_and_private_records(
     assert public["diagnostics"]["hard_gates"] == {
         "empty_response_rate": 0.0,
         "truncated_response_rate": 0.0,
+        "clean_truncated_response_rate": 0.0,
+        "candidate_truncated_response_rate": 0.0,
         "safe_d_to_r_rate": 0.25,
+        "safe_d_to_r_weighted_rate": 0.25,
     }
     assert set(public["diagnostics"]["srg_groups"]["languages"]) == {"en", "ru"}
     records = [
@@ -160,6 +163,44 @@ def test_one_trial_phase_produces_all_metrics_and_private_records(
     assert records[0]["trial_number"] == 17
     assert records[0]["prompt"].startswith("private-")
     assert records[0]["response"].startswith("candidate-")
+
+
+def test_truncation_gate_counts_only_new_cap_hits_relative_to_clean(
+    tmp_path: Path,
+) -> None:
+    rows = _rows(tmp_path)
+    clean = _clean_records(rows)
+    clean[0]["clean_response_token_ids"] = [1, 2, 3]
+    model = _FakeModel(rows)
+    original_artifacts = model.get_response_artifacts_with_prefill_residuals_batched
+
+    def capped_artifacts(prompts, **kwargs):
+        responses, _, residuals = (
+            original_artifacts(prompts, **kwargs)
+        )
+        return responses, [[1, 2, 3] for _ in rows], residuals
+
+    model.get_response_artifacts_with_prefill_residuals_batched = capped_artifacts
+
+    measurement = evaluate_multilingual_trial(
+        trial_number=18,
+        model=model,
+        rows=rows,
+        clean_records=clean,
+        refusal_direction=torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
+        layer_reliability=torch.ones(2),
+        srg_scorer=_FakeSRG(),
+        srg_profile=_profile(),
+        private_records_path=tmp_path / "private" / "trial-18.jsonl",
+        expected_per_direction=4,
+        expected_languages=("en", "ru"),
+        max_response_length=3,
+    )
+
+    gates = measurement.to_public_dict()["diagnostics"]["hard_gates"]
+    assert gates["clean_truncated_response_rate"] == pytest.approx(1 / 8)
+    assert gates["candidate_truncated_response_rate"] == 1.0
+    assert gates["truncated_response_rate"] == pytest.approx(7 / 8)
 
 
 def test_trial_rejects_incomplete_direction_coverage(tmp_path: Path) -> None:

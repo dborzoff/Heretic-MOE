@@ -28,6 +28,11 @@ from heretic.multilingual_finalists import (
 )
 from heretic.trial_selection import candidate_trials
 
+_MULTILINGUAL_CONSTRAINT_OVERRIDES = {
+    "max_truncated_response_rate": "Truncated response rate",
+    "max_safe_d_to_r_rate": "SAFE D->R rate",
+}
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -163,12 +168,90 @@ def load_finalization_overrides(source_journal: Path) -> tuple[dict[str, Any], P
         "balanced_srg_gate",
         "baseline_srg",
         "balanced_removal_fraction",
+        "max_truncated_response_rate",
+        "max_safe_d_to_r_rate",
         "provenance",
     }
     extras = sorted(set(record) - allowed)
     if extras:
         raise RuntimeError(f"Unknown finalization override keys: {extras}")
+    if set(record) & set(_MULTILINGUAL_CONSTRAINT_OVERRIDES):
+        provenance = record.get("provenance")
+        if not isinstance(provenance, dict) or not str(
+            provenance.get("reason", "")
+        ).strip():
+            raise RuntimeError("Rate recovery overrides require provenance.reason")
     return record, path
+
+
+def _constraint_override_values(overrides: dict[str, Any]) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for key in _MULTILINGUAL_CONSTRAINT_OVERRIDES:
+        if key not in overrides:
+            continue
+        value = float(overrides[key])
+        if not 0.0 <= value <= 1.0:
+            raise RuntimeError(f"{key} must be in [0, 1]")
+        values[key] = value
+    return values
+
+
+def apply_multilingual_constraint_overrides(
+    settings_data: dict[str, Any],
+    constraint_names: list[str],
+    overrides: dict[str, Any],
+) -> list[str]:
+    """Apply explicit run-local rate gates to finalist settings and labels."""
+
+    values = _constraint_override_values(overrides)
+    if not values:
+        return list(constraint_names)
+    contract = settings_data.get("multilingual_search")
+    if not isinstance(contract, dict):
+        raise TypeError("multilingual settings are missing for constraint recovery")
+    updated = list(constraint_names)
+    for key, value in values.items():
+        label = _MULTILINGUAL_CONSTRAINT_OVERRIDES[key]
+        matches = [
+            index
+            for index, name in enumerate(updated)
+            if name.startswith(f"{label} <= ")
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(f"Expected one {label!r} constraint, found {len(matches)}")
+        contract[key] = value
+        updated[matches[0]] = f"{label} <= {value}"
+    return updated
+
+
+def _constraints_with_overrides(
+    constraints: Any,
+    constraint_names: list[str],
+    overrides: dict[str, Any],
+) -> list[float] | None:
+    if not isinstance(constraints, (list, tuple)):
+        return None
+    adjusted = [float(value) for value in constraints]
+    values = _constraint_override_values(overrides)
+    for key, new_limit in values.items():
+        label = _MULTILINGUAL_CONSTRAINT_OVERRIDES[key]
+        matches = [
+            index
+            for index, name in enumerate(constraint_names)
+            if name.startswith(f"{label} <= ")
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(f"Expected one {label!r} constraint, found {len(matches)}")
+        index = matches[0]
+        try:
+            old_limit = float(constraint_names[index].rsplit("<=", 1)[1].strip())
+        except (IndexError, ValueError) as error:
+            raise RuntimeError(
+                f"Cannot parse the frozen limit from {constraint_names[index]!r}"
+            ) from error
+        observed_rate = adjusted[index] + old_limit
+        adjusted[index] = observed_rate - new_limit
+    return adjusted
 
 
 def trial_metrics(trial: FrozenTrial) -> dict[str, Any]:
@@ -311,8 +394,13 @@ def _multilingual_final_holdout_sha256(settings: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _multilingual_source_rows(source: optuna.study.Study) -> list[dict[str, Any]]:
+def _multilingual_source_rows(
+    source: optuna.study.Study,
+    constraint_overrides: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    overrides = constraint_overrides or {}
+    constraint_names = list(source.user_attrs.get("constraint_names", []))
     for trial in source.trials:
         complete = trial.state == TrialState.COMPLETE and trial.values is not None
         if not complete:
@@ -325,10 +413,12 @@ def _multilingual_source_rows(source: optuna.study.Study) -> list[dict[str, Any]
             cost = (1.0 / (1.0 + pow(2.718281828459045, -4.0 * removal))) / (
                 1.0 + loss
             )
-        constraints = trial.user_attrs.get("constraints")
-        feasible = trial.user_attrs.get("feasible")
+        constraints = _constraints_with_overrides(
+            trial.user_attrs.get("constraints"), constraint_names, overrides
+        )
+        feasible = trial.user_attrs.get("feasible") if not overrides else None
         if not isinstance(feasible, bool):
-            feasible = not isinstance(constraints, (list, tuple)) or all(
+            feasible = constraints is not None and all(
                 float(value) <= 0.0 for value in constraints
             )
         rows.append(
@@ -363,7 +453,13 @@ def prepare_multilingual(
     )
     if not 0.0 <= removal_fraction <= 1.0:
         raise RuntimeError("balanced_removal_fraction must be in [0, 1]")
-    candidates = _multilingual_source_rows(source)
+    constraint_overrides = _constraint_override_values(overrides)
+    constraint_names = apply_multilingual_constraint_overrides(
+        settings_data,
+        list(source.user_attrs.get("constraint_names", [])),
+        constraint_overrides,
+    )
+    candidates = _multilingual_source_rows(source, constraint_overrides)
     if args.trial_indices:
         if len(args.trial_indices) != 6 or len(set(args.trial_indices)) != 6:
             raise RuntimeError("--trial-indices must contain six distinct entries")
@@ -431,6 +527,13 @@ def prepare_multilingual(
         "runtime_root",
         json.dumps(str(multilingual["runtime_root"]).replace("\\", "/")),
     )
+    for key, value in constraint_overrides.items():
+        config_text = replace_table_value(
+            config_text,
+            "multilingual_search",
+            key,
+            json.dumps(value),
+        )
     config = output / "config.toml"
     config.write_text(config_text, encoding="utf-8", newline="\n")
 
@@ -444,7 +547,7 @@ def prepare_multilingual(
         study_name="heretic", storage=storage, directions=source.directions
     )
     recheck.set_user_attr("settings", json.dumps(settings_data, separators=(",", ":")))
-    recheck.set_user_attr("constraint_names", source.user_attrs.get("constraint_names", []))
+    recheck.set_user_attr("constraint_names", constraint_names)
     recheck.set_user_attr("finished", False)
     recheck.set_user_attr("top_six_contract_sha256", top6["shortlist_contract_sha256"])
     for row in selected:
@@ -477,6 +580,7 @@ def prepare_multilingual(
         "devices": list(args.devices),
         "gates": {
             "balanced_removal_fraction": removal_fraction,
+            "constraint_overrides": constraint_overrides,
         },
         "finalization_overrides": None
         if override_path is None

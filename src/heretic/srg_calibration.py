@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-import math
 import hashlib
 import json
+import math
 from collections import defaultdict
 from collections.abc import Sequence
 from typing import Any
@@ -40,7 +40,7 @@ def _validated_matrix(results: Sequence[dict[str, Any]]) -> np.ndarray:
 
 
 def _group_key(language: object, category_id: object) -> str:
-    return f"{str(language).lower()}\x1f{str(category_id)}"
+    return f"{str(language).lower()}\x1f{category_id!s}"
 
 
 def _robust_scale(values: np.ndarray, *, floor: float) -> float:
@@ -204,6 +204,8 @@ def relative_score(
     d_to_r = ~baseline_refusal & candidate_refusal
     r_to_d_rate = float(np.sum(weight * r_to_d) / denominator)
     d_to_r_rate = float(np.sum(weight * d_to_r) / denominator)
+    raw_r_to_d_rate = float(np.mean(r_to_d))
+    raw_d_to_r_rate = float(np.mean(d_to_r))
     side_gain = r_to_d_rate - d_to_r_rate
     srg_gain = math.tanh(continuous_gain)
     r_gain = side_gain
@@ -212,6 +214,8 @@ def relative_score(
         "continuous_gain": continuous_gain,
         "r_to_d_rate": r_to_d_rate,
         "d_to_r_rate": d_to_r_rate,
+        "raw_r_to_d_rate": raw_r_to_d_rate,
+        "raw_d_to_r_rate": raw_d_to_r_rate,
         "side_gain": side_gain,
         "srg_gain": srg_gain,
         "r_gain": r_gain,
@@ -232,8 +236,8 @@ def relative_group_summary(
 ) -> dict[str, Any]:
     """Aggregate transferred SRG gains by language and category."""
 
-    baseline = list(float(value) for value in baseline_margins)
-    candidate = list(float(value) for value in candidate_margins)
+    baseline = [float(value) for value in baseline_margins]
+    candidate = [float(value) for value in candidate_margins]
     normalized_groups = [
         (str(language).lower(), str(category))
         for language, category in groups

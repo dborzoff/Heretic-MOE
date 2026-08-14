@@ -198,12 +198,18 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
                 "base_config_sha256": "c" * 64,
                 "top_n": 6,
                 "selection_policy": "feasible_cost",
-                "gates": {"balanced_removal_fraction": 0.8},
+                "gates": {
+                    "balanced_removal_fraction": 0.8,
+                    "constraint_overrides": {},
+                },
                 "finalization_overrides": None,
             }
 
             self.assertIsNone(contract["ppl"])
-            self.assertEqual(contract["gates"], {"balanced_removal_fraction": 0.8})
+            self.assertEqual(
+                contract["gates"],
+                {"balanced_removal_fraction": 0.8, "constraint_overrides": {}},
+            )
             self.assertTrue(controller.finalization_manifest_matches(manifest, contract))
             wrong_contract_manifest = {**manifest, "contract": "legacy_recheck"}
             self.assertFalse(
@@ -222,6 +228,54 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
             self.assertFalse(
                 controller.finalization_manifest_matches(legacy_manifest, contract)
             )
+
+    def test_multilingual_finalization_contract_fingerprints_rate_recovery(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "finalization_overrides.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "max_truncated_response_rate": 1.0,
+                        "max_safe_d_to_r_rate": 0.025,
+                        "provenance": {"reason": "legacy metric recovery"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(
+                finalist_top_n=6,
+                finalist_selection_policy="feasible_cost",
+                recheck_ppl_chunks=64,
+                recheck_ppl_window=1024,
+                max_ppl_drift=0.005,
+                max_keywords=2,
+                keyword_total=136,
+                keyword_near_gate_extra=1,
+                balanced_srg_gate=None,
+                balanced_removal_fraction=0.8,
+                export_root=None,
+                export_strategy="merge",
+                heretic_path="hereticMOE.exe",
+                heretic_sha256="a" * 64,
+                multilingual_v3_enabled=True,
+            )
+
+            contract = controller.build_finalization_contract(
+                args,
+                root=root,
+                source_journal_sha256="b" * 64,
+                base_config_sha256="c" * 64,
+            )
+
+            self.assertEqual(
+                contract["gates"]["constraint_overrides"],
+                {
+                    "max_truncated_response_rate": 1.0,
+                    "max_safe_d_to_r_rate": 0.025,
+                },
+            )
+            self.assertIsNotNone(contract["overrides"])
 
     def test_legacy_finalization_manifest_still_accepts_baseline_override(self) -> None:
         contract = {

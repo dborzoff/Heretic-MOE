@@ -252,6 +252,78 @@ def test_multilingual_prepare_freezes_top_six_and_finalist_phase() -> None:
         assert all(trial.state == optuna.trial.TrialState.WAITING for trial in prepared.trials)
 
 
+def test_multilingual_source_rows_apply_explicit_constraint_overrides() -> None:
+    study = optuna.create_study(directions=["maximize", "minimize"])
+    study.set_user_attr(
+        "constraint_names",
+        [
+            "Safe PPL drift <= 0.005",
+            "Safe geometry damage <= 1.0",
+            "Language instability <= 1.0",
+            "Category instability <= 1.0",
+            "Empty response rate <= 0.0",
+            "Truncated response rate <= 0.0",
+            "SAFE D->R rate <= 0.0",
+        ],
+    )
+    study.add_trial(
+        create_trial(
+            params={"x": 1.0},
+            distributions={"x": optuna.distributions.FloatDistribution(0.0, 2.0)},
+            values=[0.4, 0.01],
+            user_attrs={
+                "index": 7,
+                "feasible": False,
+                "constraints": [-0.001, -0.9, -0.9, -0.9, 0.0, 0.98, 0.02],
+                "scores": [
+                    {"name": "Removal", "score": {"value": 0.4}},
+                    {"name": "Preservation loss", "score": {"value": 0.01}},
+                    {"name": "Cost\u2191", "score": {"value": 0.7}},
+                ],
+            },
+        )
+    )
+
+    rows = recheck._multilingual_source_rows(
+        study,
+        {
+            "max_truncated_response_rate": 1.0,
+            "max_safe_d_to_r_rate": 0.025,
+        },
+    )
+
+    assert rows[0]["feasible"] is True
+
+
+def test_multilingual_constraint_overrides_update_finalist_settings_and_names() -> None:
+    settings = {
+        "multilingual_search": {
+            "max_truncated_response_rate": 0.0,
+            "max_safe_d_to_r_rate": 0.0,
+        }
+    }
+    names = [
+        "Truncated response rate <= 0.0",
+        "SAFE D->R rate <= 0.0",
+    ]
+
+    updated_names = recheck.apply_multilingual_constraint_overrides(
+        settings,
+        names,
+        {
+            "max_truncated_response_rate": 1.0,
+            "max_safe_d_to_r_rate": 0.025,
+        },
+    )
+
+    assert settings["multilingual_search"]["max_truncated_response_rate"] == 1.0
+    assert settings["multilingual_search"]["max_safe_d_to_r_rate"] == 0.025
+    assert updated_names == [
+        "Truncated response rate <= 1.0",
+        "SAFE D->R rate <= 0.025",
+    ]
+
+
 def test_multilingual_trial_metrics_use_full_pool_and_independent_r() -> None:
     trial = create_trial(
         values=[0.7, 0.2],

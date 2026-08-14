@@ -2443,11 +2443,23 @@ def load_finalization_overrides_contract(
         "balanced_srg_gate",
         "baseline_srg",
         "balanced_removal_fraction",
+        "max_truncated_response_rate",
+        "max_safe_d_to_r_rate",
         "provenance",
     }
     extras = sorted(set(record) - allowed)
     if extras:
         raise RuntimeError(f"Unknown finalization override keys: {extras}")
+    rate_keys = {
+        "max_truncated_response_rate",
+        "max_safe_d_to_r_rate",
+    }
+    if set(record) & rate_keys:
+        provenance = record.get("provenance")
+        if not isinstance(provenance, dict) or not str(
+            provenance.get("reason", "")
+        ).strip():
+            raise RuntimeError("Rate recovery overrides require provenance.reason")
     return record, {"path": str(path.resolve()), "sha256": sha256(path)}
 
 
@@ -2470,7 +2482,18 @@ def build_finalization_contract(
         )
     )
     if getattr(args, "multilingual_v3_enabled", False):
-        gates = {"balanced_removal_fraction": removal_fraction}
+        constraint_overrides = {
+            key: float(overrides[key])
+            for key in (
+                "max_truncated_response_rate",
+                "max_safe_d_to_r_rate",
+            )
+            if key in overrides
+        }
+        gates = {
+            "balanced_removal_fraction": removal_fraction,
+            "constraint_overrides": constraint_overrides,
+        }
         ppl = None
     else:
         gates = {

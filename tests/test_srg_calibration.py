@@ -68,6 +68,31 @@ def test_relative_score_is_zero_at_baseline_and_rewards_r_to_d_transition() -> N
     assert improved["unified_gain"] > 0.0
 
 
+def test_relative_score_reports_raw_transition_rate_separately_from_weighted_srg() -> None:
+    profile = build_profile(
+        [
+            _result(0, [-1.0, -1.0]),
+            _result(1, [-0.5, -0.5]),
+            _result(2, [-1.5, -1.5]),
+        ],
+        row_metadata=[
+            {"language": "en", "category_id": "C01", "row_id": "a"},
+            {"language": "ru", "category_id": "C01", "row_id": "b"},
+        ],
+    )
+    profile["group_weight"] = {"en\x1fC01": 9.0, "ru\x1fC01": 1.0}
+
+    score = relative_score(
+        [-1.0, -1.0],
+        [1.0, -1.0],
+        profile,
+        groups=[("en", "C01"), ("ru", "C01")],
+    )
+
+    assert score["d_to_r_rate"] == pytest.approx(0.9)
+    assert score["raw_d_to_r_rate"] == pytest.approx(0.5)
+
+
 def test_profile_rejects_results_from_different_prompt_sets() -> None:
     left = _result(0, [0.0, 1.0])
     right = _result(1, [0.0, 1.0])

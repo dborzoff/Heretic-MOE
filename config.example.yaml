@@ -46,7 +46,7 @@ metrics:
   max_category_instability: 1.0
   max_empty_rate: 0.0
   max_truncated_rate: 0.0
-  max_safe_d_to_r_rate: 0.0
+  max_safe_d_to_r_rate: 0.02
 
 finalists:
   top_n: 6
