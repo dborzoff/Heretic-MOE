@@ -573,6 +573,15 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
             "recheck_complete",
         )
 
+    def test_finalist_geometry_offset_comes_from_prepared_manifest(self) -> None:
+        self.assertEqual(
+            controller.finalist_geometry_trial_number_offset(
+                {"geometry_trial_number_offset": 2_000_000}
+            ),
+            2_000_000,
+        )
+        self.assertEqual(controller.finalist_geometry_trial_number_offset({}), 1_000_000)
+
     def test_legacy_search_only_aliases_select_no_post_search_work(self) -> None:
         for flag in ("--search-only", "--no-finalize"):
             with self.subTest(flag=flag):

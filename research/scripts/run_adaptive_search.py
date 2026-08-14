@@ -3326,6 +3326,15 @@ def build_finalist_prepare_command(
     return command
 
 
+def finalist_geometry_trial_number_offset(manifest: dict[str, Any]) -> int:
+    """Resolve the frozen trajectory namespace for one finalist version."""
+
+    value = int(manifest.get("geometry_trial_number_offset", 1_000_000))
+    if value < 0:
+        raise ValueError("geometry_trial_number_offset must be non-negative")
+    return value
+
+
 def finalize_and_export(
     args: argparse.Namespace,
     *,
@@ -3505,7 +3514,9 @@ def finalize_and_export(
         geometry_summary = write_finalist_verdicts(
             geometry_package,
             winners,
-            trial_number_offset=1_000_000,
+            trial_number_offset=finalist_geometry_trial_number_offset(
+                prepared_manifest
+            ),
         )
         print(
             json.dumps(
