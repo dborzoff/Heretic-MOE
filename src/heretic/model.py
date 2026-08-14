@@ -1866,6 +1866,12 @@ class Model:
                     int(validation["recovered_free_bytes"]) / 1024**3,
                     3,
                 ),
+                tokens_per_second=round(
+                    float(validation.get("tokens_per_second", 0.0)), 3
+                ),
+                elapsed_seconds=round(
+                    float(validation.get("elapsed_seconds", 0.0)), 3
+                ),
             )
             if validation["status"] == "PASS":
                 passing.append(dict(validation))
@@ -1901,6 +1907,12 @@ class Model:
                     recovered_gib=round(
                         int(validation["recovered_free_bytes"]) / 1024**3,
                         3,
+                    ),
+                    tokens_per_second=round(
+                        float(validation.get("tokens_per_second", 0.0)), 3
+                    ),
+                    elapsed_seconds=round(
+                        float(validation.get("elapsed_seconds", 0.0)), 3
                     ),
                 )
                 if validation["status"] == "PASS":

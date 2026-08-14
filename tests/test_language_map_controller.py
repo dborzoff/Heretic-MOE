@@ -122,6 +122,25 @@ def test_batch_validation_result_shows_minimum_and_recovered_vram() -> None:
     )
 
 
+def test_batch_validation_result_shows_measured_throughput() -> None:
+    assert format_worker_event(
+        "[GPU 0]",
+        {
+            "event": "batch_validation_result",
+            "mode": "generation",
+            "batch_size": 224,
+            "status": "PASS",
+            "free_gib": 4.83,
+            "recovered_gib": 14.12,
+            "tokens_per_second": 1840.5,
+            "elapsed_seconds": 12.17,
+        },
+    ) == (
+        "[GPU 0] Batch validation PASS: 224; 1840.5 tok/s in 12.17s; "
+        "min 4.83 GiB, recovered 14.12 GiB"
+    )
+
+
 def test_worker_prewarm_phases_explain_compile_pause() -> None:
     assert format_worker_event(
         "[GPU 0]", {"event": "worker_phase", "phase": "prewarm"}

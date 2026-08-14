@@ -101,12 +101,23 @@ def format_worker_event(prefix: str, event: Mapping[str, object]) -> str | None:
         free_gib = float(event.get("free_gib", 0.0))
         recovered_gib = event.get("recovered_gib")
         status = str(event.get("status", "unknown"))
+        throughput = float(event.get("tokens_per_second", 0.0))
+        elapsed = float(event.get("elapsed_seconds", 0.0))
+        speed = (
+            f"{throughput:.1f} tok/s in {elapsed:.2f}s; "
+            if throughput > 0.0 and elapsed > 0.0
+            else ""
+        )
         if recovered_gib is not None:
             return (
                 f"{prefix} Batch validation {status}: {batch_size}; "
-                f"min {free_gib:.2f} GiB, recovered {float(recovered_gib):.2f} GiB"
+                f"{speed}min {free_gib:.2f} GiB, "
+                f"recovered {float(recovered_gib):.2f} GiB"
             )
-        return f"{prefix} Batch validation {status}: {batch_size}; min {free_gib:.2f} GiB"
+        return (
+            f"{prefix} Batch validation {status}: {batch_size}; "
+            f"{speed}min {free_gib:.2f} GiB"
+        )
     if kind == "batch_selected":
         return f"{prefix} Batch selected ({mode}): {batch_size}"
     return None
