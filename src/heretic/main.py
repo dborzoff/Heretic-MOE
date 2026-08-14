@@ -150,6 +150,15 @@ def _study_is_finished(study: Any) -> bool:
     return bool(study.user_attrs.get("finished", False))
 
 
+def _trial_progress_index(trial: Any) -> int:
+    """Return queue progress without changing the stable Optuna trial identity."""
+
+    queue_task_id = trial.user_attrs.get("queue_task_id")
+    if queue_task_id is not None:
+        return int(queue_task_id) + 1
+    return int(trial.number) + 1
+
+
 def _study_has_saved_settings(study: Any) -> bool:
     """Distinguish a real prior run from a controller-created empty journal."""
 
@@ -1392,9 +1401,11 @@ def run():
         if torch.cuda.is_available():
             for device_index in range(torch.cuda.device_count()):
                 torch.cuda.reset_peak_memory_stats(device_index)
-        # Optuna allocates trial numbers atomically in shared storage. Deriving the
-        # display index from that number keeps it unique across parallel workers.
+        # Optuna allocates trial numbers atomically in shared storage. Keep that
+        # stable identity for journals and exports, while queue progress ignores
+        # failed Optuna attempts that were retried under the same queue task.
         trial_index = trial.number + 1
+        progress_index = _trial_progress_index(trial)
         trial.set_user_attr("index", trial_index)
 
         direction_scope = trial.suggest_categorical(
@@ -1506,7 +1517,7 @@ def run():
         worker_prefix = f"[bold cyan]{worker_label}[/] | " if worker_label else ""
         print()
         print(
-            f"{worker_prefix}Running trial [bold]{trial_index}[/] "
+            f"{worker_prefix}Running trial [bold]{progress_index}[/] "
             f"of [bold]{settings.n_trials}[/]..."
         )
         print("* Parameters:")
@@ -1555,13 +1566,13 @@ def run():
                 settings.worker_trial_budget - worker_trial_count, 0
             )
         else:
-            remaining_worker_trials = max(settings.n_trials - trial_index, 0) / max(
-                settings.parallel_workers, 1
-            )
+            remaining_worker_trials = max(
+                settings.n_trials - progress_index, 0
+            ) / max(settings.parallel_workers, 1)
         remaining_time = average_trial_time * remaining_worker_trials
         print()
         print(f"[grey50]Elapsed time: [bold]{format_duration(elapsed_time)}[/][/]")
-        if trial_index < settings.n_trials:
+        if progress_index < settings.n_trials:
             worker_count = max(settings.parallel_workers, 1)
             worker_word = "GPU" if worker_count == 1 else "GPUs"
             print(

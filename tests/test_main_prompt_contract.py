@@ -66,6 +66,23 @@ def test_controller_created_empty_study_is_unfinished() -> None:
     assert _study_is_finished(study) is False
 
 
+def test_queue_task_controls_progress_without_renumbering_optuna_trial() -> None:
+    from heretic.main import _trial_progress_index
+
+    retried_trial = SimpleNamespace(
+        number=13,
+        user_attrs={"queue_task_id": 11},
+    )
+
+    assert _trial_progress_index(retried_trial) == 12
+
+
+def test_non_queue_progress_uses_optuna_trial_number() -> None:
+    from heretic.main import _trial_progress_index
+
+    assert _trial_progress_index(SimpleNamespace(number=13, user_attrs={})) == 14
+
+
 def test_finished_study_flag_remains_respected() -> None:
     from heretic.main import _study_is_finished
 
