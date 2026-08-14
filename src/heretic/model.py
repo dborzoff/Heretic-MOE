@@ -2122,11 +2122,13 @@ class Model:
                     self._release_failed_cuda_batch()
                     continue
             del input_ids, attention_mask, labels, outputs
-            if automatic:
-                # NLL logits can leave a multi-GiB CUDA allocator cache (and a
-                # matching WDDM system-memory backing store) after each part.
-                # Release only the transient cache; model weights stay resident.
-                self._release_failed_cuda_batch()
+            # NLL logits can leave a multi-GiB CUDA allocator cache (and a
+            # matching WDDM system-memory backing store) after each part.
+            # Release only the transient cache; model weights stay resident.
+            # This is required for both automatic and explicitly calibrated
+            # batches; otherwise a fixed batch can retain tens of GiB of WDDM
+            # backing memory between trials.
+            self._release_failed_cuda_batch()
             if tuning:
                 self._emit_batch_event(
                     "batch_selected", "conditional NLL", batch_size=batch_size

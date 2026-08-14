@@ -134,6 +134,32 @@ def test_fixed_prompt_tokenization_is_cached_across_nll_trials() -> None:
     assert wrapper.tokenizer.calls == 1
 
 
+def test_fixed_conditional_nll_releases_transient_cuda_cache_per_batch() -> None:
+    wrapper = object.__new__(Model)
+    wrapper.model = _CausalModel()
+    wrapper.tokenizer = _Tokenizer()
+    wrapper.settings = type(
+        "Settings",
+        (),
+        {
+            "batch_size": 2,
+            "conditional_nll_batch_size": 2,
+            "response_prefix": None,
+        },
+    )()
+    wrapper._render_chat_prompts = lambda prompts: [prompt.user for prompt in prompts]
+    releases: list[None] = []
+    wrapper._release_failed_cuda_batch = lambda: releases.append(None)
+
+    values = wrapper.get_conditional_nll(
+        [Prompt(system="", user=str(index)) for index in range(4)],
+        [[3, 4] for _ in range(4)],
+    )
+
+    assert len(values) == 4
+    assert len(releases) == 2
+
+
 class _OomCausalModel(_CausalModel):
     def forward(self, *, input_ids, attention_mask, use_cache):
         if input_ids.shape[0] > 2:
