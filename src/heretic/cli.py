@@ -33,6 +33,11 @@ def main() -> None:
 
         final_holdout_main(sys.argv[2:])
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "self-classify":
+        from .self_classification_cli import main as self_classification_main
+
+        self_classification_main(sys.argv[2:])
+        return
 
     if os.environ.get("HERETIC_MOE_INTERNAL") == "1":
         from .main import main as worker_main
