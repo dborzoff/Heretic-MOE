@@ -3,6 +3,7 @@
 
 import gc
 import math
+import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -1558,7 +1559,9 @@ class Model:
         inputs = outputs = None
         measured_free = measured_total = measured_peak = 0
         validation_error: BaseException | None = None
+        elapsed_seconds = 0.0
         try:
+            started_at = time.perf_counter()
             inputs, outputs = self.generate(
                 sample,
                 max_new_tokens=max_new_tokens,
@@ -1586,6 +1589,7 @@ class Model:
                         f"{generated_width} new tokens; expected {max_new_tokens} new tokens"
                     )
             torch.cuda.synchronize()
+            elapsed_seconds = time.perf_counter() - started_at
             measured_free, measured_total, measured_peak = self._cuda_memory_snapshot()
         except BaseException as error:  # noqa: BLE001 - restore CUDA cache before OOM propagation
             validation_error = error
@@ -1617,6 +1621,7 @@ class Model:
             ),
         )
         status = "PASS" if measured_free >= required_free else "INSUFFICIENT_HEADROOM"
+        generated_tokens = validation_size * max_new_tokens
         return {
             "status": status,
             "batch_size": validation_size,
@@ -1630,6 +1635,13 @@ class Model:
             "required_free_bytes": int(required_free),
             "recovered_free_bytes": int(recovered_free),
             "peak_allocated_bytes": int(measured_peak),
+            "elapsed_seconds": float(elapsed_seconds),
+            "generated_tokens": int(generated_tokens),
+            "tokens_per_second": (
+                float(generated_tokens / elapsed_seconds)
+                if elapsed_seconds > 0.0
+                else 0.0
+            ),
         }
 
     def _probe_generation_batch(
@@ -1801,10 +1813,28 @@ class Model:
             raise RuntimeError(
                 "no generation batch candidate satisfies the CUDA VRAM reserve"
             )
-        candidate = best.batch_size
+        memory_safe_batch = best.batch_size
         validation: dict[str, object] | None = None
         validation_attempts: list[dict[str, object]] = []
-        while True:
+        granularity = max(1, int(self.settings.generation_batch_granularity))
+        if memory_safe_batch <= granularity:
+            speed_candidates = [memory_safe_batch]
+        else:
+            speed_candidates = sorted(
+                {
+                    min(
+                        memory_safe_batch,
+                        max(
+                            granularity,
+                            round(memory_safe_batch * fraction / granularity)
+                            * granularity,
+                        ),
+                    )
+                    for fraction in (0.50, 0.75, 1.0)
+                }
+            )
+        passing: list[dict[str, object]] = []
+        for candidate in speed_candidates:
             self._emit_batch_event(
                 "batch_validation",
                 "generation",
@@ -1824,11 +1854,6 @@ class Model:
                     {"batch_size": candidate, "status": "OOM"}
                 )
                 self._release_failed_cuda_batch()
-                if candidate == 1:
-                    raise RuntimeError(
-                        "real 100-token validation OOM at batch size 1"
-                    ) from error
-                candidate = max(1, candidate // 2)
                 continue
             validation_attempts.append(dict(validation))
             self._emit_batch_event(
@@ -1843,12 +1868,66 @@ class Model:
                 ),
             )
             if validation["status"] == "PASS":
-                break
-            if candidate == 1:
-                raise RuntimeError(
-                    "real 100-token validation misses the CUDA VRAM reserve at batch size 1"
+                passing.append(dict(validation))
+        fallback = max(1, memory_safe_batch // 2)
+        while not passing and fallback not in speed_candidates:
+            self._emit_batch_event(
+                "batch_validation",
+                "generation",
+                batch_size=fallback,
+                max_new_tokens=100,
+            )
+            try:
+                validation = self.validate_generation_batch_size(
+                    prompts,
+                    batch_size=fallback,
+                    expected_rows=expected_rows,
                 )
-            candidate = max(1, candidate // 2)
+            except BaseException as error:
+                if not self._is_cuda_oom(error):
+                    raise
+                validation_attempts.append(
+                    {"batch_size": fallback, "status": "OOM"}
+                )
+                self._release_failed_cuda_batch()
+            else:
+                validation_attempts.append(dict(validation))
+                self._emit_batch_event(
+                    "batch_validation_result",
+                    "generation",
+                    batch_size=fallback,
+                    status=str(validation["status"]),
+                    free_gib=round(int(validation["min_free_bytes"]) / 1024**3, 3),
+                    recovered_gib=round(
+                        int(validation["recovered_free_bytes"]) / 1024**3,
+                        3,
+                    ),
+                )
+                if validation["status"] == "PASS":
+                    passing.append(dict(validation))
+            if fallback == 1:
+                break
+            fallback = max(1, fallback // 2)
+        if not passing:
+            raise RuntimeError(
+                "no real 100-token generation batch satisfies the CUDA VRAM reserve"
+            )
+        measured = [
+            record
+            for record in passing
+            if float(record.get("tokens_per_second", 0.0)) > 0.0
+        ]
+        if measured:
+            validation = max(
+                measured,
+                key=lambda record: (
+                    float(record["tokens_per_second"]),
+                    int(record["batch_size"]),
+                ),
+            )
+        else:
+            validation = max(passing, key=lambda record: int(record["batch_size"]))
+        candidate = int(validation["batch_size"])
         self._adaptive_generation_batch_size = candidate
         self._emit_batch_event(
             "batch_selected", "generation", batch_size=candidate
@@ -1868,6 +1947,13 @@ class Model:
             ],
             "validation": validation,
             "validation_attempts": validation_attempts,
+            "throughput": {
+                "batch_size": candidate,
+                "tokens_per_second": float(
+                    validation.get("tokens_per_second", 0.0)
+                ),
+                "elapsed_seconds": float(validation.get("elapsed_seconds", 0.0)),
+            },
         }
 
     def get_responses_with_prefill_residuals_batched(

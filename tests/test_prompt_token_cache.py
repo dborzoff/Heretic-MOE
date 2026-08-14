@@ -302,10 +302,61 @@ def test_compiled_batch_autotune_measures_every_eight_rows_to_40() -> None:
     result = wrapper.autotune_generation_batch_size(prompts, expected_rows=800)
 
     assert calls == [8, 16, 24, 32, 40]
-    assert validated == [40]
+    assert validated == [16, 32, 40]
     assert result["status"] == "PASS"
     assert result["batch_size"] == 40
     assert wrapper._adaptive_generation_batch_size == 40
+
+
+def test_batch_autotune_selects_fastest_safe_real_generation_batch() -> None:
+    """Catch regressions that choose the largest VRAM-fitting batch over throughput."""
+
+    wrapper = _wrapper()
+    wrapper.settings.generation_backend = "dynamic_eager"
+    wrapper.settings.max_batch_size = 128
+    wrapper.settings.generation_batch_probe_start = 128
+    wrapper.settings.generation_batch_granularity = 32
+    wrapper.settings.batch_size_vram_headroom_fraction = 0.10
+    wrapper.settings.batch_size_vram_headroom_gib = 2.0
+    wrapper.settings.generation_batch_target_headroom_fraction = 0.10
+    gib = 1024**3
+    wrapper._probe_generation_batch = lambda _prompts, batch: GenerationBatchProbe(
+        batch,
+        4 * gib,
+        24 * gib,
+        20 * gib,
+    )
+    measured = {
+        64: 8_000.0,
+        96: 9_500.0,
+        128: 8_700.0,
+    }
+    calls: list[int] = []
+
+    def validate(_prompts, *, batch_size, expected_rows):
+        calls.append(batch_size)
+        return {
+            "status": "PASS",
+            "batch_size": batch_size,
+            "rows": batch_size,
+            "expected_rows": expected_rows,
+            "max_new_tokens": 100,
+            "min_free_bytes": 4 * gib,
+            "required_free_bytes": 2 * gib,
+            "recovered_free_bytes": 20 * gib,
+            "tokens_per_second": measured[batch_size],
+        }
+
+    wrapper.validate_generation_batch_size = validate
+    result = wrapper.autotune_generation_batch_size(
+        [Prompt(system="", user="row") for _index in range(128)],
+        expected_rows=800,
+    )
+
+    assert calls == [64, 96, 128]
+    assert result["batch_size"] == 96
+    assert result["throughput"]["tokens_per_second"] == 9_500.0
+    assert wrapper._adaptive_generation_batch_size == 96
 
 
 def test_batch_autotune_runs_exactly_one_short_validation_batch(monkeypatch) -> None:
@@ -359,6 +410,9 @@ def test_batch_autotune_runs_exactly_one_short_validation_batch(monkeypatch) -> 
     assert result["validation"]["max_new_tokens"] == 100
     assert result["validation"]["working_set_bytes"] == 12 * gib
     assert result["validation"]["baseline_free_bytes"] == 20 * gib
+    assert result["validation"]["generated_tokens"] == 800
+    assert result["validation"]["elapsed_seconds"] > 0.0
+    assert result["validation"]["tokens_per_second"] > 0.0
     assert calls == [
         {"rows": 8, "max_new_tokens": 100, "min_new_tokens": 100}
     ]

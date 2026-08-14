@@ -141,7 +141,10 @@ def build_generation_batch_key(
     if int(gpu_payload.get("total_bytes", 0)) <= 0:
         raise ValueError("GPU identity must include total VRAM")
     key = {
-        "schema_version": 1,
+        # Version 2 records are selected by measured 100-token throughput,
+        # rather than by maximum VRAM fit alone.  The key bump prevents an old
+        # memory-only choice from silently bypassing the speed sweep.
+        "schema_version": 2,
         "model_fingerprint": model_fingerprint,
         "tokenizer_fingerprint": tokenizer_fingerprint,
         "gpu": gpu_payload,

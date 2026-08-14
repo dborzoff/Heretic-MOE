@@ -81,6 +81,9 @@ def _record(batch_size: int = 40) -> dict:
                 "required_free_bytes": 2 * 1024**3,
                 "recovered_free_bytes": 20 * 1024**3,
                 "peak_allocated_bytes": 16 * 1024**3,
+                "elapsed_seconds": 0.5,
+                "generated_tokens": batch_size * 100,
+                "tokens_per_second": batch_size * 200.0,
             },
         },
     )
