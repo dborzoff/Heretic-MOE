@@ -160,6 +160,30 @@ def test_overall_total_stays_global_for_multiple_worker_rows() -> None:
     ui.close()
 
 
+def test_non_tty_overall_progress_prints_one_global_multi_gpu_line() -> None:
+    console, stream = _console(terminal=False)
+    ui = PipelineUI(console=console, non_tty_update_interval=0.0)
+
+    ui.stage("Adaptive search", total=10, workers=("gpu-0", "gpu-1"))
+    ui.update_worker("gpu-0", completed=3, total=10, rate=1.0)
+    ui.update_worker("gpu-1", completed=4, total=10, rate=1.0)
+    ui.update_overall(completed=7, total=10, rate=2.0)
+
+    progress = [
+        line
+        for line in stream.getvalue().splitlines()
+        if line.startswith("PROGRESS Adaptive search")
+    ]
+    assert progress == [
+        (
+            "PROGRESS Adaptive search | 7/10 | gpu-0 3 gpu-1 4 | "
+            "120.0 trials/min | ETA 2s"
+        )
+    ]
+    ui.finish_stage({"status": "PASS"})
+    ui.close()
+
+
 def test_fail_stage_is_safe_and_idempotent() -> None:
     console, stream = _console(terminal=False)
     ui = PipelineUI(console=console, non_tty_update_interval=0.0)

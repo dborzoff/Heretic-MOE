@@ -227,6 +227,11 @@ class PipelineUI:
             )
             self._refresh_overall()
             return
+        # Multi-worker controllers print one authoritative global line from
+        # update_overall(); individual rows would otherwise scroll the console
+        # twice per refresh and still omit the true shared queue count.
+        if len(self._workers) > 1:
+            return
         now = time.monotonic()
         if (
             self.non_tty_update_interval == 0.0
@@ -267,6 +272,26 @@ class PipelineUI:
                 total=new_total,
                 rate=effective_rate,
             )
+            return
+        now = time.monotonic()
+        if (
+            self.non_tty_update_interval == 0.0
+            or new_completed == new_total
+            or now - self._last_compact_update >= self.non_tty_update_interval
+        ):
+            workers = " ".join(
+                f"{state['label']} {int(state['completed'])}"
+                for state in self._workers.values()
+            )
+            worker_suffix = f" | {workers}" if workers else ""
+            remaining = max(new_total - new_completed, 0)
+            eta = remaining / effective_rate if effective_rate > 0 else math.inf
+            self.console.print(
+                f"PROGRESS {self._stage} | {new_completed}/{new_total}"
+                f"{worker_suffix} | {effective_rate * 60:.1f} trials/min | "
+                f"ETA {_format_duration(eta)}"
+            )
+            self._last_compact_update = now
 
     def finish_stage(self, summary: Mapping[object, object]) -> dict[str, str]:
         """Stop the stage and render a concise sanitized PASS/FAIL summary."""

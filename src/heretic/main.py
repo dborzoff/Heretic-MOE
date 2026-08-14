@@ -362,6 +362,36 @@ def _display_live_score(name: str, score: Any) -> str:
     )
 
 
+def _display_multilingual_trial_timings(
+    scores: list[tuple[str, Any]],
+) -> str | None:
+    """Render one text-free timing line from multilingual diagnostics."""
+
+    removal = dict(scores).get("Removal")
+    public = getattr(removal, "diagnostics", None)
+    diagnostics = public.get("diagnostics") if isinstance(public, dict) else None
+    timings = diagnostics.get("timings") if isinstance(diagnostics, dict) else None
+    keys = (
+        "total_seconds",
+        "generation_seconds",
+        "conditional_nll_seconds",
+        "srg_seconds",
+        "geometry_seconds",
+        "archive_write_seconds",
+    )
+    if not isinstance(timings, dict) or any(key not in timings for key in keys):
+        return None
+    values = [float(timings[key]) for key in keys]
+    if any(not math.isfinite(value) or value < 0.0 for value in values):
+        return None
+    total, generation, nll, srg, geometry, archive = values
+    return (
+        f"total {total:.2f}s | generation {generation:.2f}s | "
+        f"NLL {nll:.2f}s | SRG {srg:.2f}s | "
+        f"geometry {geometry:.2f}s | disk {archive:.2f}s"
+    )
+
+
 def _format_selection_cost(penalty: float) -> str:
     """Format the public Cost metric with an explicit higher-is-better direction."""
 
@@ -1557,6 +1587,8 @@ def run():
                 f"    * {_display_score_name(name)}: "
                 f"[bold]{_display_live_score(name, score)}[/]"
             )
+        if timing_line := _display_multilingual_trial_timings(scores):
+            print(f"  * Stages: [bold]{timing_line}[/]")
 
         worker_trial_count += 1
         elapsed_time = time.perf_counter() - start_time

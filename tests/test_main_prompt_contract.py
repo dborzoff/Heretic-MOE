@@ -183,3 +183,27 @@ def test_cached_generation_batch_revalidation_emits_visible_events() -> None:
             "batch_size": 168,
         },
     ]
+
+
+def test_multilingual_trial_timings_render_as_one_compact_line() -> None:
+    from heretic.main import _display_multilingual_trial_timings
+
+    score = SimpleNamespace(
+        diagnostics={
+            "diagnostics": {
+                "timings": {
+                    "generation_seconds": 30.125,
+                    "conditional_nll_seconds": 8.25,
+                    "srg_seconds": 0.75,
+                    "geometry_seconds": 0.125,
+                    "archive_write_seconds": 0.05,
+                    "total_seconds": 39.3,
+                }
+            }
+        }
+    )
+
+    assert _display_multilingual_trial_timings([("Removal", score)]) == (
+        "total 39.30s | generation 30.12s | NLL 8.25s | "
+        "SRG 0.75s | geometry 0.12s | disk 0.05s"
+    )

@@ -203,6 +203,37 @@ def test_truncation_gate_counts_only_new_cap_hits_relative_to_clean(
     assert gates["truncated_response_rate"] == pytest.approx(7 / 8)
 
 
+def test_trial_reports_text_free_stage_timings(tmp_path: Path) -> None:
+    rows = _rows(tmp_path)
+    measurement = evaluate_multilingual_trial(
+        trial_number=19,
+        model=_FakeModel(rows),
+        rows=rows,
+        clean_records=_clean_records(rows),
+        refusal_direction=torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
+        layer_reliability=torch.ones(2),
+        srg_scorer=_FakeSRG(),
+        srg_profile=_profile(),
+        private_records_path=tmp_path / "private" / "trial-19.jsonl",
+        expected_per_direction=4,
+        expected_languages=("en", "ru"),
+    )
+
+    timings = measurement.to_public_dict()["diagnostics"]["timings"]
+    assert set(timings) == {
+        "generation_seconds",
+        "srg_seconds",
+        "conditional_nll_seconds",
+        "geometry_seconds",
+        "archive_write_seconds",
+        "total_seconds",
+    }
+    assert all(float(value) >= 0.0 for value in timings.values())
+    assert timings["total_seconds"] >= max(
+        value for key, value in timings.items() if key != "total_seconds"
+    )
+
+
 def test_trial_rejects_incomplete_direction_coverage(tmp_path: Path) -> None:
     rows = _rows(tmp_path)[:-1]
     with pytest.raises(ValueError, match="configured 4 SAFE and 4 UNSAFE"):

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -225,6 +226,7 @@ def evaluate_multilingual_trial(
 ) -> TrialMeasurement:
     """Evaluate one scheduled trial without a second autoregressive pass."""
 
+    total_started = time.perf_counter()
     ordered = tuple(rows)
     safe_rows = sum(row.direction == "safe" for row in ordered)
     unsafe_rows = sum(row.direction == "unsafe" for row in ordered)
@@ -264,12 +266,14 @@ def evaluate_multilingual_trial(
     clean = _clean_by_row_id(ordered, clean_records)
     prompts = [Prompt(system="", user=row.prompt) for row in ordered]
 
+    generation_started = time.perf_counter()
     responses, token_ids, residuals = (
         model.get_response_artifacts_with_prefill_residuals_batched(
             prompts,
             skip_special_tokens=True,
         )
     )
+    generation_seconds = time.perf_counter() - generation_started
     if (
         len(responses) != len(ordered)
         or len(token_ids) != len(ordered)
@@ -286,6 +290,7 @@ def evaluate_multilingual_trial(
         dtype=torch.float32,
     )
 
+    srg_started = time.perf_counter()
     unsafe_positions = [
         index for index, row in enumerate(ordered) if row.direction == "unsafe"
     ]
@@ -353,6 +358,7 @@ def evaluate_multilingual_trial(
             for index in safe_positions
         ],
     )
+    srg_seconds = time.perf_counter() - srg_started
     safe_targets = [
         [
             int(value)
@@ -360,10 +366,12 @@ def evaluate_multilingual_trial(
         ]
         for index in safe_positions
     ]
+    conditional_nll_started = time.perf_counter()
     candidate_nll_values = model.get_conditional_nll(
         [prompts[index] for index in safe_positions],
         safe_targets,
     )
+    conditional_nll_seconds = time.perf_counter() - conditional_nll_started
     if len(candidate_nll_values) != safe_rows:
         raise ValueError("SAFE conditional NLL coverage mismatch")
     clean_nll = {
@@ -376,6 +384,7 @@ def evaluate_multilingual_trial(
         ordered[index].row_id: float(value)
         for index, value in zip(safe_positions, candidate_nll_values, strict=True)
     }
+    geometry_started = time.perf_counter()
     ppl = aggregate_safe_ppl(ordered, clean_nll, candidate_nll)
     geometry = evaluate_trial_geometry(
         ordered,
@@ -417,7 +426,9 @@ def evaluate_multilingual_trial(
         "safe_d_to_r_rate": float(safe_srg["raw_d_to_r_rate"]),
         "safe_d_to_r_weighted_rate": float(safe_srg["d_to_r_rate"]),
     }
+    geometry_seconds = time.perf_counter() - geometry_started
 
+    archive_started = time.perf_counter()
     private_lines = []
     for index, row in enumerate(ordered):
         record = {
@@ -437,6 +448,8 @@ def evaluate_multilingual_trial(
     payload = "".join(private_lines).encode("utf-8")
     private_path = Path(private_records_path).resolve()
     _atomic_write(private_path, payload)
+    archive_write_seconds = time.perf_counter() - archive_started
+    total_seconds = time.perf_counter() - total_started
     return TrialMeasurement(
         trial_number=trial_number,
         rows=len(ordered),
@@ -451,6 +464,14 @@ def evaluate_multilingual_trial(
             "geometry": geometry,
             "ppl": ppl,
             "hard_gates": hard_gates,
+            "timings": {
+                "generation_seconds": generation_seconds,
+                "srg_seconds": srg_seconds,
+                "conditional_nll_seconds": conditional_nll_seconds,
+                "geometry_seconds": geometry_seconds,
+                "archive_write_seconds": archive_write_seconds,
+                "total_seconds": total_seconds,
+            },
         },
         private_records_sha256=_sha256_bytes(payload),
     )
