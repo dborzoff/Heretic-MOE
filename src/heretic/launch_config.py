@@ -96,6 +96,7 @@ class GenerationSettings(BaseModel):
     ordinary_max_new_tokens: PositiveInt = 100
     final_max_new_tokens: PositiveInt = 100
     batch_size: GenerationBatchSize = "auto"
+    conditional_nll_batch_size: GenerationBatchSize = "auto"
     max_batch_size: PositiveInt = 4096
     backend: GenerationBackendName = "compiled_static"
     vram_headroom_fraction: float = Field(default=0.10, ge=0.0, le=1.0)
@@ -417,6 +418,11 @@ def load_effective_launch_config(
 
 def build_internal_settings(config: LaunchConfig) -> Settings:
     batch_size = 0 if config.generation.batch_size == "auto" else config.generation.batch_size
+    conditional_nll_batch_size = (
+        0
+        if config.generation.conditional_nll_batch_size == "auto"
+        else config.generation.conditional_nll_batch_size
+    )
     runtime_root = config.run.root / "runtime"
     geometry_package = (
         (runtime_root / "geometry_3d").as_posix() if config.geometry.trajectory else None
@@ -455,6 +461,7 @@ def build_internal_settings(config: LaunchConfig) -> Settings:
             "n_trials": config.run.target_trials,
             "n_startup_trials": config.run.exploration_trials,
             "batch_size": batch_size,
+            "conditional_nll_batch_size": conditional_nll_batch_size,
             "max_batch_size": config.generation.max_batch_size,
             "max_response_length": config.generation.ordinary_max_new_tokens,
             "generation_backend": config.generation.backend,
@@ -488,6 +495,7 @@ def _internal_settings_payload(config: LaunchConfig) -> dict[str, Any]:
             "n_trials": settings.n_trials,
             "n_startup_trials": settings.n_startup_trials,
             "batch_size": settings.batch_size,
+            "conditional_nll_batch_size": settings.conditional_nll_batch_size,
             "max_batch_size": settings.max_batch_size,
             "max_response_length": settings.max_response_length,
             "generation_backend": (

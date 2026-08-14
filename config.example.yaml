@@ -26,6 +26,7 @@ generation:
   ordinary_max_new_tokens: 100
   final_max_new_tokens: 100
   batch_size: auto
+  conditional_nll_batch_size: auto
   max_batch_size: 4096
   backend: compiled_static
   vram_headroom_fraction: 0.10

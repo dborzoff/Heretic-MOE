@@ -44,6 +44,7 @@ def _write_config(path: Path) -> None:
             "ordinary_max_new_tokens": 100,
             "final_max_new_tokens": 100,
             "batch_size": "auto",
+            "conditional_nll_batch_size": "auto",
             "max_batch_size": 4096,
             "backend": "compiled_static",
             "vram_headroom_fraction": 0.10,
@@ -195,6 +196,7 @@ def test_public_yaml_maps_to_internal_settings_without_exposing_settings(
     assert internal.n_trials == 600
     assert internal.n_startup_trials == 120
     assert internal.batch_size == 0
+    assert internal.conditional_nll_batch_size == 0
     assert internal.max_batch_size == 4096
     assert internal.max_response_length == 100
     assert internal.generation_backend.value == "compiled_static"
@@ -217,6 +219,22 @@ def test_public_yaml_maps_to_internal_settings_without_exposing_settings(
     assert multilingual.max_empty_response_rate == 0.0
     assert multilingual.max_truncated_response_rate == 0.0
     assert multilingual.max_safe_d_to_r_rate == 0.0
+
+
+def test_public_yaml_maps_explicit_generation_and_nll_batches(tmp_path: Path) -> None:
+    source = tmp_path / "config.yaml"
+    _write_config(source)
+    payload = yaml.safe_load(source.read_text(encoding="utf-8"))
+    payload["generation"]["batch_size"] = 176
+    payload["generation"]["conditional_nll_batch_size"] = 20
+    source.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    internal = build_internal_settings(
+        load_effective_launch_config(source, LaunchOverrides())
+    )
+
+    assert internal.batch_size == 176
+    assert internal.conditional_nll_batch_size == 20
 
 
 def test_internal_settings_ignore_legacy_environment_and_toml_sources(
