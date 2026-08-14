@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import statistics
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -32,6 +33,10 @@ from .language_map_parallel import finalize_range_cache
 from .language_map_projection import write_projection_package
 from .language_map_report import write_interactive_geometry_report
 from .language_map_trajectory import initialize_trajectory_package
+from .language_selection import (
+    combine_language_distance_reports,
+    write_language_selection_report,
+)
 from .pipeline_ui import PipelineUI
 from .polyguard_language_dataset import materialize_polyguard_language_dataset
 from .range_work_queue import RangeWorkQueue
@@ -65,9 +70,57 @@ def _languages(value: str) -> tuple[str, ...]:
 
 
 def _input_files(args: argparse.Namespace) -> list[LanguageFile]:
+    if args.dataset_manifest is not None:
+        if (
+            args.corpus_root is not None
+            or args.group_a
+            or args.group_b
+            or args.languages is not None
+            or args.rows_per_cell is not None
+        ):
+            raise ValueError(
+                "--dataset-manifest cannot be combined with legacy corpus inputs"
+            )
+        from .utils import get_file_sha256
+
+        manifest_path = Path(args.dataset_manifest).resolve()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("schema_version") != 1 or manifest.get("status") != "PASS":
+            raise ValueError("dataset manifest is not a verified schema-v1 artifact")
+        languages = tuple(str(value).lower() for value in manifest["languages"])
+        if not languages or len(set(languages)) != len(languages):
+            raise ValueError("dataset manifest languages are invalid")
+        directions = {
+            direction: int(manifest["directions"][direction])
+            for direction in ("safe", "unsafe")
+        }
+        if any(value <= 0 for value in directions.values()):
+            raise ValueError("dataset manifest direction counts are invalid")
+        files: list[LanguageFile] = []
+        for entry in manifest["files"]:
+            path = (manifest_path.parent / str(entry["path"])).resolve()
+            if int(entry["rows"]) != directions[str(entry["direction"])]:
+                raise ValueError("dataset manifest file row count drift")
+            if get_file_sha256(path) != str(entry["sha256"]):
+                raise ValueError("dataset manifest file hash drift")
+            files.append(
+                LanguageFile(
+                    str(entry["language"]).lower(),
+                    str(entry["direction"]).lower(),
+                    path,
+                )
+            )
+        if int(manifest["rows"]) != len(languages) * sum(directions.values()):
+            raise ValueError("dataset manifest aggregate row count drift")
+        args.languages = languages
+        args.rows_per_cell = directions
+        args.dataset_manifest_data = manifest
+        return files
     if args.corpus_root is not None:
         if args.group_a or args.group_b:
             raise ValueError("--corpus-root cannot be combined with explicit groups")
+        if args.languages is None or args.rows_per_cell is None:
+            raise ValueError("legacy corpus input requires languages and rows-per-cell")
         root = Path(args.corpus_root)
         return [
             LanguageFile(
@@ -78,7 +131,9 @@ def _input_files(args: argparse.Namespace) -> list[LanguageFile]:
             for direction in ("safe", "unsafe")
             for language in args.languages
         ]
-    files: list[LanguageFile] = []
+    if args.languages is None or args.rows_per_cell is None:
+        raise ValueError("explicit input requires languages and rows-per-cell")
+    files = []
     for language, path in args.group_a:
         files.append(LanguageFile(language, "safe", path))
     for language, path in args.group_b:
@@ -87,6 +142,11 @@ def _input_files(args: argparse.Namespace) -> list[LanguageFile]:
 
 
 def _add_input_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dataset-manifest",
+        type=Path,
+        help="Verified manifest that discovers languages, counts, files, and hashes.",
+    )
     parser.add_argument(
         "--corpus-root",
         type=Path,
@@ -100,13 +160,11 @@ def _add_input_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--languages",
-        required=True,
         type=_languages,
         help="Comma-separated language codes in canonical comparison order.",
     )
     parser.add_argument(
         "--rows-per-cell",
-        required=True,
         type=int,
         help="Required row count for every language and direction group.",
     )
@@ -172,6 +230,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--cpu-threads-per-worker", type=int, default=6)
     run.add_argument("--dtype", default="bfloat16")
     run.add_argument("--seed", type=int, default=42)
+    run.add_argument("--projection-device", default="auto")
     run.add_argument("--system-prompt", default="You are a helpful assistant.")
     run.add_argument("--dry-run", action="store_true")
 
@@ -181,6 +240,7 @@ def _parser() -> argparse.ArgumentParser:
     analyze.add_argument("--cache-dir", required=True, type=Path)
     analyze.add_argument("--output-dir", required=True, type=Path)
     analyze.add_argument("--seed", type=int, default=42)
+    analyze.add_argument("--projection-device", default="auto")
 
     project = subparsers.add_parser(
         "project",
@@ -200,6 +260,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     render.add_argument("--package-dir", required=True, type=Path)
     render.add_argument("--output", type=Path)
+    compare = subparsers.add_parser(
+        "compare", help="Combine full-space language distances from several models."
+    )
+    compare.add_argument("--analysis-dir", action="append", required=True, type=Path)
+    compare.add_argument("--output-dir", required=True, type=Path)
+    compare.add_argument("--min-k", type=int, default=4)
+    compare.add_argument("--max-k", type=int, default=6)
     return parser
 
 
@@ -208,12 +275,10 @@ def _capture_metadata(
 ) -> dict[str, object]:
     from .utils import get_file_sha256
 
-    return {
+    metadata = {
         "model": args.model,
         "seed": args.seed,
         "languages": list(args.languages),
-        "source_rows_per_cell": args.rows_per_cell,
-        "rows_per_cell": args.effective_rows_per_cell,
         "split": args.split,
         "source_files": [
             {
@@ -225,6 +290,13 @@ def _capture_metadata(
             for specification in files
         ],
     }
+    if isinstance(args.rows_per_cell, dict):
+        metadata["source_rows_per_direction"] = args.rows_per_cell
+        metadata["rows_per_direction"] = args.effective_rows_per_cell
+    else:
+        metadata["source_rows_per_cell"] = args.rows_per_cell
+        metadata["rows_per_cell"] = args.effective_rows_per_cell
+    return metadata
 
 
 def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
@@ -432,6 +504,7 @@ def _geometry_findings(
         for language, value in report["language_contributions"].items()
     }
     most_sensitive = max(language_losses, key=language_losses.__getitem__)
+    selection = report["language_selection"]
     return {
         "usable_layers": f"{bounds[0]}-{bounds[1]}",
         "strongest_layers": ",".join(str(row["layer"]) for row in strongest),
@@ -440,14 +513,57 @@ def _geometry_findings(
         "largest_language_loss": (
             f"{most_sensitive} {language_losses[most_sensitive] * 100:.2f}%"
         ),
-        "report": "analysis/report.html",
+        "recommended_languages": ",".join(selection["recommended_languages"]),
+        "report": "analysis/geometry_3d/report.html",
     }
+
+
+def _write_base_geometry_report(
+    *,
+    index: list[dict[str, object]],
+    residuals,
+    output_dir: Path,
+    seed: int,
+    projection_device: str,
+) -> dict[str, object]:
+    """Atomically replace the derived 3D package after successful rendering."""
+
+    if projection_device == "auto":
+        import torch
+
+        projection_device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    output_dir = Path(output_dir)
+    target = output_dir / "geometry_3d"
+    staging = output_dir / ".geometry_3d.next"
+    backup = output_dir / ".geometry_3d.previous"
+    shutil.rmtree(staging, ignore_errors=True)
+    shutil.rmtree(backup, ignore_errors=True)
+    write_projection_package(
+        index=index,
+        residuals=residuals,
+        output_dir=staging,
+        seed=seed,
+        device=projection_device,
+    )
+    rendered = write_interactive_geometry_report(staging, staging / "report.html")
+    if target.exists():
+        os.replace(target, backup)
+    try:
+        os.replace(staging, target)
+    except BaseException:
+        if backup.exists() and not target.exists():
+            os.replace(backup, target)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
+    rendered["output"] = str((target / "report.html").resolve())
+    return rendered
 
 
 def _analyze(
     cache_dir: Path,
     output_dir: Path,
     seed: int,
+    projection_device: str = "auto",
     progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     index, residuals, manifest = load_residual_cache(cache_dir)
@@ -461,13 +577,22 @@ def _analyze(
     )
     direction_manifest = write_direction_map_package(profile, output_dir)
     if progress is not None:
-        progress(1, 3)
+        progress(1, 4)
     report = analyze_geometry(index, residuals, seed=seed)
     if progress is not None:
-        progress(2, 3)
+        progress(2, 4)
     write_geometry_reports(report, output_dir)
     if progress is not None:
-        progress(3, 3)
+        progress(3, 4)
+    rendered = _write_base_geometry_report(
+        index=index,
+        residuals=residuals,
+        output_dir=output_dir,
+        seed=seed,
+        projection_device=projection_device,
+    )
+    if progress is not None:
+        progress(4, 4)
     findings = _geometry_findings(direction_manifest, report)
     return {
         "status": report["status"],
@@ -477,6 +602,7 @@ def _analyze(
         "hidden_size": report["hidden_size"],
         "cache_status": manifest["status"],
         "directions_sha256": direction_manifest["package_sha256"],
+        "geometry_report_sha256": rendered["sha256"],
         "output_dir": str(output_dir.resolve()),
         "findings": findings,
     }
@@ -582,8 +708,40 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         }
         print(json.dumps(result, sort_keys=True))
         return result
+    if args.command == "compare":
+        reports = [
+            json.loads(
+                (directory / "language_distances.json").read_text(encoding="utf-8")
+            )
+            for directory in args.analysis_dir
+        ]
+        if any(
+            report.get("status") != "PASS"
+            or report.get("method") != "full_space_language_geometry_v1"
+            for report in reports
+        ):
+            raise ValueError("analysis contains an incompatible language distance report")
+        combined = combine_language_distance_reports(
+            reports, min_k=args.min_k, max_k=args.max_k
+        )
+        write_language_selection_report(combined, args.output_dir)
+        result = {
+            "status": combined["status"],
+            "mode": "compare",
+            "models": combined["models"],
+            "recommended_k": combined["recommended_k"],
+            "recommended_languages": combined["recommended_languages"],
+            "output_dir": str(args.output_dir.resolve()),
+        }
+        print(json.dumps(result, sort_keys=True))
+        return result
     if args.command == "analyze":
-        result = _analyze(args.cache_dir, args.output_dir, args.seed)
+        result = _analyze(
+            args.cache_dir,
+            args.output_dir,
+            args.seed,
+            projection_device=args.projection_device,
+        )
         print(json.dumps(result, sort_keys=True))
         return result
     if args.command == "render":
@@ -612,7 +770,12 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     rows = load_aligned_corpus(files, args.languages, args.rows_per_cell)
     args.effective_rows_per_cell = args.rows_per_cell
     if args.limit_per_cell is not None:
-        if args.limit_per_cell <= 0 or args.limit_per_cell > args.rows_per_cell:
+        maximum = (
+            min(args.rows_per_cell.values())
+            if isinstance(args.rows_per_cell, dict)
+            else args.rows_per_cell
+        )
+        if args.limit_per_cell <= 0 or args.limit_per_cell > maximum:
             raise ValueError("--limit-per-cell must be between 1 and --rows-per-cell")
         selected: list[GeometryRow] = []
         counts: dict[tuple[str, str], int] = {}
@@ -623,16 +786,24 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
                 selected.append(row)
                 counts[key] = count + 1
         rows = selected
-        args.effective_rows_per_cell = args.limit_per_cell
+        args.effective_rows_per_cell = (
+            {direction: args.limit_per_cell for direction in ("safe", "unsafe")}
+            if isinstance(args.rows_per_cell, dict)
+            else args.limit_per_cell
+        )
     if args.dry_run:
-        result = {
+        result: dict[str, Any] = {
             "status": "PASS",
             "mode": "dry-run",
             "languages": list(args.languages),
             "rows": len(rows),
-            "rows_per_cell": args.effective_rows_per_cell,
-            "source_rows_per_cell": args.rows_per_cell,
         }
+        if isinstance(args.rows_per_cell, dict):
+            result["rows_per_direction"] = args.effective_rows_per_cell
+            result["source_rows_per_direction"] = args.rows_per_cell
+        else:
+            result["rows_per_cell"] = args.effective_rows_per_cell
+            result["source_rows_per_cell"] = args.rows_per_cell
         print(json.dumps(result, sort_keys=True))
         return result
 
@@ -640,7 +811,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     analysis_ui = PipelineUI()
     analysis_ui.stage(
         "Direction analysis",
-        total=3,
+        total=4,
         workers=("analysis",),
         description="Building directions, layer diagnostics and HTML report",
     )
@@ -649,6 +820,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
             args.output_dir / "cache",
             args.output_dir / "analysis",
             args.seed,
+            projection_device=args.projection_device,
             progress=lambda completed, total: analysis_ui.update_worker(
                 "analysis", completed=completed, total=total
             ),
@@ -670,6 +842,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
                 "cross-lang": findings["cross_lang_stability"],
                 "separation": findings["peak_separation"],
                 "language loss": findings["largest_language_loss"],
+                "languages": findings["recommended_languages"],
             },
         )
         analysis_ui.result("Report", {"HTML": findings["report"]})

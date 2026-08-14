@@ -139,11 +139,14 @@ def test_report_writer_is_text_free(tmp_path: Path):
         "layer_statistics.json",
         "factor_map.json",
         "language_contributions.json",
+        "language_distances.json",
+        "language_selection.json",
+        "language_selection",
         "subset_candidates.json",
         "report.html",
     }
     assert expected == {path.name for path in tmp_path.iterdir()}
-    for path in tmp_path.iterdir():
+    for path in (value for value in tmp_path.rglob("*") if value.is_file()):
         content = path.read_text(encoding="utf-8").lower()
         assert '"prompt"' not in content
         assert '"response"' not in content
@@ -151,6 +154,10 @@ def test_report_writer_is_text_free(tmp_path: Path):
     assert json.loads((tmp_path / "factor_map.json").read_text(encoding="utf-8"))[
         "category_is_nested_in_direction"
     ] is True
+    selection = json.loads(
+        (tmp_path / "language_selection.json").read_text(encoding="utf-8")
+    )
+    assert selection["fixed_language"] == "en"
 
 
 def test_public_report_uses_neutral_group_names():

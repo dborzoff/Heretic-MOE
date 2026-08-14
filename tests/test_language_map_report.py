@@ -31,6 +31,7 @@ def _package(tmp_path: Path) -> Path:
                 "language": language,
                 "direction_class": "safe" if group == "A" else "unsafe",
                 "category_id": f"C{position % 2 + 1:02d}",
+                "category_ids": [f"C{position % 2 + 1:02d}", "shared"],
                 "source_file": "PRIVATE_SENTINEL_DO_NOT_EMIT.jsonl",
                 "source_line": position + 1,
             }
@@ -107,6 +108,9 @@ def test_report_is_offline_filterable_and_contains_no_private_corpus_text(
     assert "data:application/octet-stream;base64," in document
     assert "selectedFinalist" in document
     assert "verdictsFor" in document
+    assert "SAFE" in document and "UNSAFE" in document
+    assert "shared" in document
+    assert "row.category_ids" in document
 
 
 def test_report_rejects_sensitive_verdict_payload(tmp_path: Path) -> None:

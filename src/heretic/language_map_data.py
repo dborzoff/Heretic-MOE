@@ -5,10 +5,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
-
 
 Direction = Literal["safe", "unsafe"]
 DIRECTIONS: tuple[Direction, ...] = ("safe", "unsafe")
@@ -31,6 +31,11 @@ class GeometryRow:
     prompt: str
     source_path: Path
     source_line: int
+    category_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.category_ids:
+            object.__setattr__(self, "category_ids", (self.category_id,))
 
 
 def _required_string(row: dict[str, object], key: str, path: Path, line: int) -> str:
@@ -81,15 +86,32 @@ def _read_file(specification: LanguageFile) -> list[GeometryRow]:
                     f"{path.name}:{line_number} duplicate canonical_id"
                 )
             seen_canonical.add(canonical_id)
+            category_id = _required_string(
+                value, "category_id", path, line_number
+            )
+            raw_category_ids = value.get("category_ids", [category_id])
+            if (
+                not isinstance(raw_category_ids, list)
+                or not raw_category_ids
+                or any(
+                    not isinstance(category, str) or not category.strip()
+                    for category in raw_category_ids
+                )
+            ):
+                raise ValueError(f"{path.name}:{line_number} has invalid category_ids")
+            category_ids = tuple(dict.fromkeys(raw_category_ids))
+            if category_id not in category_ids:
+                raise ValueError(
+                    f"{path.name}:{line_number} category_id missing from category_ids"
+                )
             rows.append(
                 GeometryRow(
                     canonical_id=canonical_id,
                     row_id=_required_string(value, "row_id", path, line_number),
                     language=language,
                     direction=direction,  # type: ignore[arg-type]
-                    category_id=_required_string(
-                        value, "category_id", path, line_number
-                    ),
+                    category_id=category_id,
+                    category_ids=category_ids,
                     prompt=_required_string(value, "prompt", path, line_number),
                     source_path=path,
                     source_line=line_number,
@@ -101,15 +123,25 @@ def _read_file(specification: LanguageFile) -> list[GeometryRow]:
 def load_aligned_corpus(
     files: list[LanguageFile],
     expected_languages: tuple[str, ...],
-    expected_per_cell: int,
+    expected_per_cell: int | Mapping[str, int],
 ) -> list[GeometryRow]:
-    """Load a balanced SAFE/UNSAFE corpus with exact translation alignment."""
+    """Load a SAFE/UNSAFE corpus with exact translation alignment."""
 
     languages = tuple(language.lower() for language in expected_languages)
     if not languages or len(set(languages)) != len(languages):
         raise ValueError("expected_languages must contain unique language codes")
-    if expected_per_cell <= 0:
-        raise ValueError("expected_per_cell must be positive")
+    if isinstance(expected_per_cell, int):
+        if expected_per_cell <= 0:
+            raise ValueError("expected_per_cell must be positive")
+        expected_counts = {direction: expected_per_cell for direction in DIRECTIONS}
+    else:
+        if set(expected_per_cell) != set(DIRECTIONS):
+            raise ValueError("expected_per_cell mapping must contain safe and unsafe")
+        expected_counts = {
+            direction: int(expected_per_cell[direction]) for direction in DIRECTIONS
+        }
+        if any(value <= 0 for value in expected_counts.values()):
+            raise ValueError("expected direction counts must be positive")
 
     by_cell: dict[tuple[Direction, str], list[GeometryRow]] = {}
     for specification in files:
@@ -126,10 +158,11 @@ def load_aligned_corpus(
         if key in by_cell:
             raise ValueError(f"duplicate input cell: {key}")
         cell_rows = _read_file(normalized)
-        if len(cell_rows) != expected_per_cell:
+        expected_count = expected_counts[normalized.direction]
+        if len(cell_rows) != expected_count:
             raise ValueError(
                 f"{normalized.language}/{normalized.direction} expected "
-                f"{expected_per_cell} rows, got {len(cell_rows)}"
+                f"{expected_count} rows, got {len(cell_rows)}"
             )
         by_cell[key] = cell_rows
 
@@ -147,7 +180,7 @@ def load_aligned_corpus(
         reference = by_cell[(direction, languages[0])]
         reference_ids = [row.canonical_id for row in reference]
         reference_categories = {
-            row.canonical_id: row.category_id for row in reference
+            row.canonical_id: (row.category_id, row.category_ids) for row in reference
         }
         for language in languages:
             rows = by_cell[(direction, language)]
@@ -157,7 +190,10 @@ def load_aligned_corpus(
                     f"{direction}/{language} canonical coverage or order drift"
                 )
             for row in rows:
-                if reference_categories[row.canonical_id] != row.category_id:
+                if reference_categories[row.canonical_id] != (
+                    row.category_id,
+                    row.category_ids,
+                ):
                     raise ValueError(
                         f"{direction}/{row.canonical_id} category drift"
                     )
@@ -179,6 +215,7 @@ def text_free_row_index(rows: list[GeometryRow]) -> list[dict[str, object]]:
             "language": row.language,
             "direction_class": row.direction,
             "category_id": row.category_id,
+            "category_ids": list(row.category_ids),
             "source_file": row.source_path.name,
             "source_line": row.source_line,
         }

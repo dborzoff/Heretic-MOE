@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from hashlib import sha256
 import json
 import os
-from pathlib import Path
 import shutil
+from dataclasses import dataclass
+from hashlib import sha256
+from pathlib import Path
 from typing import Any
 
 import numpy as np
-from safetensors.torch import save_file
 import torch
+from safetensors.torch import save_file
 from torch import Tensor
 
 
@@ -150,8 +150,13 @@ def _public_index(index: list[dict[str, object]]) -> list[dict[str, object]]:
                 "canonical_id": str(row["canonical_id"]),
                 "row_id": str(row["row_id"]),
                 "language": str(row["language"]),
+                "direction_class": direction,
                 "group": "A" if direction == "safe" else "B",
                 "category_id": str(row["category_id"]),
+                "category_ids": [
+                    str(value)
+                    for value in row.get("category_ids", [row["category_id"]])
+                ],
             }
         )
     return output

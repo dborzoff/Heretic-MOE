@@ -40,6 +40,7 @@ def _index() -> list[dict[str, object]]:
             "language": languages[row],
             "direction_class": "safe" if row % 2 == 0 else "unsafe",
             "category_id": f"C{row % 3 + 1:02d}",
+            "category_ids": [f"C{row % 3 + 1:02d}", "shared"],
             "source_file": f"direction_{languages[row]}.jsonl",
             "source_line": row + 1,
         }
@@ -104,6 +105,8 @@ def test_projection_package_is_atomic_hashed_and_text_free(tmp_path: Path) -> No
 
     public_index = json.loads((output / "base_index.json").read_text(encoding="utf-8"))
     assert len(public_index) == 6
+    assert public_index[0]["direction_class"] == "safe"
+    assert public_index[0]["category_ids"] == ["C01", "shared"]
     assert all("prompt" not in row and "response" not in row and "answer" not in row for row in public_index)
     coordinates = np.fromfile(output / "base_points.f32", dtype=np.float32)
     assert coordinates.size == 6 * 2 * 3

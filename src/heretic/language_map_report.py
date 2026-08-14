@@ -161,7 +161,13 @@ def write_interactive_geometry_report(
 
     languages = sorted({str(row["language"]) for row in base_index})
     groups = sorted({str(row["group"]) for row in base_index})
-    categories = sorted({str(row["category_id"]) for row in base_index})
+    categories = sorted(
+        {
+            str(category)
+            for row in base_index
+            for category in row.get("category_ids", [row["category_id"]])
+        }
+    )
     phases = sorted(
         {str(row.get("phase", "search")) for row in timeline}
         | {str(row.get("phase", "search")) for row in trial_index}
@@ -230,7 +236,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
 <h2>Arrows</h2><select id="arrow-filter"><option value="centroids">Centroids + largest shifts</option><option value="all">All Original → Trial</option><option value="path">Dashed optimizer path only</option><option value="none">Hidden</option></select>
 <div class="row"><label>Point size <input id="point-size" type="range" min="1" max="8" step=".5" value="3"></label></div><div class="row"><label>Opacity <input id="opacity" type="range" min=".1" max="1" step=".05" value=".72"></label></div>
 <div class="row"><button id="reset-original">Original-only reset</button><button id="reset-camera">Reset camera</button></div>
-<h2>Legend</h2><div class="legend"><div><i class="swatch" style="background:#4d9cff"></i>Original group A</div><div><i class="swatch" style="background:#ff5364"></i>Original group B</div><div><i class="swatch" style="background:#35df8d"></i>Verified success</div><div><i class="swatch" style="background:#f3c84b"></i>Unverified/borderline</div><div><i class="line"></i>Original → Trial</div><div><i class="line dashed"></i>optimizer path (independent edits)</div></div>
+<h2>Legend</h2><div class="legend"><div><i class="swatch" style="background:#4d9cff"></i>SAFE</div><div><i class="swatch" style="background:#ff5364"></i>UNSAFE</div><div><i class="swatch" style="background:#35df8d"></i>Verified success</div><div><i class="swatch" style="background:#f3c84b"></i>Unverified/borderline</div><div><i class="line"></i>Original → Trial</div><div><i class="line dashed"></i>optimizer path (independent edits)</div></div>
 </aside><main><canvas id="scene"></canvas><div id="hud"></div></main>
 <script>
 "use strict";
@@ -244,12 +250,12 @@ addChecks('language-filters',META.languages);addChecks('group-filters',META.grou
 for(const value of META.finalists){const o=document.createElement('option');o.value=o.textContent=value;byId('finalist-filter').append(o)}
 function checked(id){return new Set([...byId(id).querySelectorAll('input:checked')].map(x=>x.value))}function currentTrial(){return captured[+trial.value]??null}function coord(array,row,l){const p=(row*META.layers+l)*3;return[array[p],array[p+1],array[p+2]]}
  function verdictsFor(t,row){return META.verdicts.filter(v=>v.trial_number===t&&v.row_id===row)}function selectedFinalist(){return byId('finalist-filter').value}function verdict(t,row){const hits=verdictsFor(t,row),selected=selectedFinalist(),hit=selected==='all'?hits[0]:hits.find(v=>v.finalist===selected);return hit?.status||'unknown'}
-function visible(row,langs,groups,cats){return langs.has(row.language)&&groups.has(row.group)&&cats.has(row.category_id)}
+function visible(row,langs,groups,cats){return langs.has(row.language)&&groups.has(row.group)&&(row.category_ids||[row.category_id]).some(value=>cats.has(value))}
 function rotate(p){const cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch);const x=p[0]*cy-p[2]*sy,z=p[0]*sy+p[2]*cy;return[x,z*sp+p[1]*cp,z*cp-p[1]*sp]}
 function resize(){const d=devicePixelRatio||1,w=canvas.clientWidth,h=canvas.clientHeight;if(canvas.width!==w*d||canvas.height!==h*d){canvas.width=w*d;canvas.height=h*d;ctx.setTransform(d,0,0,d,0,0)}}
 function render(){resize();const w=canvas.clientWidth,h=canvas.clientHeight,l=+layer.value,t=currentTrial(),langs=checked('language-filters'),groups=checked('group-filters'),cats=checked('category-filters'),phases=checked('phase-filters'),stage=byId('stage-filter').value,vfilter=byId('verdict-filter').value,arrows=byId('arrow-filter').value,size=+byId('point-size').value,alpha=+byId('opacity').value;ctx.clearRect(0,0,w,h);byId('layer-value').textContent=`Layer ${l+1} / ${META.layers}`;byId('trial-value').textContent=t===null?'No captured trials':`Trial ${t}`;
 let scale=55*zoom,ox=w/2+panX,oy=h/2+panY;const project=p=>{const q=rotate(p);return[ox+q[0]*scale,oy-q[1]*scale,q[2]]};const basePoints=[],trialPoints=[];
-if(stage==='all'||stage==='original')for(let i=0;i<META.rows;i++){const row=META.base_index[i];if(visible(row,langs,groups,cats)){const q=project(coord(BASE,i,l));basePoints.push({q,color:row.group==='A'?'#4d9cff':'#ff5364',row})}}
+if(stage==='all'||stage==='original')for(let i=0;i<META.rows;i++){const row=META.base_index[i];if(visible(row,langs,groups,cats)){const q=project(coord(BASE,i,l));basePoints.push({q,color:row.direction_class==='safe'?'#4d9cff':'#ff5364',row})}}
  const entry=META.trial_index.find(x=>x.trial_number===t),phase=entry?.phase||META.timeline.find(x=>x.trial_number===t)?.phase||'search',isFinalist=META.verdicts.some(v=>v.trial_number===t&&v.finalist),stageVisible=stage==='all'||stage==='trials'||(stage==='finalists'&&isFinalist),selected=selectedFinalist();if(t!==null&&TRIALS[t]&&phases.has(phase)&&stageVisible){const arr=TRIALS[t];for(let a=0;a<META.anchor_rows.length;a++){const baseRow=META.anchor_rows[a],row=META.base_index[baseRow];if(!visible(row,langs,groups,cats))continue;if(selected!=='all'&&!verdictsFor(t,row.row_id).some(v=>v.finalist===selected))continue;const status=verdict(t,row.row_id);if(vfilter!=='all'&&status!==vfilter)continue;const from=project(coord(BASE,baseRow,l)),to=project(coord(arr,a,l));trialPoints.push({from,to,row,status,color:status==='success'?'#35df8d':'#f3c84b'});}}
 if(t!==null&&EVALUATIONS[t]&&byId('show-evaluation').checked&&phases.has(phase)&&(stage==='all'||stage==='trials')){const arr=EVALUATIONS[t],rows=META.evaluation_indexes[t]||[];for(let i=0;i<rows.length;i++){const status=verdict(t,rows[i].prompt_sha256);if(vfilter!=='all'&&status!==vfilter)continue;const to=project(coord(arr,i,l));trialPoints.push({from:to,to,row:{row_id:rows[i].prompt_sha256},status,color:status==='success'?'#35df8d':'#f3c84b',evaluation:true})}}
 ctx.globalAlpha=.45;if(arrows==='all'||arrows==='centroids'){ctx.setLineDash([]);for(const p of trialPoints){if(p.evaluation)continue;ctx.strokeStyle=p.color;ctx.beginPath();ctx.moveTo(p.from[0],p.from[1]);ctx.lineTo(p.to[0],p.to[1]);ctx.stroke()}}

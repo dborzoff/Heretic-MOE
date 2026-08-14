@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,10 +17,16 @@ from heretic.language_map_data import LanguageFile, load_aligned_corpus
 from heretic.supervisor import GpuInfo
 
 
-def _write_cell(path: Path, *, language: str, direction: str) -> None:
+def _write_cell(
+    path: Path,
+    *,
+    language: str,
+    direction: str,
+    count: int = 2,
+) -> None:
     rows = []
     prefix = "A" if direction == "safe" else "B"
-    for number in range(1, 3):
+    for number in range(1, count + 1):
         canonical_id = f"{prefix}{number:04d}"
         rows.append(
             {
@@ -35,6 +42,10 @@ def _write_cell(path: Path, *, language: str, direction: str) -> None:
         "".join(json.dumps(row) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def test_cli_dispatches_geometry_map_without_supervisor(
@@ -96,6 +107,55 @@ def test_prepare_polyguard_dispatches_text_free_materializer(
     }
 
 
+def test_compare_combines_model_language_distances(tmp_path: Path) -> None:
+    languages = ["en", "fr", "ru", "zh"]
+    matrix = [
+        [0.0, 0.1, 0.8, 0.9],
+        [0.1, 0.0, 0.7, 0.8],
+        [0.8, 0.7, 0.0, 0.6],
+        [0.9, 0.8, 0.6, 0.0],
+    ]
+    inputs = []
+    for name in ("one", "two"):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "language_distances.json").write_text(
+            json.dumps(
+                {
+                    "status": "PASS",
+                    "method": "full_space_language_geometry_v1",
+                    "languages": languages,
+                    "distances": matrix,
+                }
+            ),
+            encoding="utf-8",
+        )
+        inputs.append(directory)
+    output = tmp_path / "combined"
+
+    result = language_map_cli.main(
+        [
+            "compare",
+            "--analysis-dir",
+            str(inputs[0]),
+            "--analysis-dir",
+            str(inputs[1]),
+            "--output-dir",
+            str(output),
+            "--min-k",
+            "4",
+            "--max-k",
+            "4",
+        ]
+    )
+
+    assert result["status"] == "PASS"
+    assert result["models"] == 2
+    assert result["recommended_languages"] == languages
+    assert (output / "language_selection.json").is_file()
+    assert (output / "report.html").is_file()
+
+
 def test_geometry_findings_summarize_layers_without_corpus_text() -> None:
     findings = language_map_cli._geometry_findings(
         {
@@ -120,7 +180,11 @@ def test_geometry_findings_summarize_layers_without_corpus_text() -> None:
             "language_contributions": {
                 "en": {"direction_loss": 0.01},
                 "zh": {"direction_loss": 0.03},
-            }
+            },
+            "language_selection": {
+                "recommended_k": 2,
+                "recommended_languages": ["en", "zh"],
+            },
         },
     )
 
@@ -130,8 +194,46 @@ def test_geometry_findings_summarize_layers_without_corpus_text() -> None:
         "cross_lang_stability": "85.0%",
         "peak_separation": "0.990",
         "largest_language_loss": "zh 3.00%",
-        "report": "analysis/report.html",
+        "recommended_languages": "en,zh",
+        "report": "analysis/geometry_3d/report.html",
     }
+
+
+def test_base_geometry_report_is_rendered_automatically_and_atomically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, Path]] = []
+
+    def write_package(**kwargs: object) -> dict[str, object]:
+        output = Path(kwargs["output_dir"])
+        output.mkdir()
+        (output / "manifest.json").write_text("{}", encoding="utf-8")
+        calls.append(("project", output))
+        return {"status": "PASS"}
+
+    def render(package: Path, output: Path) -> dict[str, object]:
+        output.write_text("report", encoding="utf-8")
+        calls.append(("render", package))
+        return {"status": "PASS", "sha256": "a" * 64}
+
+    monkeypatch.setattr(language_map_cli, "write_projection_package", write_package)
+    monkeypatch.setattr(language_map_cli, "write_interactive_geometry_report", render)
+    destination = tmp_path / "analysis"
+    destination.mkdir()
+
+    result = language_map_cli._write_base_geometry_report(
+        index=[{"row_id": "EN-PG-1"}],
+        residuals=torch.zeros((1, 1, 3)),
+        output_dir=destination,
+        seed=7,
+        projection_device="cpu",
+    )
+
+    package = destination / "geometry_3d"
+    assert result["output"] == str((package / "report.html").resolve())
+    assert (package / "report.html").read_text(encoding="utf-8") == "report"
+    assert [name for name, _ in calls] == ["project", "render"]
 
 
 def test_dry_run_validates_without_loading_model(
@@ -175,6 +277,70 @@ def test_dry_run_validates_without_loading_model(
         "rows": 8,
         "rows_per_cell": 2,
         "source_rows_per_cell": 2,
+    }
+
+
+def test_dry_run_discovers_asymmetric_inputs_from_dataset_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = []
+    for language in ("en", "ru"):
+        for direction, count in (("safe", 3), ("unsafe", 1)):
+            path = tmp_path / f"direction_{language}_{direction}_strict.jsonl"
+            _write_cell(
+                path,
+                language=language,
+                direction=direction,
+                count=count,
+            )
+            files.append(
+                {
+                    "language": language,
+                    "direction": direction,
+                    "path": path.name,
+                    "rows": count,
+                    "sha256": _sha256(path),
+                }
+            )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "PASS",
+                "languages": ["en", "ru"],
+                "directions": {"safe": 3, "unsafe": 1},
+                "rows": 8,
+                "files": files,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        language_map_cli,
+        "_capture_parallel",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("dry-run must not capture")
+        ),
+    )
+    result = language_map_cli.main(
+        [
+            "run",
+            "--dry-run",
+            "--dataset-manifest",
+            str(manifest),
+        ]
+    )
+
+    assert result == {
+        "status": "PASS",
+        "mode": "dry-run",
+        "languages": ["en", "ru"],
+        "rows": 8,
+        "rows_per_direction": {"safe": 3, "unsafe": 1},
+        "source_rows_per_direction": {"safe": 3, "unsafe": 1},
     }
 
 

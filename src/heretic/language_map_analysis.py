@@ -16,8 +16,12 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from .language_selection import (
+    build_language_distance_report,
+    combine_language_distance_reports,
+    write_language_selection_report,
+)
 from .trial_language_schedule import trial_language_indices
-
 
 _SENSITIVE_KEYS = {"prompt", "response", "answer", "text"}
 
@@ -662,6 +666,13 @@ def analyze_geometry(
         _policy_comparison(index, residuals, policy, seed) for policy in policy_names
     ]
     component_regions = _component_regions(index, residuals)
+    language_distances = build_language_distance_report(index, residuals)
+    language_count = len(unique_languages)
+    language_selection = combine_language_distance_reports(
+        [language_distances],
+        min_k=min(4, language_count),
+        max_k=min(6, language_count),
+    )
 
     return {
         "schema_version": 1,
@@ -679,6 +690,8 @@ def analyze_geometry(
         },
         "component_regions": component_regions,
         "language_contributions": language_contributions,
+        "language_distances": language_distances,
+        "language_selection": language_selection,
         "subset_candidates": subset_candidates,
     }
 
@@ -716,10 +729,15 @@ def write_geometry_reports(report: dict[str, Any], output_dir: Path) -> None:
         },
         "factor_map.json": report["factor_map"],
         "language_contributions.json": report["language_contributions"],
+        "language_distances.json": report["language_distances"],
+        "language_selection.json": report["language_selection"],
         "subset_candidates.json": report["subset_candidates"],
     }
     for name, value in documents.items():
         _write_json(output_dir / name, value)
+    write_language_selection_report(
+        report["language_selection"], output_dir / "language_selection"
+    )
 
     summary = {
         "status": report["status"],
@@ -729,6 +747,7 @@ def write_geometry_reports(report: dict[str, Any], output_dir: Path) -> None:
         "languages": report["languages"],
         "temperature": report["temperature"],
         "language_contributions": report["language_contributions"],
+        "language_selection": report["language_selection"],
         "subset_candidates": report["subset_candidates"],
     }
     embedded = html.escape(json.dumps(summary, ensure_ascii=False, indent=2))
