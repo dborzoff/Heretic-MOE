@@ -21,7 +21,7 @@ def sha256(path: Path) -> str:
 
 def build_manifest(root: Path) -> Path:
     files = []
-    languages = ("en", "ru", "zh", "ko")
+    languages = ("en", "ru", "zh", "ko", "fr")
     for language in languages:
         for direction in ("safe", "unsafe"):
             path = root / f"{language}-{direction}.jsonl"
@@ -49,7 +49,7 @@ def build_manifest(root: Path) -> Path:
         "canonical_rows": 2,
         "directions": {"safe": 1, "unsafe": 1},
         "languages": list(languages),
-        "rows": 8,
+        "rows": 10,
         "files": files,
     }
     path = root / "manifest.json"
@@ -106,9 +106,9 @@ def test_pilot_dry_run_reports_exact_task_count(tmp_path: Path) -> None:
     assert result == {
         "status": "PASS",
         "mode": "pilot-dry-run",
-        "rows": 8,
+        "rows": 10,
         "variants": 3,
-        "tasks": 24,
+        "tasks": 30,
         "workers": 2,
     }
     assert not (tmp_path / "output").exists()
@@ -145,10 +145,10 @@ def test_consensus_dry_run_uses_eight_variants_and_excludes_base_model(
     assert result == {
         "status": "PASS",
         "mode": "consensus-dry-run",
-        "rows": 8,
+        "rows": 10,
         "models": 1,
         "variants": 8,
-        "tasks": 64,
+        "tasks": 80,
         "workers": 2,
         "system_mode": "english",
         "max_new_tokens": 8,

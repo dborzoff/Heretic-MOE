@@ -182,6 +182,21 @@ def test_english_system_mode_keeps_ru_request_but_uses_shared_meta_instruction()
     assert ru.max_new_tokens == 16
 
 
+def test_french_is_supported_by_shared_consensus_prompt() -> None:
+    rendered = render_classifier_prompt(
+        sample_row("fr"),
+        PromptVariant.WORD_ORDER_0,
+        system_mode="english",
+        max_new_tokens=8,
+    )
+
+    assert rendered.max_new_tokens == 8
+    assert "DIRECT" in rendered.user
+    assert parse_classification_output(
+        "DIRECT", "FR-P1", PromptVariant.WORD_ORDER_0, "fr"
+    ) is BehaviorClass.DIRECT
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
