@@ -11,6 +11,7 @@ from heretic.self_classification import (
     parse_classification_output,
     permuted_code_map,
     render_classifier_prompt,
+    variant_option_order,
 )
 
 
@@ -36,6 +37,80 @@ def test_code_permutation_is_a_deterministic_bijection() -> None:
     assert permuted_code_map("EN-0001") == expected
     assert permuted_code_map("EN-0001") == expected
     assert set(expected.values()) == set(BehaviorClass)
+
+
+def test_four_code_shifts_assign_every_class_to_every_code_once() -> None:
+    variants = (
+        PromptVariant.CODE_PERMUTED,
+        PromptVariant.CODE_SHIFT_1,
+        PromptVariant.CODE_SHIFT_2,
+        PromptVariant.CODE_SHIFT_3,
+    )
+
+    for behavior in BehaviorClass:
+        outputs = {
+            render_classifier_prompt(sample_row(), variant).expected_outputs[behavior]
+            for variant in variants
+        }
+        assert outputs == {"A", "B", "C", "D"}
+
+
+def test_word_order_variants_rotate_positions_without_changing_labels() -> None:
+    variants = (
+        PromptVariant.WORD_ORDER_0,
+        PromptVariant.WORD_ORDER_1,
+        PromptVariant.WORD_ORDER_2,
+        PromptVariant.WORD_ORDER_3,
+    )
+    expected_orders = (
+        tuple(BehaviorClass),
+        (
+            BehaviorClass.PARTIAL,
+            BehaviorClass.SOFT,
+            BehaviorClass.HARD_REFUSE,
+            BehaviorClass.DIRECT,
+        ),
+        (
+            BehaviorClass.SOFT,
+            BehaviorClass.HARD_REFUSE,
+            BehaviorClass.DIRECT,
+            BehaviorClass.PARTIAL,
+        ),
+        (
+            BehaviorClass.HARD_REFUSE,
+            BehaviorClass.DIRECT,
+            BehaviorClass.PARTIAL,
+            BehaviorClass.SOFT,
+        ),
+    )
+
+    for variant, expected_order in zip(variants, expected_orders, strict=True):
+        rendered = render_classifier_prompt(sample_row(), variant)
+        assert variant_option_order(variant) == expected_order
+        assert rendered.expected_outputs == {
+            behavior: behavior.value for behavior in BehaviorClass
+        }
+
+
+def test_word_parser_accepts_only_one_exact_class_word() -> None:
+    assert (
+        parse_classification_output(
+            "HARD_REFUSE",
+            "EN-0001",
+            PromptVariant.WORD_ORDER_2,
+            "en",
+        )
+        == BehaviorClass.HARD_REFUSE
+    )
+    assert (
+        parse_classification_output(
+            "HARD_REFUSE because",
+            "EN-0001",
+            PromptVariant.WORD_ORDER_2,
+            "en",
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("language", ["en", "ru", "zh", "ko"])

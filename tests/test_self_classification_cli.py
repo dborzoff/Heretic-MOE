@@ -114,6 +114,48 @@ def test_pilot_dry_run_reports_exact_task_count(tmp_path: Path) -> None:
     assert not (tmp_path / "output").exists()
 
 
+def test_consensus_dry_run_uses_eight_variants_and_excludes_base_model(
+    tmp_path: Path,
+) -> None:
+    manifest = build_manifest(tmp_path)
+    kept = tmp_path / "chat-model"
+    excluded = tmp_path / "Qwen__Qwen3-0.6B-Base"
+
+    result = main(
+        [
+            "consensus",
+            "--dataset-manifest",
+            str(manifest),
+            "--model-root",
+            str(tmp_path),
+            "--model",
+            str(kept),
+            "--model",
+            str(excluded),
+            "--exclude-model-id",
+            excluded.name,
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--devices",
+            "0,1",
+            "--dry-run",
+        ]
+    )
+
+    assert result == {
+        "status": "PASS",
+        "mode": "consensus-dry-run",
+        "rows": 8,
+        "models": 1,
+        "variants": 8,
+        "tasks": 64,
+        "workers": 2,
+        "system_mode": "english",
+        "max_new_tokens": 8,
+    }
+    assert not (tmp_path / "output").exists()
+
+
 def test_model_discovery_filters_non_chat_and_oversized_weights(tmp_path: Path) -> None:
     def model(name: str, *, chat: bool, weight_bytes: int) -> None:
         root = tmp_path / name

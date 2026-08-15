@@ -20,11 +20,29 @@ from .self_classification_data import (
     load_classification_rows,
     verify_result_coverage,
 )
-from .self_classification_report import write_model_reports, write_pilot_reports
+from .self_classification_report import (
+    write_consensus_reports,
+    write_model_reports,
+    write_pilot_reports,
+)
 from .utils import get_file_sha256
 
 LANGUAGES = ("en", "ru", "zh", "ko")
-VARIANTS = tuple(PromptVariant)
+LEGACY_PILOT_VARIANTS = (
+    PromptVariant.PHRASE,
+    PromptVariant.NUMBER,
+    PromptVariant.CODE_PERMUTED,
+)
+CONSENSUS_VARIANTS = (
+    PromptVariant.CODE_PERMUTED,
+    PromptVariant.CODE_SHIFT_1,
+    PromptVariant.CODE_SHIFT_2,
+    PromptVariant.CODE_SHIFT_3,
+    PromptVariant.WORD_ORDER_0,
+    PromptVariant.WORD_ORDER_1,
+    PromptVariant.WORD_ORDER_2,
+    PromptVariant.WORD_ORDER_3,
+)
 
 
 def _devices(value: str) -> tuple[str, ...]:
@@ -57,6 +75,19 @@ def _parser() -> argparse.ArgumentParser:
     models.add_argument("--max-models", type=int, default=10)
     models.add_argument("--max-weight-gib", type=float, default=20.0)
     models.add_argument("--dry-run", action="store_true")
+
+    consensus = subparsers.add_parser("consensus")
+    consensus.add_argument("--dataset-manifest", required=True, type=Path)
+    consensus.add_argument("--model-root", required=True, type=Path)
+    consensus.add_argument("--model", action="append", type=Path, default=[])
+    consensus.add_argument("--output-dir", required=True, type=Path)
+    consensus.add_argument("--devices", type=_devices, default=("0", "1"))
+    consensus.add_argument("--batch-size", type=int, default=32)
+    consensus.add_argument("--dtype", default="bfloat16")
+    consensus.add_argument("--max-models", type=int, default=20)
+    consensus.add_argument("--max-weight-gib", type=float, default=20.0)
+    consensus.add_argument("--exclude-model-id", action="append", default=[])
+    consensus.add_argument("--dry-run", action="store_true")
 
     worker = subparsers.add_parser("worker")
     worker.add_argument("--job", required=True, type=Path)
@@ -241,8 +272,8 @@ def _pilot(args: argparse.Namespace) -> dict[str, object]:
             "status": "PASS",
             "mode": "pilot-dry-run",
             "rows": len(rows),
-            "variants": len(VARIANTS),
-            "tasks": len(rows) * len(VARIANTS),
+            "variants": len(LEGACY_PILOT_VARIANTS),
+            "tasks": len(rows) * len(LEGACY_PILOT_VARIANTS),
             "workers": len(args.devices),
         }
     output_dir = Path(args.output_dir).resolve() / "pilot"
@@ -264,7 +295,7 @@ def _pilot(args: argparse.Namespace) -> dict[str, object]:
                 "languages": list(LANGUAGES),
                 "model": str(model),
                 "model_id": model_id,
-                "variants": [value.value for value in VARIANTS],
+                "variants": [value.value for value in LEGACY_PILOT_VARIANTS],
                 "output_path": str(part_path),
                 "batch_size": int(args.batch_size),
                 "dtype": str(args.dtype),
@@ -282,7 +313,7 @@ def _pilot(args: argparse.Namespace) -> dict[str, object]:
     merged = merge_result_files(part_paths, merged_path)
     verify_result_coverage(
         merged_path,
-        _expected_keys([model_id], rows, VARIANTS),
+        _expected_keys([model_id], rows, LEGACY_PILOT_VARIANTS),
     )
     summary = write_pilot_reports(output_dir, merged)
     manifest = {
@@ -402,12 +433,103 @@ def _run_models(args: argparse.Namespace) -> dict[str, object]:
     return manifest
 
 
+def _consensus(args: argparse.Namespace) -> dict[str, object]:
+    rows = load_classification_rows(args.dataset_manifest, LANGUAGES)
+    excluded = {str(value) for value in args.exclude_model_id}
+    models = [path for path in _model_paths(args) if path.name not in excluded]
+    if not models:
+        raise ValueError("no compatible local chat models remain after exclusions")
+    if args.dry_run:
+        return {
+            "status": "PASS",
+            "mode": "consensus-dry-run",
+            "rows": len(rows),
+            "models": len(models),
+            "variants": len(CONSENSUS_VARIANTS),
+            "tasks": len(rows) * len(models) * len(CONSENSUS_VARIANTS),
+            "workers": len(args.devices),
+            "system_mode": "english",
+            "max_new_tokens": 8,
+        }
+
+    output_root = Path(args.output_dir).resolve() / "consensus"
+    jobs_root = output_root / "jobs"
+    parts_root = output_root / "parts"
+    jobs: list[tuple[Path, str]] = []
+    outputs: dict[str, Path] = {}
+    for index, model in enumerate(models):
+        model_id = model.name
+        worker_id = f"consensus-{index:02d}-{_safe_name(model_id)}"
+        output_path = parts_root / f"{_safe_name(model_id)}.jsonl"
+        job_path = jobs_root / f"{worker_id}.json"
+        _write_job(
+            job_path,
+            {
+                "schema_version": 1,
+                "dataset_manifest": str(Path(args.dataset_manifest).resolve()),
+                "languages": list(LANGUAGES),
+                "model": str(model),
+                "model_id": model_id,
+                "variants": [value.value for value in CONSENSUS_VARIANTS],
+                "system_mode": "english",
+                "max_new_tokens": 8,
+                "output_path": str(output_path),
+                "batch_size": int(args.batch_size),
+                "dtype": str(args.dtype),
+                "shard_index": 0,
+                "shard_count": 1,
+            },
+        )
+        jobs.append((job_path, worker_id))
+        outputs[worker_id] = output_path
+    statuses = _run_jobs(jobs, args.devices)
+    successful_paths = [
+        outputs[str(status["worker_id"])]
+        for status in statuses
+        if status["return_code"] == 0
+    ]
+    failed = [status for status in statuses if status["return_code"] != 0]
+    if not successful_paths:
+        raise RuntimeError(f"all consensus workers failed: {failed}")
+    merged_path = output_root / "consensus_rows.jsonl"
+    merged = merge_result_files(successful_paths, merged_path)
+    successful_model_ids = sorted({str(row["model_id"]) for row in merged})
+    verify_result_coverage(
+        merged_path,
+        _expected_keys(successful_model_ids, rows, CONSENSUS_VARIANTS),
+    )
+    write_model_reports(output_root, merged)
+    write_consensus_reports(output_root, merged)
+    manifest = {
+        "schema_version": 1,
+        "status": "PASS" if not failed else "PASS_WITH_MODEL_FAILURES",
+        "dataset_sha256": get_file_sha256(Path(args.dataset_manifest)),
+        "variants": [value.value for value in CONSENSUS_VARIANTS],
+        "system_mode": "english",
+        "max_new_tokens": 8,
+        "excluded_model_ids": sorted(excluded),
+        "models_requested": len(models),
+        "models_completed": len(successful_model_ids),
+        "models_failed": len(failed),
+        "failed": failed,
+        "rows": len(merged),
+        "result_sha256": get_file_sha256(merged_path),
+    }
+    (output_root / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
 def main(argv: Sequence[str] | None = None) -> dict[str, object]:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     if args.command == "pilot":
         result = _pilot(args)
     elif args.command == "run-models":
         result = _run_models(args)
+    elif args.command == "consensus":
+        result = _consensus(args)
     else:
         from .self_classification_worker import main as worker_main
 

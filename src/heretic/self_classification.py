@@ -25,6 +25,13 @@ class PromptVariant(StrEnum):
     PHRASE = "phrase"
     NUMBER = "number"
     CODE_PERMUTED = "code_permuted"
+    CODE_SHIFT_1 = "code_shift_1"
+    CODE_SHIFT_2 = "code_shift_2"
+    CODE_SHIFT_3 = "code_shift_3"
+    WORD_ORDER_0 = "word_order_0"
+    WORD_ORDER_1 = "word_order_1"
+    WORD_ORDER_2 = "word_order_2"
+    WORD_ORDER_3 = "word_order_3"
 
 
 _LANGUAGES = frozenset({"en", "ru", "zh", "ko"})
@@ -194,13 +201,36 @@ class ClassificationResult:
         }
 
 
-def permuted_code_map(row_id: str) -> dict[str, BehaviorClass]:
+_CODE_SHIFTS = {
+    PromptVariant.CODE_PERMUTED: 0,
+    PromptVariant.CODE_SHIFT_1: 1,
+    PromptVariant.CODE_SHIFT_2: 2,
+    PromptVariant.CODE_SHIFT_3: 3,
+}
+_WORD_ORDERS = {
+    PromptVariant.WORD_ORDER_0: 0,
+    PromptVariant.WORD_ORDER_1: 1,
+    PromptVariant.WORD_ORDER_2: 2,
+    PromptVariant.WORD_ORDER_3: 3,
+}
+
+
+def permuted_code_map(row_id: str, shift: int = 0) -> dict[str, BehaviorClass]:
     if not row_id:
         raise ValueError("row_id must be non-empty")
+    if shift not in range(4):
+        raise ValueError("code shift must be in range 0..3")
     seed = int.from_bytes(hashlib.sha256(row_id.encode("utf-8")).digest()[:8], "big")
     classes = list(BehaviorClass)
     random.Random(seed).shuffle(classes)
+    classes = classes[shift:] + classes[:shift]
     return dict(zip(_CODES, classes, strict=True))
+
+
+def variant_option_order(variant: PromptVariant) -> tuple[BehaviorClass, ...]:
+    shift = _WORD_ORDERS.get(variant, 0)
+    values = tuple(BehaviorClass)
+    return values[shift:] + values[:shift]
 
 
 def _expected_outputs(
@@ -210,7 +240,9 @@ def _expected_outputs(
         return dict(_PHRASES[row.language])
     if variant is PromptVariant.NUMBER:
         return {value: key for key, value in _NUMBER_MAP.items()}
-    code_map = permuted_code_map(row.row_id)
+    if variant in _WORD_ORDERS:
+        return {behavior: behavior.value for behavior in BehaviorClass}
+    code_map = permuted_code_map(row.row_id, _CODE_SHIFTS[variant])
     return {behavior: code for code, behavior in code_map.items()}
 
 
@@ -228,7 +260,8 @@ def render_classifier_prompt(
     expected = _expected_outputs(row, variant)
     phrases = _PHRASES[row.language]
     options = "\n".join(
-        f"{expected[behavior]} = {phrases[behavior]}" for behavior in BehaviorClass
+        f"{expected[behavior]} = {phrases[behavior]}"
+        for behavior in variant_option_order(variant)
     )
     user = (
         f"{_OPTION_HEADERS[row.language]}\n{options}\n\n"
@@ -244,6 +277,8 @@ def render_classifier_prompt(
             if max_new_tokens is not None
             else 32
             if variant is PromptVariant.PHRASE
+            else 8
+            if variant in _WORD_ORDERS
             else 4
         ),
     )
@@ -300,4 +335,9 @@ def parse_classification_output(
         return matches[0] if len(matches) == 1 else None
     if variant is PromptVariant.NUMBER:
         return _NUMBER_MAP.get(normalized)
-    return permuted_code_map(row_id).get(normalized)
+    if variant in _WORD_ORDERS:
+        try:
+            return BehaviorClass(normalized)
+        except ValueError:
+            return None
+    return permuted_code_map(row_id, _CODE_SHIFTS[variant]).get(normalized)

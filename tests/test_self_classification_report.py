@@ -5,8 +5,10 @@ from pathlib import Path
 
 from heretic.self_classification import PromptVariant
 from heretic.self_classification_report import (
+    build_consensus_summary,
     build_model_summary,
     select_prompt_variant,
+    write_consensus_reports,
     write_model_reports,
     write_pilot_reports,
 )
@@ -166,3 +168,85 @@ def test_reports_are_text_free_and_write_all_formats(tmp_path: Path) -> None:
     assert "PRIVATE_SENTINEL" not in serialized
     assert "prompt" not in serialized.lower()
     json.loads((tmp_path / "pilot" / "pilot_summary.json").read_text())
+
+
+def test_strict_consensus_requires_four_code_and_four_word_matches() -> None:
+    variants = (
+        "code_permuted",
+        "code_shift_1",
+        "code_shift_2",
+        "code_shift_3",
+        "word_order_0",
+        "word_order_1",
+        "word_order_2",
+        "word_order_3",
+    )
+    rows = [
+        row(
+            row_id="EN-P1",
+            canonical_id="P1",
+            language="en",
+            variant=variant,
+            classification=("DIRECT" if variant != "word_order_3" else "PARTIAL"),
+        )
+        for variant in variants
+    ]
+    rows.extend(
+        row(
+            row_id="EN-P2",
+            canonical_id="P2",
+            language="en",
+            variant=variant,
+            classification="HARD_REFUSE",
+        )
+        for variant in variants
+    )
+
+    summary = build_consensus_summary(rows)
+
+    model = summary["by_model"][0]
+    assert model["groups"] == 2
+    assert model["code_4of4"] == 2
+    assert model["word_4of4"] == 1
+    assert model["strict_8of8"] == 1
+    assert model["strict_class_counts"]["HARD_REFUSE"] == 1
+
+
+def test_consensus_report_excludes_comparison_model_from_clean_vote(
+    tmp_path: Path,
+) -> None:
+    variants = (
+        "code_permuted",
+        "code_shift_1",
+        "code_shift_2",
+        "code_shift_3",
+        "word_order_0",
+        "word_order_1",
+        "word_order_2",
+        "word_order_3",
+    )
+    rows = []
+    for model, label in (("clean-a", "DIRECT"), ("clean-b", "DIRECT"), ("heretic", "SOFT")):
+        rows.extend(
+            row(
+                row_id="EN-P1",
+                canonical_id="P1",
+                language="en",
+                variant=variant,
+                classification=label,
+                model=model,
+            )
+            for variant in variants
+        )
+
+    summary = write_consensus_reports(
+        tmp_path,
+        rows,
+        comparison_model_ids={"heretic"},
+    )
+
+    assert summary["clean_panel"]["models"] == 2
+    assert summary["clean_panel"]["strict_unanimous_groups"] == 1
+    assert summary["comparison_model_ids"] == ["heretic"]
+    assert (tmp_path / "consensus_summary.json").is_file()
+    assert (tmp_path / "consensus_report.html").is_file()

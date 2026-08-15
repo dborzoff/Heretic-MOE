@@ -15,6 +15,18 @@ from pathlib import Path
 from .self_classification import BehaviorClass, PromptVariant
 
 _CLASS_NAMES = tuple(value.value for value in BehaviorClass) + ("INVALID",)
+_CODE_VARIANTS = {
+    PromptVariant.CODE_PERMUTED.value,
+    PromptVariant.CODE_SHIFT_1.value,
+    PromptVariant.CODE_SHIFT_2.value,
+    PromptVariant.CODE_SHIFT_3.value,
+}
+_WORD_VARIANTS = {
+    PromptVariant.WORD_ORDER_0.value,
+    PromptVariant.WORD_ORDER_1.value,
+    PromptVariant.WORD_ORDER_2.value,
+    PromptVariant.WORD_ORDER_3.value,
+}
 
 
 def _classification(raw: Mapping[str, object]) -> str:
@@ -58,7 +70,10 @@ def select_prompt_variant(
         )
 
     summary: dict[str, dict[str, object]] = {}
-    for variant in PromptVariant:
+    present_variants = tuple(
+        variant for variant in PromptVariant if variant.value in by_variant
+    )
+    for variant in present_variants:
         values = by_variant.get(variant.value, [])
         if not values:
             raise ValueError(f"pilot is missing variant: {variant.value}")
@@ -115,8 +130,130 @@ def select_prompt_variant(
             -float(item["mean_output_tokens"]),
         )
 
-    winner = max(PromptVariant, key=rank)
+    winner = max(present_variants, key=rank)
     return winner, summary
+
+
+def _strict_label(
+    values: Sequence[Mapping[str, object]],
+    variants: set[str],
+) -> str | None:
+    selected = [row for row in values if str(row["variant"]) in variants]
+    if len(selected) != len(variants):
+        return None
+    labels = [
+        str(row["classification"])
+        for row in selected
+        if bool(row.get("valid")) and row.get("classification") is not None
+    ]
+    return labels[0] if len(labels) == len(variants) and len(set(labels)) == 1 else None
+
+
+def _consensus_rows(
+    rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, str], list[Mapping[str, object]]] = defaultdict(list)
+    seen: set[tuple[str, str, str]] = set()
+    for row in rows:
+        key = str(row["model_id"]), str(row["row_id"]), str(row["variant"])
+        if key in seen:
+            raise ValueError(f"duplicate consensus result key: {key}")
+        seen.add(key)
+        grouped[(key[0], key[1])].append(row)
+    result: list[dict[str, object]] = []
+    for (model_id, row_id), values in sorted(grouped.items()):
+        first = values[0]
+        code = _strict_label(values, _CODE_VARIANTS)
+        word = _strict_label(values, _WORD_VARIANTS)
+        strict = code if code is not None and code == word else None
+        result.append(
+            {
+                "model_id": model_id,
+                "canonical_id": str(first["canonical_id"]),
+                "row_id": row_id,
+                "language": str(first["language"]),
+                "category_ids": list(first.get("category_ids", [])),
+                "direction_class": str(first["direction_class"]),
+                "code_4of4": code,
+                "word_4of4": word,
+                "strict_8of8": strict,
+            }
+        )
+    return result
+
+
+def _consensus_model_rows(
+    consensus: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    grouped: dict[str, list[Mapping[str, object]]] = defaultdict(list)
+    for row in consensus:
+        grouped[str(row["model_id"])].append(row)
+    result = []
+    for model_id, values in sorted(grouped.items()):
+        counts = Counter(
+            str(row["strict_8of8"])
+            for row in values
+            if row.get("strict_8of8") is not None
+        )
+        result.append(
+            {
+                "model_id": model_id,
+                "groups": len(values),
+                "code_4of4": sum(row.get("code_4of4") is not None for row in values),
+                "word_4of4": sum(row.get("word_4of4") is not None for row in values),
+                "strict_8of8": sum(row.get("strict_8of8") is not None for row in values),
+                "strict_class_counts": {
+                    name: int(counts.get(name, 0)) for name in _CLASS_NAMES[:-1]
+                },
+            }
+        )
+    return result
+
+
+def build_consensus_summary(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    comparison_model_ids: set[str] | None = None,
+) -> dict[str, object]:
+    if not rows:
+        raise ValueError("consensus rows must be non-empty")
+    comparison = set(comparison_model_ids or ())
+    consensus = _consensus_rows(rows)
+    by_model = _consensus_model_rows(consensus)
+    clean_models = sorted(
+        {str(row["model_id"]) for row in consensus} - comparison
+    )
+    by_item: dict[str, list[Mapping[str, object]]] = defaultdict(list)
+    for row in consensus:
+        if str(row["model_id"]) in clean_models:
+            by_item[str(row["row_id"])].append(row)
+    strict_unanimous = 0
+    fully_covered = 0
+    for values in by_item.values():
+        if len(values) != len(clean_models):
+            continue
+        fully_covered += 1
+        labels = [row.get("strict_8of8") for row in values]
+        strict_unanimous += int(
+            all(label is not None for label in labels) and len(set(labels)) == 1
+        )
+    return {
+        "schema_version": 1,
+        "status": "PASS",
+        "source_rows": len(rows),
+        "consensus_groups": len(consensus),
+        "comparison_model_ids": sorted(comparison),
+        "by_model": by_model,
+        "clean_panel": {
+            "models": len(clean_models),
+            "model_ids": clean_models,
+            "fully_covered_groups": fully_covered,
+            "strict_unanimous_groups": strict_unanimous,
+            "strict_unanimous_rate": (
+                strict_unanimous / fully_covered if fully_covered else 0.0
+            ),
+        },
+    }
 
 
 def _group_summary(
@@ -320,4 +457,55 @@ def write_model_reports(
         ],
     )
     (output_dir / "report.html").write_text(page, encoding="utf-8")
+    return summary
+
+
+def write_consensus_reports(
+    output_dir: str | Path,
+    rows: Sequence[Mapping[str, object]],
+    *,
+    comparison_model_ids: set[str] | None = None,
+) -> dict[str, object]:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary = build_consensus_summary(
+        rows,
+        comparison_model_ids=comparison_model_ids,
+    )
+    _write_json(output_dir / "consensus_summary.json", summary)
+    table_rows = []
+    for item in summary["by_model"]:
+        table_rows.append(
+            [
+                item["model_id"],
+                item["groups"],
+                item["code_4of4"],
+                item["word_4of4"],
+                item["strict_8of8"],
+                *[
+                    item["strict_class_counts"][name]
+                    for name in _CLASS_NAMES[:-1]
+                ],
+            ]
+        )
+    headers = [
+        "Model",
+        "Groups",
+        "Code 4/4",
+        "Word 4/4",
+        "Strict 8/8",
+        *_CLASS_NAMES[:-1],
+    ]
+    page = _page(
+        "Eight-pass strict consensus",
+        [
+            (
+                "<p>Clean models: "
+                f"{summary['clean_panel']['models']} | Strict clean unanimity: "
+                f"{float(summary['clean_panel']['strict_unanimous_rate']):.2%}</p>"
+            ),
+            _table_html(headers, table_rows),
+        ],
+    )
+    (output_dir / "consensus_report.html").write_text(page, encoding="utf-8")
     return summary
