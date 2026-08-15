@@ -8,6 +8,7 @@ from heretic.self_classification import (
     ClassificationInput,
     ClassificationResult,
     PromptVariant,
+    render_classifier_prompt,
 )
 from heretic.self_classification_data import append_result_atomic
 from heretic.self_classification_worker import classify_rows_with_model
@@ -144,4 +145,49 @@ def test_worker_marks_unparseable_output_invalid(tmp_path: Path) -> None:
     )
 
     assert summary["invalid"] == 1
-    assert read_rows(output)[0]["classification"] is None
+    saved = read_rows(output)[0]
+    assert saved["classification"] is None
+    assert saved["output_shape"] == "unknown"
+
+
+def test_worker_honors_shared_system_and_generation_limit(tmp_path: Path) -> None:
+    class CapturingModel(FakeClassificationModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.systems: list[str] = []
+            self.token_limits: list[int] = []
+
+        def prepare(self, prompts) -> None:
+            self.systems.extend(prompt.system for prompt in prompts)
+
+        def classify_batch(self, prompts, *, max_new_tokens: int):
+            self.token_limits.append(max_new_tokens)
+            return ["1"] * len(prompts), [2] * len(prompts)
+
+    model = CapturingModel()
+    output = tmp_path / "results.jsonl"
+    ru_row = ClassificationInput(
+        canonical_id="P0001",
+        row_id="RU-P0001",
+        language="ru",
+        category_ids=("C1",),
+        direction_class="safe",
+        prompt="PRIVATE_SENTINEL_RU",
+    )
+
+    classify_rows_with_model(
+        model,
+        model_id="model-a",
+        rows=[ru_row],
+        variants=(PromptVariant.NUMBER,),
+        output_path=output,
+        batch_size=1,
+        system_mode="english",
+        max_new_tokens=16,
+    )
+
+    english_system = render_classifier_prompt(
+        rows(1)[0], PromptVariant.NUMBER, system_mode="english"
+    ).system
+    assert model.systems == [english_system]
+    assert model.token_limits == [16]

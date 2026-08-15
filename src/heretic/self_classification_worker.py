@@ -17,6 +17,7 @@ from .self_classification import (
     ClassificationResult,
     PromptVariant,
     RenderedClassifierPrompt,
+    classify_output_shape,
     parse_classification_output,
     render_classifier_prompt,
 )
@@ -52,6 +53,8 @@ def classify_rows_with_model(
     variants: Sequence[PromptVariant],
     output_path: str | Path,
     batch_size: int,
+    system_mode: str = "localized",
+    max_new_tokens: int | None = None,
     event_sink: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, int]:
     if batch_size <= 0:
@@ -80,7 +83,15 @@ def classify_rows_with_model(
             for row in rows
             if (model_id, row.row_id, variant.value) not in completed_keys
         ]
-        rendered = [render_classifier_prompt(row, variant) for row in pending]
+        rendered = [
+            render_classifier_prompt(
+                row,
+                variant,
+                system_mode=system_mode,
+                max_new_tokens=max_new_tokens,
+            )
+            for row in pending
+        ]
         if rendered:
             model.prepare(rendered)
         position = 0
@@ -109,8 +120,8 @@ def classify_rows_with_model(
                 continue
             if len(outputs) != size or len(token_counts) != size:
                 raise RuntimeError("classification model returned the wrong batch size")
-            for row, output, output_tokens in zip(
-                batch_rows, outputs, token_counts, strict=True
+            for row, prompt, output, output_tokens in zip(
+                batch_rows, batch_prompts, outputs, token_counts, strict=True
             ):
                 classification = parse_classification_output(
                     output,
@@ -131,6 +142,10 @@ def classify_rows_with_model(
                     classification=classification,
                     valid=valid,
                     output_tokens=int(output_tokens),
+                    output_shape=classify_output_shape(
+                        output,
+                        prompt.expected_outputs.values(),
+                    ),
                 )
                 append_result_atomic(output_path, result)
                 completed_keys.add(result.key)
@@ -281,6 +296,12 @@ def run_worker_job(
         variants=variants,
         output_path=job["output_path"],
         batch_size=int(job["batch_size"]),
+        system_mode=str(job.get("system_mode", "localized")),
+        max_new_tokens=(
+            int(job["max_new_tokens"])
+            if job.get("max_new_tokens") is not None
+            else None
+        ),
         event_sink=lambda event: print(
             json.dumps({**event, "worker_id": worker_id}, sort_keys=True),
             flush=True,

@@ -7,6 +7,7 @@ from heretic.self_classification import (
     ClassificationInput,
     ClassificationResult,
     PromptVariant,
+    classify_output_shape,
     parse_classification_output,
     permuted_code_map,
     render_classifier_prompt,
@@ -86,6 +87,44 @@ def test_code_parser_decodes_row_specific_permutation() -> None:
         )
         == BehaviorClass.PARTIAL
     )
+
+
+def test_english_system_mode_keeps_ru_request_but_uses_shared_meta_instruction() -> None:
+    ru = render_classifier_prompt(
+        sample_row("ru"),
+        PromptVariant.CODE_PERMUTED,
+        system_mode="english",
+        max_new_tokens=16,
+    )
+    en = render_classifier_prompt(
+        sample_row("en"),
+        PromptVariant.CODE_PERMUTED,
+        system_mode="english",
+    )
+
+    assert ru.system == en.system
+    assert "PRIVATE_PROMPT_SENTINEL" in ru.user
+    assert ru.max_new_tokens == 16
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("A", "exact"),
+        ('"A"', "quoted"),
+        ('{"label":"A"}', "json_single_label"),
+        ("A.", "label_punctuation"),
+        ("A because", "label_plus_text"),
+        ("unknown", "unknown"),
+    ],
+)
+def test_output_shape_classifies_format_without_retaining_text(
+    text: str,
+    expected: str,
+) -> None:
+    rendered = render_classifier_prompt(sample_row(), PromptVariant.CODE_PERMUTED)
+
+    assert classify_output_shape(text, rendered.expected_outputs.values()) == expected
     assert (
         parse_classification_output(
             "C", "EN-0001", PromptVariant.CODE_PERMUTED, "en"
@@ -114,6 +153,7 @@ def test_public_result_contains_no_prompt_or_raw_output() -> None:
     assert "prompt" not in public
     assert "response" not in public
     assert "raw_output" not in public
+    assert public["output_shape"] is None
 
 
 def test_invalid_result_cannot_claim_a_behavior_class() -> None:
