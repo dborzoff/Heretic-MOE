@@ -487,6 +487,17 @@ class Settings(BaseSettings):
         ),
     )
 
+    chat_template_enable_thinking: bool | None = Field(
+        default=None,
+        description=(
+            "Optional value passed to tokenizer.apply_chat_template as "
+            "enable_thinking. Leave unset for model defaults; set false for "
+            "strict label-generation jobs where reasoning tokens would consume "
+            "the whole response budget."
+        ),
+        exclude=True,
+    )
+
     chain_of_thought_skips: list[tuple[str, str]] = Field(
         default=[
             # Most thinking models.

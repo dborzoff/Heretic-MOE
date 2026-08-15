@@ -1014,6 +1014,7 @@ class Model:
                 build(with_system=not getattr(self, "_no_system_role", False)),
                 add_generation_prompt=True,
                 tokenize=False,
+                **self._chat_template_generation_kwargs(),
             ),
         )
         if self.settings.response_prefix:
@@ -1045,12 +1046,17 @@ class Model:
             direction = direction.lerp(residual_directions[index + 1], weight)
         return F.normalize(direction, p=2, dim=0)
 
-    def _prompt_cache_signature(self) -> tuple[str, bool, str, str]:
+    def _chat_template_generation_kwargs(self) -> dict[str, bool]:
+        enable_thinking = getattr(self.settings, "chat_template_enable_thinking", None)
+        return {} if enable_thinking is None else {"enable_thinking": bool(enable_thinking)}
+
+    def _prompt_cache_signature(self) -> tuple[str, bool, str, str, str]:
         return (
             str(getattr(self.settings, "response_prefix", None) or ""),
             bool(getattr(self, "_no_system_role", False)),
             str(getattr(self.tokenizer, "name_or_path", "")),
             str(getattr(self.tokenizer, "chat_template", "")),
+            str(getattr(self.settings, "chat_template_enable_thinking", None)),
         )
 
     @staticmethod

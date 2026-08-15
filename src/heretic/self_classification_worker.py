@@ -234,6 +234,7 @@ def _load_model(job: dict[str, object]) -> HereticClassificationModel:
         batch_size=int(job["batch_size"]),
         max_batch_size=int(job.get("max_batch_size", 256)),
         max_response_length=32,
+        chat_template_enable_thinking=False,
         offload_outputs_to_cpu=True,
         seed=int(job.get("seed", 20260815)),
         system_prompt="",

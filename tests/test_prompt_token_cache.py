@@ -46,6 +46,18 @@ class _GenerateModel(nn.Module):
         return torch.cat((input_ids, generated), dim=1)
 
 
+class _ChatTemplateTokenizer:
+    name_or_path = "chat-tokenizer"
+    chat_template = "chat-template"
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def apply_chat_template(self, chats, **kwargs):
+        self.calls.append(kwargs)
+        return ["rendered"]
+
+
 def _wrapper() -> Model:
     wrapper = object.__new__(Model)
     wrapper.model = _GenerateModel()
@@ -58,6 +70,7 @@ def _wrapper() -> Model:
         batch_size=0,
         max_batch_size=4,
         max_response_length=100,
+        chat_template_enable_thinking=None,
     )
     wrapper._render_chat_prompts = lambda prompts: [prompt.user for prompt in prompts]
     return wrapper
@@ -98,6 +111,34 @@ def test_prompt_cache_invalidates_when_tokenizer_changes() -> None:
     wrapper.prepare_prompt_cache(prompts)
 
     assert replacement.calls == 1
+
+
+def test_chat_template_can_disable_thinking_for_classification() -> None:
+    wrapper = _wrapper()
+    tokenizer = _ChatTemplateTokenizer()
+    wrapper.tokenizer = tokenizer
+    wrapper.settings.chat_template_enable_thinking = False
+    wrapper._render_chat_prompts = Model._render_chat_prompts.__get__(wrapper, Model)
+
+    rendered = wrapper._render_chat_prompts([Prompt(system="system", user="row")])
+
+    assert rendered == ["rendered"]
+    assert tokenizer.calls == [
+        {
+            "add_generation_prompt": True,
+            "tokenize": False,
+            "enable_thinking": False,
+        }
+    ]
+
+
+def test_prompt_cache_signature_includes_chat_template_thinking_mode() -> None:
+    wrapper = _wrapper()
+    before = wrapper._prompt_cache_signature()
+
+    wrapper.settings.chat_template_enable_thinking = False
+
+    assert wrapper._prompt_cache_signature() != before
 
 
 def test_full_model_reload_clears_prompt_runtime_cache_and_role_probe() -> None:
