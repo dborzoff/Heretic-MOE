@@ -27,7 +27,7 @@ from .self_classification_report import (
 )
 from .utils import get_file_sha256
 
-LANGUAGES = ("en", "ru", "zh", "ko", "fr")
+LANGUAGES = ("en", "ru", "zh", "ja", "fr")
 LEGACY_PILOT_VARIANTS = (
     PromptVariant.PHRASE,
     PromptVariant.NUMBER,

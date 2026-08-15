@@ -21,7 +21,7 @@ def sha256(path: Path) -> str:
 
 def build_manifest(root: Path) -> Path:
     files = []
-    languages = ("en", "ru", "zh", "ko", "fr")
+    languages = ("en", "ru", "zh", "ja", "fr")
     for language in languages:
         for direction in ("safe", "unsafe"):
             path = root / f"{language}-{direction}.jsonl"

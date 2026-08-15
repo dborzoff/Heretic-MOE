@@ -197,6 +197,20 @@ def test_french_is_supported_by_shared_consensus_prompt() -> None:
     ) is BehaviorClass.DIRECT
 
 
+def test_japanese_is_supported_by_shared_consensus_prompt() -> None:
+    rendered = render_classifier_prompt(
+        sample_row("ja"),
+        PromptVariant.WORD_ORDER_0,
+        system_mode="english",
+        max_new_tokens=8,
+    )
+
+    assert rendered.max_new_tokens == 8
+    assert parse_classification_output(
+        "DIRECT", "JA-P1", PromptVariant.WORD_ORDER_0, "ja"
+    ) is BehaviorClass.DIRECT
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
