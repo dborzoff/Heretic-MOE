@@ -164,6 +164,59 @@ def test_gguf_runner_resumes_without_repeating_completed_rows(tmp_path: Path) ->
     )
 
 
+def test_gguf_runner_supports_eight_pass_english_consensus(tmp_path: Path) -> None:
+    gguf = importlib.import_module("heretic.self_classification_gguf")
+    from heretic.self_classification import ClassificationInput, PromptVariant
+
+    row = ClassificationInput(
+        canonical_id="P0001",
+        row_id="FR-P0001",
+        language="fr",
+        category_ids=("C01",),
+        direction_class="unsafe",
+        prompt="private-input",
+    )
+    variants = (
+        PromptVariant.CODE_PERMUTED,
+        PromptVariant.CODE_SHIFT_1,
+        PromptVariant.CODE_SHIFT_2,
+        PromptVariant.CODE_SHIFT_3,
+        PromptVariant.WORD_ORDER_0,
+        PromptVariant.WORD_ORDER_1,
+        PromptVariant.WORD_ORDER_2,
+        PromptVariant.WORD_ORDER_3,
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, int]] = []
+
+        def generate(
+            self, *, system: str, user: str, max_new_tokens: int
+        ) -> tuple[str, int]:
+            self.calls.append((system, user, max_new_tokens))
+            return ("DIRECT" if "DIRECT =" in user else "A"), 1
+
+    client = FakeClient()
+    output = tmp_path / "rows.jsonl"
+    summary = gguf.classify_rows_with_gguf(
+        client=client,
+        model_id="model.gguf",
+        rows=[row],
+        variants=variants,
+        system_mode="english",
+        max_new_tokens=8,
+        output_path=output,
+        parallel=2,
+    )
+
+    assert summary == {"completed": 8, "generated": 8, "total": 8}
+    assert len(client.calls) == 8
+    assert {call[2] for call in client.calls} == {8}
+    assert len({call[0] for call in client.calls}) == 1
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 8
+
+
 def test_post_json_uses_real_http_boundary() -> None:
     gguf = importlib.import_module("heretic.self_classification_gguf")
     observed: dict[str, object] = {}

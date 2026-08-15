@@ -24,11 +24,21 @@ from .self_classification_data import (
     load_completed_keys,
     verify_result_coverage,
 )
-from .self_classification_report import write_model_reports
+from .self_classification_report import write_consensus_reports, write_model_reports
 from .utils import get_file_sha256
 
 PostJson = Callable[[str, dict[str, object]], dict[str, object]]
 ProgressCallback = Callable[[int, int], None]
+CONSENSUS_VARIANTS = (
+    PromptVariant.CODE_PERMUTED,
+    PromptVariant.CODE_SHIFT_1,
+    PromptVariant.CODE_SHIFT_2,
+    PromptVariant.CODE_SHIFT_3,
+    PromptVariant.WORD_ORDER_0,
+    PromptVariant.WORD_ORDER_1,
+    PromptVariant.WORD_ORDER_2,
+    PromptVariant.WORD_ORDER_3,
+)
 
 
 class CompletionClient(Protocol):
@@ -183,46 +193,75 @@ def classify_rows_with_gguf(
     client: CompletionClient,
     model_id: str,
     rows: Sequence[ClassificationInput],
-    variant: PromptVariant,
+    variant: PromptVariant | None = None,
+    variants: Sequence[PromptVariant] | None = None,
+    system_mode: str = "localized",
+    max_new_tokens: int | None = None,
     output_path: str | Path,
     parallel: int,
     progress: ProgressCallback | None = None,
 ) -> dict[str, int]:
     if parallel < 1:
         raise ValueError("parallel must be positive")
+    if variant is not None and variants is not None:
+        raise ValueError("pass variant or variants, not both")
+    selected = tuple(variants or ((variant,) if variant is not None else ()))
+    if not selected or len(selected) != len(set(selected)):
+        raise ValueError("at least one unique GGUF prompt variant is required")
     completed_keys = load_completed_keys(output_path)
-    pending = [
-        row
+    total = len(rows) * len(selected)
+    skipped = sum(
+        (model_id, row.row_id, value.value) in completed_keys
+        for value in selected
         for row in rows
-        if (model_id, row.row_id, variant.value) not in completed_keys
-    ]
-    rendered = [(row, render_classifier_prompt(row, variant)) for row in pending]
+    )
+    generated = 0
+    completed = skipped
+    for current_variant in selected:
+        pending = [
+            row
+            for row in rows
+            if (model_id, row.row_id, current_variant.value) not in completed_keys
+        ]
+        rendered = [
+            (
+                row,
+                render_classifier_prompt(
+                    row,
+                    current_variant,
+                    system_mode=system_mode,
+                    max_new_tokens=max_new_tokens,
+                ),
+            )
+            for row in pending
+        ]
 
-    def classify_one(
-        item: tuple[ClassificationInput, RenderedClassifierPrompt],
-    ) -> ClassificationResult:
-        row, rendered_prompt = item
-        generated_text, output_tokens = client.generate(
-            system=rendered_prompt.system,
-            user=rendered_prompt.user,
-            max_new_tokens=rendered_prompt.max_new_tokens,
-        )
-        return _make_result(
-            model_id=model_id,
-            row=row,
-            variant=variant,
-            generated_text=generated_text,
-            output_tokens=output_tokens,
-        )
+        def classify_one(
+            item: tuple[ClassificationInput, RenderedClassifierPrompt],
+            variant_value: PromptVariant = current_variant,
+        ) -> ClassificationResult:
+            row, rendered_prompt = item
+            generated_text, output_tokens = client.generate(
+                system=rendered_prompt.system,
+                user=rendered_prompt.user,
+                max_new_tokens=rendered_prompt.max_new_tokens,
+            )
+            return _make_result(
+                model_id=model_id,
+                row=row,
+                variant=variant_value,
+                generated_text=generated_text,
+                output_tokens=output_tokens,
+            )
 
-    completed = len(rows) - len(pending)
-    with ThreadPoolExecutor(max_workers=parallel) as executor:
-        for result in executor.map(classify_one, rendered):
-            append_result_atomic(output_path, result)
-            completed += 1
-            if progress is not None:
-                progress(completed, len(rows))
-    return {"completed": completed, "generated": len(pending), "total": len(rows)}
+        with ThreadPoolExecutor(max_workers=parallel) as executor:
+            for result in executor.map(classify_one, rendered):
+                append_result_atomic(output_path, result)
+                completed += 1
+                generated += 1
+                if progress is not None:
+                    progress(completed, total)
+    return {"completed": completed, "generated": generated, "total": total}
 
 
 def finalize_gguf_results(
@@ -232,11 +271,20 @@ def finalize_gguf_results(
     dataset_manifest: str | Path,
     model_id: str,
     rows: Sequence[ClassificationInput],
-    variant: PromptVariant,
+    variant: PromptVariant | None = None,
+    variants: Sequence[PromptVariant] | None = None,
+    system_mode: str = "localized",
 ) -> dict[str, object]:
+    if variant is not None and variants is not None:
+        raise ValueError("pass variant or variants, not both")
+    selected = tuple(variants or ((variant,) if variant is not None else ()))
+    if not selected or len(selected) != len(set(selected)):
+        raise ValueError("at least one unique GGUF prompt variant is required")
     output_dir = Path(output_dir)
     result_path = output_dir / "rows.jsonl"
-    expected = {(model_id, row.row_id, variant.value) for row in rows}
+    expected = {
+        (model_id, row.row_id, value.value) for row in rows for value in selected
+    }
     verify_result_coverage(result_path, expected)
     public_rows: list[dict[str, object]] = []
     with result_path.open(encoding="utf-8") as handle:
@@ -249,6 +297,8 @@ def finalize_gguf_results(
                 raise ValueError(f"GGUF result contains prohibited fields: {prohibited}")
             public_rows.append(value)
     write_model_reports(output_dir, public_rows)
+    if len(selected) == 8:
+        write_consensus_reports(output_dir, public_rows)
     manifest = {
         "schema_version": 1,
         "status": "PASS",
@@ -256,7 +306,8 @@ def finalize_gguf_results(
         "model_sha256": get_file_sha256(Path(model)),
         "dataset_sha256": get_file_sha256(Path(dataset_manifest)),
         "result_sha256": get_file_sha256(result_path),
-        "variant": variant.value,
+        "variants": [value.value for value in selected],
+        "system_mode": system_mode,
         "rows": len(public_rows),
         "valid": sum(bool(row["valid"]) for row in public_rows),
     }
@@ -277,11 +328,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default="http://127.0.0.1:8080")
     parser.add_argument("--parallel", type=int, default=8)
     parser.add_argument("--timeout", type=float, default=600.0)
-    parser.add_argument("--languages", default="en,ru,zh,ko")
+    parser.add_argument("--languages", default="en,ru,zh,ja,fr")
     parser.add_argument(
         "--variant",
+        action="append",
         choices=[value.value for value in PromptVariant],
-        default=PromptVariant.CODE_PERMUTED.value,
+    )
+    parser.add_argument("--consensus", action="store_true")
+    parser.add_argument(
+        "--system-mode", choices=("localized", "english"), default="localized"
     )
     return parser
 
@@ -297,7 +352,17 @@ def main(argv: Sequence[str] | None = None) -> dict[str, object]:
     model = Path(args.model).resolve()
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    variant = PromptVariant(str(args.variant))
+    if args.consensus and args.variant:
+        raise ValueError("--consensus cannot be combined with --variant")
+    variants = (
+        CONSENSUS_VARIANTS
+        if args.consensus
+        else tuple(
+            PromptVariant(str(value))
+            for value in (args.variant or [PromptVariant.CODE_PERMUTED.value])
+        )
+    )
+    system_mode = "english" if args.consensus else str(args.system_mode)
     client = LlamaCompletionClient(
         post_json=partial(
             post_json,
@@ -325,7 +390,9 @@ def main(argv: Sequence[str] | None = None) -> dict[str, object]:
         client=client,
         model_id=model.name,
         rows=rows,
-        variant=variant,
+        variants=variants,
+        system_mode=system_mode,
+        max_new_tokens=8 if args.consensus else None,
         output_path=output_dir / "rows.jsonl",
         parallel=int(args.parallel),
         progress=progress,
@@ -336,7 +403,8 @@ def main(argv: Sequence[str] | None = None) -> dict[str, object]:
         dataset_manifest=args.dataset_manifest,
         model_id=model.name,
         rows=rows,
-        variant=variant,
+        variants=variants,
+        system_mode=system_mode,
     )
     manifest["generated"] = run_summary["generated"]
     print(json.dumps(manifest, sort_keys=True), flush=True)
