@@ -24,6 +24,7 @@ class CalibrationRow:
     prompt: str
     source_path: Path
     source_line: int
+    direction: str = "unsafe"
 
 
 @dataclass(frozen=True)
@@ -152,91 +153,35 @@ def write_or_verify_frozen_contract(
     return contract
 
 
-def _required_string(
-    value: dict[str, object], key: str, path: Path, line_number: int
-) -> str:
-    field = value.get(key)
-    if not isinstance(field, str) or not field.strip():
-        raise ValueError(f"{path.name}:{line_number} has invalid {key}")
-    return field
-
-
-def _read_calibration_file(
-    path: Path,
-    *,
-    language: str,
-    expected_rows: int,
-) -> list[CalibrationRow]:
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    rows: list[CalibrationRow] = []
-    seen_ids: set[str] = set()
-    with path.open(encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, start=1):
-            if not line.strip():
-                continue
-            value = json.loads(line)
-            if not isinstance(value, dict):
-                raise TypeError(f"{path.name}:{line_number} must be a JSON object")
-            observed_language = _required_string(
-                value, "language", path, line_number
-            ).lower()
-            if observed_language != language:
-                raise ValueError(f"{path.name}:{line_number} language metadata drift")
-            base_id = _required_string(value, "base_id", path, line_number)
-            if base_id in seen_ids:
-                raise ValueError(f"{path.name}:{line_number} duplicate base_id")
-            seen_ids.add(base_id)
-            rows.append(
-                CalibrationRow(
-                    base_id=base_id,
-                    row_id=_required_string(value, "row_id", path, line_number),
-                    language=observed_language,
-                    category_id=_required_string(
-                        value, "category_id", path, line_number
-                    ),
-                    prompt=_required_string(value, "prompt", path, line_number),
-                    source_path=path.resolve(),
-                    source_line=line_number,
-                )
-            )
-    if len(rows) != expected_rows:
-        raise ValueError(f"{path.name} expected {expected_rows} rows, got {len(rows)}")
-    return rows
-
-
-def _load_calibration_pool(
+def _load_directional_final_pool(
     root: Path,
     *,
-    filename_prefix: str,
     languages: tuple[str, ...],
     expected_rows: int,
 ) -> list[CalibrationRow]:
-    by_language = {
-        language: _read_calibration_file(
-            root / f"{filename_prefix}_{language}.jsonl",
-            language=language,
-            expected_rows=expected_rows,
+    files = [
+        LanguageFile(
+            language,
+            direction,  # type: ignore[arg-type]
+            root / f"final_{language}_{direction}_{expected_rows}.jsonl",
         )
+        for direction in ("safe", "unsafe")
         for language in languages
-    }
-    reference = by_language[languages[0]]
-    reference_ids = [row.base_id for row in reference]
-    reference_categories = {row.base_id: row.category_id for row in reference}
-    output: list[CalibrationRow] = []
-    seen_row_ids: set[str] = set()
-    for language in languages:
-        rows = by_language[language]
-        if [row.base_id for row in rows] != reference_ids:
-            raise ValueError(f"{filename_prefix}/{language} coverage or order drift")
-        for row in rows:
-            if reference_categories[row.base_id] != row.category_id:
-                raise ValueError(f"{filename_prefix}/{row.base_id} category drift")
-            if row.row_id in seen_row_ids:
-                raise ValueError(f"{filename_prefix} duplicate row_id")
-            seen_row_ids.add(row.row_id)
-        output.extend(rows)
-    return output
+    ]
+    aligned = load_aligned_corpus(files, languages, expected_rows)
+    return [
+        CalibrationRow(
+            base_id=row.canonical_id,
+            row_id=row.row_id,
+            language=row.language,
+            direction=row.direction,
+            category_id=row.category_id,
+            prompt=row.prompt,
+            source_path=row.source_path,
+            source_line=row.source_line,
+        )
+        for row in aligned
+    ]
 
 
 def _normalized_prompt_hash(prompt: str) -> str:
@@ -291,18 +236,18 @@ def load_multilingual_dataset_bundle(
     *,
     dataset_root: str | Path,
     split_root: str | Path | None = None,
-    languages: tuple[str, ...] = ("en", "ru", "zh", "es", "fr"),
+    languages: tuple[str, ...] = ("en", "ru", "zh", "ja"),
     direction_rows_per_cell: int = 1000,
     trial_rows_per_cell: int = 400,
-    final_holdout_rows_per_language: int = 132,
+    final_rows_per_cell: int = 200,
 ) -> MultilingualDatasetBundle:
-    """Load direction, rotating trial and independent final-holdout pools."""
+    """Load map, rotating trial and independent directional final pools."""
 
     root = Path(dataset_root).resolve()
     split = (
         Path(split_root).resolve()
         if split_root is not None
-        else root / "operative_split_1000_400_v1"
+        else root
     )
     normalized_languages = tuple(language.lower() for language in languages)
     if not normalized_languages or len(set(normalized_languages)) != len(
@@ -313,7 +258,7 @@ def load_multilingual_dataset_bundle(
         min(
             direction_rows_per_cell,
             trial_rows_per_cell,
-            final_holdout_rows_per_language,
+            final_rows_per_cell,
         )
         <= 0
     ):
@@ -323,7 +268,7 @@ def load_multilingual_dataset_bundle(
         LanguageFile(
             language,
             direction,  # type: ignore[arg-type]
-            split / f"direction_{language}_{direction}_{direction_rows_per_cell}.jsonl",
+            split / f"map_{language}_{direction}_{direction_rows_per_cell}.jsonl",
         )
         for direction in ("safe", "unsafe")
         for language in normalized_languages
@@ -347,30 +292,29 @@ def load_multilingual_dataset_bundle(
         normalized_languages,
         trial_rows_per_cell,
     )
-    final_rows = _load_calibration_pool(
+    final_rows = _load_directional_final_pool(
         root,
-        filename_prefix="srg_calibration",
         languages=normalized_languages,
-        expected_rows=final_holdout_rows_per_language,
+        expected_rows=final_rows_per_cell,
     )
     _assert_pool_prompt_disjoint(
         {
-            "direction": direction_rows,
+            "map": direction_rows,
             "trial": trial_rows,
-            "final_holdout": final_rows,
+            "final": final_rows,
         }
     )
 
     file_records: dict[str, dict[str, object]] = {}
     for pool, specifications, expected in (
-        ("direction", direction_files, direction_rows_per_cell),
+        ("map", direction_files, direction_rows_per_cell),
         ("trial", trial_files, trial_rows_per_cell),
     ):
         for specification in specifications:
             path = Path(specification.path)
             ids = [
                 row.canonical_id
-                for row in (direction_rows if pool == "direction" else trial_rows)
+                for row in (direction_rows if pool == "map" else trial_rows)
                 if row.language == specification.language
                 and row.direction == specification.direction
             ]
@@ -383,18 +327,21 @@ def load_multilingual_dataset_bundle(
                 direction=specification.direction,
                 ids=ids,
             )
-    for pool, prefix, rows in (
-        ("final_holdout", "srg_calibration", final_rows),
-    ):
+    for direction in ("safe", "unsafe"):
         for language in normalized_languages:
-            path = root / f"{prefix}_{language}.jsonl"
-            ids = [row.base_id for row in rows if row.language == language]
+            path = root / f"final_{language}_{direction}_{final_rows_per_cell}.jsonl"
+            ids = [
+                row.base_id
+                for row in final_rows
+                if row.language == language and row.direction == direction
+            ]
             file_records[path.name] = _file_record(
                 path,
                 relative_to=root,
-                rows=final_holdout_rows_per_language,
-                pool=pool,
+                rows=final_rows_per_cell,
+                pool="final",
                 language=language,
+                direction=direction,
                 ids=ids,
             )
 
@@ -405,18 +352,18 @@ def load_multilingual_dataset_bundle(
         "split_manifest_sha256": _sha256(split_manifest),
     }
     manifest: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "PASS",
         "languages": list(normalized_languages),
         "counts": {
-            "direction": len(direction_rows),
+            "map": len(direction_rows),
             "trial": len(trial_rows),
-            "final_holdout": len(final_rows),
+            "final": len(final_rows),
         },
         "rows_per_cell": {
-            "direction": direction_rows_per_cell,
+            "map": direction_rows_per_cell,
             "trial": trial_rows_per_cell,
-            "final_holdout": final_holdout_rows_per_language,
+            "final": final_rows_per_cell,
         },
         "source_manifests": source_manifests,
         "files": dict(sorted(file_records.items())),

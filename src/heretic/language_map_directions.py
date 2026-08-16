@@ -10,9 +10,10 @@ import math
 import os
 import shutil
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -199,7 +200,7 @@ def build_direction_map_profile(
     index: list[dict[str, object]],
     residuals: Tensor,
     *,
-    languages: Sequence[str] = ("en", "ru", "zh", "es", "fr"),
+    languages: Sequence[str] = ("en", "ru", "zh", "ja"),
     explained_variance_target: float = 0.90,
 ) -> DirectionMapProfile:
     """Build language-cleaned directions and deterministic search bounds."""

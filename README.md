@@ -63,14 +63,14 @@ single-GPU script is required. A run-root lock prevents two supervisors from
 writing into the same journal.
 
 Set `data.dataset_root` in `config.yaml` to remove machine-specific prompt
-paths. The directory is local-only and stores the frozen multilingual v3
-direction/trial pools (including `direction_{lang}_{safe,unsafe}.jsonl`) plus
-the independent final holdout. The built-in cross-model SRG profile and its
+paths. The directory is local-only and stores the frozen multilingual v4
+map/trial/final pools for EN/RU/ZH/JA. Per language and direction, v4 uses
+`map_*_1000.jsonl`, `trial_*_400.jsonl`, and `final_*_200.jsonl`; canonical IDs
+are aligned across translations and disjoint across the three pools. The built-in cross-model SRG profile and its
 prototypes ship with Heretic-MOE; there is no separate per-model
 SRG calibration stage.
-Set `data.split_root` to the operative split containing
-`direction_*_1000.jsonl` and `trial_*_400.jsonl`. Prompt payloads are not
-committed to this repository.
+Set `data.split_root` to the same v4 root unless the files are stored in a
+separate directory. Prompt payloads are not committed to this repository.
 
 | Export | Selection rule |
 |---|---|

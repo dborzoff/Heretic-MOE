@@ -1,14 +1,14 @@
 version: 1
 
 model:
-  path: F:/models/model
+  path: F:/AI/hf_originals/LLM/Qwen__Qwen3.5-9B
 
 run:
-  root: F:/runs/model-heretic-moe-v4
+  root: F:/AI/hf_originals/heretic_out/research/searches/qwen35_9b_4lang_v4
   incompatible_contract: archive
   target_trials: 600
   exploration_trials: 120
-  seed: 20260811
+  seed: 20260816
   post_search: export
 
 devices:
@@ -19,8 +19,8 @@ devices:
   min_free_fraction: 0.70
 
 data:
-  dataset_root: F:/datasets/heretic_moe_4lang_v4
-  split_root: F:/datasets/heretic_moe_4lang_v4
+  dataset_root: F:/AI/hf_originals/heretic_out/research/datasets/heretic_moe_4lang_v4
+  split_root: F:/AI/hf_originals/heretic_out/research/datasets/heretic_moe_4lang_v4
   languages: [en, ru, zh, ja]
   direction_rows_per_cell: 1000
   trial_rows_per_cell: 400
@@ -37,8 +37,8 @@ generation:
 
 search:
   schedule_capacity: 1000
-  schedule_seed: 20260811
-  schedule_version: 2
+  schedule_seed: 20260816
+  schedule_version: 4
   direction_modes: [global, per_layer]
   save_responses: true
 

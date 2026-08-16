@@ -18,7 +18,7 @@ import tomllib
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hereticMOE prepare-multilingual",
-        description="Freeze and verify one model's multilingual v3 runtime.",
+        description="Freeze and verify one model's multilingual v4 runtime.",
     )
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--runtime-root", required=True, type=Path)
@@ -134,7 +134,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         config["model"] = args.model
     multilingual = config.get("multilingual_search")
     if not isinstance(multilingual, dict) or not multilingual.get("enabled"):
-        raise ValueError("config does not enable multilingual search v3")
+        raise ValueError("config does not enable multilingual search v4")
     runtime_root = args.runtime_root.resolve()
     multilingual["runtime_root"] = runtime_root.as_posix()
     config["device_map"] = "auto"
@@ -149,7 +149,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         languages=tuple(contract.languages),
         direction_rows_per_cell=contract.direction_rows_per_cell,
         trial_rows_per_cell=contract.trial_rows_per_cell,
-        final_holdout_rows_per_language=contract.final_holdout_rows_per_language,
+        final_rows_per_cell=contract.final_rows_per_cell,
     )
     print(
         "▶ Runtime contract | freezing dataset, directions and language schedule...",

@@ -67,7 +67,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, object]:
         config = tomllib.load(stream)
     multilingual = config.get("multilingual_search")
     if not isinstance(multilingual, dict) or not multilingual.get("enabled"):
-        raise ValueError("config does not enable multilingual search v3")
+        raise ValueError("config does not enable multilingual search v4")
     runtime_root = args.runtime_root.resolve()
     multilingual["runtime_root"] = runtime_root.as_posix()
     config["device_map"] = "auto"
@@ -80,7 +80,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, object]:
         languages=tuple(contract.languages),
         direction_rows_per_cell=contract.direction_rows_per_cell,
         trial_rows_per_cell=contract.trial_rows_per_cell,
-        final_holdout_rows_per_language=contract.final_holdout_rows_per_language,
+        final_rows_per_cell=contract.final_rows_per_cell,
     )
     top_six = json.loads(args.top_six_manifest.read_text(encoding="utf-8"))
     top_six_sha = str(top_six.get("shortlist_contract_sha256", ""))

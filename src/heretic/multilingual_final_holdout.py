@@ -128,6 +128,7 @@ def _row_contract(rows: Sequence[CalibrationRow]) -> list[dict[str, str]]:
             "base_id": row.base_id,
             "row_id": row.row_id,
             "language": row.language.lower(),
+            "direction_class": row.direction,
             "category_id": row.category_id,
         }
         for row in rows
@@ -140,7 +141,7 @@ def _geometry_rows(rows: Sequence[CalibrationRow]) -> list[GeometryRow]:
             canonical_id=row.base_id,
             row_id=row.row_id,
             language=row.language.lower(),
-            direction="unsafe",
+            direction=row.direction,  # type: ignore[arg-type]
             category_id=row.category_id,
             prompt=row.prompt,
             source_path=row.source_path,
@@ -225,6 +226,7 @@ def build_final_holdout_archive(
             "base_id": row.base_id,
             "row_id": row.row_id,
             "language": row.language,
+            "direction_class": row.direction,
             "category_id": row.category_id,
             "prompt": row.prompt,
             "clean_response": responses[index],
@@ -238,13 +240,32 @@ def build_final_holdout_archive(
             json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
         )
     _atomic_write(private_path, "".join(serialized).encode("utf-8"))
-    groups = [(row.language, row.category_id) for row in ordered]
-    baseline = relative_score(margins, margins, dict(srg_profile), groups=groups)
+    unsafe_indices = [
+        index for index, row in enumerate(ordered) if row.direction == "unsafe"
+    ]
+    if unsafe_indices:
+        unsafe_margins = [margins[index] for index in unsafe_indices]
+        unsafe_groups = [
+            (ordered[index].language, ordered[index].category_id)
+            for index in unsafe_indices
+        ]
+        baseline = relative_score(
+            unsafe_margins,
+            unsafe_margins,
+            dict(srg_profile),
+            groups=unsafe_groups,
+        )
+    else:
+        baseline = {"srg_gain": 0.0, "r_gain": 0.0}
     manifest: dict[str, Any] = {
         **contract,
         "status": "PASS",
         "archive_contract_sha256": contract_sha256,
         "rows": len(ordered),
+        "direction_rows": {
+            "safe": sum(row.direction == "safe" for row in ordered),
+            "unsafe": len(unsafe_indices),
+        },
         "layers": int(direction.shape[0]),
         "hidden_size": int(direction.shape[1]),
         "clean_baseline_srg_gain": float(baseline["srg_gain"]),
@@ -356,13 +377,31 @@ def merge_final_holdout_archives(
     ).encode("utf-8")
     _atomic_write(private_path, payload)
     margins = [float(record["clean_margin"]) for record in records]
-    groups = [(row.language, row.category_id) for row in ordered]
-    baseline = relative_score(margins, margins, dict(srg_profile), groups=groups)
+    unsafe_indices = [
+        index for index, row in enumerate(ordered) if row.direction == "unsafe"
+    ]
+    if not unsafe_indices:
+        raise ValueError("final-holdout requires UNSAFE rows")
+    unsafe_margins = [margins[index] for index in unsafe_indices]
+    unsafe_groups = [
+        (ordered[index].language, ordered[index].category_id)
+        for index in unsafe_indices
+    ]
+    baseline = relative_score(
+        unsafe_margins,
+        unsafe_margins,
+        dict(srg_profile),
+        groups=unsafe_groups,
+    )
     manifest = {
         **contract,
         "status": "PASS",
         "archive_contract_sha256": contract_sha256,
         "rows": len(records),
+        "direction_rows": {
+            "safe": sum(row.direction == "safe" for row in ordered),
+            "unsafe": len(unsafe_indices),
+        },
         "layers": int(direction.shape[0]),
         "hidden_size": int(direction.shape[1]),
         "shards": len(manifests),
@@ -417,16 +456,26 @@ def evaluate_final_holdout(
         srg_scorer.score_responses(prompts, responses), len(ordered)
     )
     baseline_margins = [float(record["clean_margin"]) for record in clean_records]
-    groups = [(row.language, row.category_id) for row in ordered]
+    unsafe_indices = [
+        index for index, row in enumerate(ordered) if row.direction == "unsafe"
+    ]
+    if not unsafe_indices:
+        raise ValueError("final-holdout requires UNSAFE rows")
+    unsafe_baseline_margins = [baseline_margins[index] for index in unsafe_indices]
+    unsafe_candidate_margins = [candidate_margins[index] for index in unsafe_indices]
+    groups = [
+        (ordered[index].language, ordered[index].category_id)
+        for index in unsafe_indices
+    ]
     srg = relative_score(
-        baseline_margins,
-        candidate_margins,
+        unsafe_baseline_margins,
+        unsafe_candidate_margins,
         dict(srg_profile),
         groups=groups,
     )
     group_summary = relative_group_summary(
-        baseline_margins,
-        candidate_margins,
+        unsafe_baseline_margins,
+        unsafe_candidate_margins,
         dict(srg_profile),
         groups=groups,
     )
@@ -457,6 +506,7 @@ def evaluate_final_holdout(
                     "base_id": row.base_id,
                     "row_id": row.row_id,
                     "language": row.language,
+                    "direction_class": row.direction,
                     "category_id": row.category_id,
                     "prompt": row.prompt,
                     "response": responses[index],
@@ -470,13 +520,18 @@ def evaluate_final_holdout(
     payload = "".join(private_lines).encode("utf-8")
     _atomic_write(Path(private_records_path).resolve(), payload)
     public: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "PASS",
         "trial_number": int(trial_number),
         "rows": len(ordered),
+        "direction_rows": {
+            "safe": sum(row.direction == "safe" for row in ordered),
+            "unsafe": len(unsafe_indices),
+        },
         "srg_gain": float(srg["srg_gain"]),
         "r_gain": float(srg["r_gain"]),
         "unsafe_geometry_gain": float(geometry["unsafe_geometry_gain"]),
+        "safe_geometry_damage": float(geometry["safe_geometry_damage"]),
         "removal": removal,
         "groups": group_summary,
         "srg": {

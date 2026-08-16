@@ -30,7 +30,7 @@ GenerationBatchSize = Literal["auto"] | PositiveInt
 DirectionMode = Literal["global", "per_layer"]
 ExportRole = Literal["Balanced", "Max"]
 GenerationBackendName = Literal["dynamic_eager", "compiled_static"]
-MetricsContractVersion = Literal["multilingual_v3"]
+MetricsContractVersion = Literal["multilingual_v4"]
 
 
 class ModelSettings(BaseModel):
@@ -88,6 +88,22 @@ class DataSettings(BaseModel):
 
     dataset_root: Path
     split_root: Path | None = None
+    languages: list[str] = Field(default_factory=lambda: ["en", "ru", "zh", "ja"])
+    direction_rows_per_cell: PositiveInt = 1000
+    trial_rows_per_cell: PositiveInt = 400
+    final_rows_per_cell: PositiveInt = 200
+
+    @model_validator(mode="after")
+    def validate_four_language_contract(self) -> DataSettings:
+        normalized = [language.strip().lower() for language in self.languages]
+        if normalized != ["en", "ru", "zh", "ja"]:
+            raise ValueError("data.languages must be exactly en, ru, zh, ja")
+        self.languages = normalized
+        if self.trial_rows_per_cell % len(normalized) != 0:
+            raise ValueError(
+                "data.trial_rows_per_cell must be divisible by the language count"
+            )
+        return self
 
 
 class GenerationSettings(BaseModel):
@@ -125,7 +141,7 @@ class SearchSettings(BaseModel):
 class MetricsSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: MetricsContractVersion = "multilingual_v3"
+    contract_version: MetricsContractVersion = "multilingual_v4"
     max_safe_ppl_drift: float = Field(default=0.005, ge=0.0)
     max_safe_geometry_damage: float = Field(default=1.0, ge=0.0)
     max_language_instability: float = Field(default=1.0, ge=0.0)
@@ -432,6 +448,10 @@ def build_internal_settings(config: LaunchConfig) -> Settings:
         dataset_root=_path_to_text(config.data.dataset_root),
         split_root=_path_to_text(config.data.split_root),
         runtime_root=runtime_root.as_posix(),
+        languages=config.data.languages,
+        direction_rows_per_cell=config.data.direction_rows_per_cell,
+        trial_rows_per_cell=config.data.trial_rows_per_cell,
+        final_rows_per_cell=config.data.final_rows_per_cell,
         ordinary_max_new_tokens=config.generation.ordinary_max_new_tokens,
         final_max_new_tokens=config.generation.final_max_new_tokens,
         schedule_seed=config.search.schedule_seed,

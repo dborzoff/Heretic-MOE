@@ -224,7 +224,7 @@ class BenchmarkSpecification(BaseModel):
 
 
 class MultilingualSearchSettings(BaseModel):
-    """Pinned dataset and generation contract for multilingual search v3."""
+    """Pinned dataset and generation contract for multilingual search v4."""
 
     enabled: bool = False
     dataset_root: str | None = Field(
@@ -242,10 +242,10 @@ class MultilingualSearchSettings(BaseModel):
         default=None,
         description="Frozen map/reference/SRG/schedule artifact root for workers.",
     )
-    languages: list[str] = Field(default_factory=lambda: ["en", "ru", "zh", "es", "fr"])
+    languages: list[str] = Field(default_factory=lambda: ["en", "ru", "zh", "ja"])
     direction_rows_per_cell: PositiveInt = 1000
     trial_rows_per_cell: PositiveInt = 400
-    final_holdout_rows_per_language: PositiveInt = 132
+    final_rows_per_cell: PositiveInt = 200
     ordinary_max_new_tokens: PositiveInt = 100
     final_max_new_tokens: PositiveInt = 100
     evaluation_phase: Literal["search", "finalist"] = "search"
@@ -264,10 +264,8 @@ class MultilingualSearchSettings(BaseModel):
     @classmethod
     def validate_languages(cls, value: list[str]) -> list[str]:
         normalized = [language.strip().lower() for language in value]
-        if normalized != ["en", "ru", "zh", "es", "fr"]:
-            raise ValueError(
-                "languages must be exactly en, ru, zh, es, fr in frozen order"
-            )
+        if normalized != ["en", "ru", "zh", "ja"]:
+            raise ValueError("languages must be exactly en, ru, zh, ja in frozen order")
         return normalized
 
     @model_validator(mode="after")
@@ -276,7 +274,7 @@ class MultilingualSearchSettings(BaseModel):
             raise ValueError("dataset_root is required when enabled=true")
         if self.trial_rows_per_cell % len(self.languages) != 0:
             raise ValueError(
-                "trial_rows_per_cell must be divisible by the five languages"
+                "trial_rows_per_cell must be divisible by the language count"
             )
         return self
 
@@ -287,7 +285,7 @@ class Settings(BaseSettings):
     multilingual_search: MultilingualSearchSettings = Field(
         default_factory=MultilingualSearchSettings,
         description=(
-            "Private frozen input contract for multilingual Heretic-MOE search v3."
+            "Private frozen input contract for multilingual Heretic-MOE search v4."
         ),
     )
 

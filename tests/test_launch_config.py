@@ -37,8 +37,12 @@ def _write_config(path: Path) -> None:
             "min_free_gib": 4.0,
         },
         "data": {
-            "dataset_root": "datasets/heretic_moe_5lang_v1",
-            "split_root": "datasets/heretic_moe_5lang_v1/operative_split_1000_400_v1",
+            "dataset_root": "datasets/heretic_moe_4lang_v4",
+            "split_root": "datasets/heretic_moe_4lang_v4",
+            "languages": ["en", "ru", "zh", "ja"],
+            "direction_rows_per_cell": 1000,
+            "trial_rows_per_cell": 400,
+            "final_rows_per_cell": 200,
         },
         "generation": {
             "ordinary_max_new_tokens": 100,
@@ -57,7 +61,7 @@ def _write_config(path: Path) -> None:
             "save_responses": True,
         },
         "metrics": {
-            "contract_version": "multilingual_v3",
+            "contract_version": "multilingual_v4",
             "max_safe_ppl_drift": 0.005,
             "max_safe_geometry_damage": 1.0,
             "max_language_instability": 1.0,
@@ -92,6 +96,11 @@ def test_repository_example_contains_the_complete_public_schema() -> None:
     assert config.version == 1
     assert config.run.target_trials == 600
     assert config.generation.ordinary_max_new_tokens == 100
+    assert config.data.languages == ["en", "ru", "zh", "ja"]
+    assert config.data.direction_rows_per_cell == 1000
+    assert config.data.trial_rows_per_cell == 400
+    assert config.data.final_rows_per_cell == 200
+    assert config.metrics.contract_version == "multilingual_v4"
     assert config.finalists.top_n == 6
     assert config.geometry.render_html is True
 
@@ -208,8 +217,12 @@ def test_public_yaml_maps_to_internal_settings_without_exposing_settings(
     assert internal.geometry_render_html is True
     multilingual = internal.multilingual_search
     assert multilingual.enabled is True
-    assert multilingual.dataset_root.endswith("datasets/heretic_moe_5lang_v1")
-    assert multilingual.split_root.endswith("operative_split_1000_400_v1")
+    assert multilingual.dataset_root.endswith("datasets/heretic_moe_4lang_v4")
+    assert multilingual.split_root.endswith("datasets/heretic_moe_4lang_v4")
+    assert multilingual.languages == ["en", "ru", "zh", "ja"]
+    assert multilingual.direction_rows_per_cell == 1000
+    assert multilingual.trial_rows_per_cell == 400
+    assert multilingual.final_rows_per_cell == 200
     assert not hasattr(multilingual, "srg_calibration_source")
     assert multilingual.ordinary_max_new_tokens == 100
     assert multilingual.final_max_new_tokens == 100

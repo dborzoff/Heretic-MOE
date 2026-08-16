@@ -47,7 +47,7 @@ def _file_sha256(path: Path) -> str:
 
 
 def apply_multilingual_search_mode(settings: Settings) -> None:
-    """Pin v3 generation and ranking so legacy 136-row settings cannot leak in."""
+    """Pin v4 generation and ranking so legacy 136-row settings cannot leak in."""
 
     contract = settings.multilingual_search
     if not contract.enabled:
@@ -146,7 +146,7 @@ def load_multilingual_worker_runtime(
     *,
     srg_scorer: Any | None = None,
 ) -> MultilingualWorkerRuntime:
-    """Load the dataset and immutable worker packages for the v3 search path."""
+    """Load the dataset and immutable worker packages for the v4 search path."""
 
     contract = settings.multilingual_search
     if not contract.enabled:
@@ -159,7 +159,7 @@ def load_multilingual_worker_runtime(
         languages=tuple(contract.languages),
         direction_rows_per_cell=contract.direction_rows_per_cell,
         trial_rows_per_cell=contract.trial_rows_per_cell,
-        final_holdout_rows_per_language=contract.final_holdout_rows_per_language,
+        final_rows_per_cell=contract.final_rows_per_cell,
     )
     prompt_cache_stats: dict[str, Any] | None = None
     if hasattr(model, "prepare_prompt_cache"):
@@ -289,7 +289,7 @@ def load_multilingual_search_evaluator(
     srg_scorer: Any,
     constraints: MultilingualConstraintContract,
     expected_per_direction: int = 400,
-    expected_languages: tuple[str, ...] = ("en", "ru", "zh", "es", "fr"),
+    expected_languages: tuple[str, ...] = ("en", "ru", "zh", "ja"),
     expected_generation_contract: Mapping[str, object] | None = None,
 ) -> tuple[MultilingualSearchEvaluator, dict[str, Any]]:
     """Load, cross-check and wire every immutable worker-side artifact."""
@@ -377,7 +377,7 @@ def load_multilingual_finalist_evaluator(
     model: Any,
     srg_scorer: Any,
     constraints: MultilingualConstraintContract,
-    expected_languages: tuple[str, ...] = ("en", "ru", "zh", "es", "fr"),
+    expected_languages: tuple[str, ...] = ("en", "ru", "zh", "ja"),
     final_max_new_tokens: int = 1024,
     expected_generation_contract: Mapping[str, object] | None = None,
 ) -> tuple[MultilingualSearchEvaluator, dict[str, Any]]:

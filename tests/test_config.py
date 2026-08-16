@@ -87,13 +87,13 @@ class SearchSettingsTests(unittest.TestCase):
     def test_multilingual_search_contract_defaults_are_frozen(self) -> None:
         contract = MultilingualSearchSettings(
             enabled=True,
-            dataset_root="F:/datasets/heretic_moe_5lang_v1",
+            dataset_root="F:/datasets/heretic_moe_4lang_v4",
         )
 
-        self.assertEqual(contract.languages, ["en", "ru", "zh", "es", "fr"])
+        self.assertEqual(contract.languages, ["en", "ru", "zh", "ja"])
         self.assertEqual(contract.direction_rows_per_cell, 1000)
         self.assertEqual(contract.trial_rows_per_cell, 400)
-        self.assertEqual(contract.final_holdout_rows_per_language, 132)
+        self.assertEqual(contract.final_rows_per_cell, 200)
         self.assertEqual(contract.ordinary_max_new_tokens, 100)
         self.assertEqual(contract.final_max_new_tokens, 100)
         self.assertEqual(contract.evaluation_phase, "search")

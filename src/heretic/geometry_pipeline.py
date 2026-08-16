@@ -40,14 +40,14 @@ def geometry_project_command(
         command.extend(
             (
                 "--group-a",
-                f"{language}={split_root / f'direction_{language}_safe_{rows_per_cell}.jsonl'}",
+                f"{language}={split_root / f'map_{language}_safe_{rows_per_cell}.jsonl'}",
             )
         )
     for language in languages:
         command.extend(
             (
                 "--group-b",
-                f"{language}={split_root / f'direction_{language}_unsafe_{rows_per_cell}.jsonl'}",
+                f"{language}={split_root / f'map_{language}_unsafe_{rows_per_cell}.jsonl'}",
             )
         )
     return command
@@ -61,4 +61,3 @@ def geometry_render_command(*, executable: Path, package_dir: Path) -> list[str]
         "--package-dir",
         str(package_dir.resolve()),
     ]
-

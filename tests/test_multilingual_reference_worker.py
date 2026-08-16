@@ -39,10 +39,10 @@ batch_size = 2
 [multilingual_search]
 enabled = true
 dataset_root = "dataset"
-languages = ["en", "ru", "zh", "es", "fr"]
+languages = ["en", "ru", "zh", "ja"]
 direction_rows_per_cell = 1000
 trial_rows_per_cell = 400
-final_holdout_rows_per_language = 132
+final_rows_per_cell = 200
 """.strip(),
         encoding="utf-8",
     )

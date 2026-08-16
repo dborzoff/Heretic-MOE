@@ -67,7 +67,7 @@ class FrozenMultilingualTrialEvaluator:
         srg_profile: Mapping[str, object],
         private_output_dir: str | Path,
         expected_per_direction: int = 400,
-        expected_languages: tuple[str, ...] = ("en", "ru", "zh", "es", "fr"),
+        expected_languages: tuple[str, ...] = ("en", "ru", "zh", "ja"),
         max_response_length: int = 100,
     ) -> None:
         self.model = model
@@ -220,7 +220,7 @@ def evaluate_multilingual_trial(
     clean_srg_margins: Mapping[str, float] | None = None,
     private_records_path: str | Path,
     expected_per_direction: int = 400,
-    expected_languages: tuple[str, ...] = ("en", "ru", "zh", "es", "fr"),
+    expected_languages: tuple[str, ...] = ("en", "ru", "zh", "ja"),
     max_response_length: int = 100,
     residual_capture: Callable[[list[Prompt], Tensor], None] | None = None,
 ) -> TrialMeasurement:

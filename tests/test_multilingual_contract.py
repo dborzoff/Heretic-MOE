@@ -35,30 +35,13 @@ def _aligned_rows(
     ]
 
 
-def _calibration_rows(
-    *, language: str, prefix: str, prompt_prefix: str, count: int
-) -> list[dict[str, object]]:
-    return [
-        {
-            "base_id": f"{prefix}{index:04d}",
-            "row_id": f"{language.upper()}-{prefix}{index:04d}",
-            "language": language,
-            "category_id": "C01",
-            "difficulty": "direct",
-            "prompt": f"{prompt_prefix}-{language}-{index}",
-            "source": "test",
-        }
-        for index in range(1, count + 1)
-    ]
-
-
 def _build_fixture(root: Path) -> tuple[Path, Path]:
-    split = root / "operative_split_1000_400_v1"
+    split = root
     languages = ("en", "ru")
     for language in languages:
         for direction, prefix in (("safe", "S"), ("unsafe", "U")):
             _write_jsonl(
-                split / f"direction_{language}_{direction}_2.jsonl",
+                split / f"map_{language}_{direction}_2.jsonl",
                 _aligned_rows(
                     language=language,
                     direction=direction,
@@ -75,14 +58,16 @@ def _build_fixture(root: Path) -> tuple[Path, Path]:
                     prompt_prefix=f"trial-{direction}",
                 ),
             )
-        _write_jsonl(
-            root / f"srg_calibration_{language}.jsonl",
-            _calibration_rows(
-                language=language, prefix="R", prompt_prefix="final", count=2
-            ),
-        )
+            _write_jsonl(
+                root / f"final_{language}_{direction}_2.jsonl",
+                _aligned_rows(
+                    language=language,
+                    direction=direction,
+                    ids=[f"{prefix}0004", f"{prefix}0005"],
+                    prompt_prefix=f"final-{direction}",
+                ),
+            )
     (root / "manifest.json").write_text("{}\n", encoding="utf-8")
-    (split / "manifest.json").write_text("{}\n", encoding="utf-8")
     return root, split
 
 
@@ -95,16 +80,17 @@ def test_loads_text_free_frozen_contract_with_exact_pool_counts(tmp_path: Path):
         languages=("en", "ru"),
         direction_rows_per_cell=2,
         trial_rows_per_cell=1,
-        final_holdout_rows_per_language=2,
+        final_rows_per_cell=2,
     )
 
     assert len(bundle.direction_rows) == 8
     assert len(bundle.trial_rows) == 4
-    assert len(bundle.final_rows) == 4
+    assert len(bundle.final_rows) == 8
+    assert {row.direction for row in bundle.final_rows} == {"safe", "unsafe"}
     assert bundle.manifest["counts"] == {
-        "direction": 8,
+        "map": 8,
         "trial": 4,
-        "final_holdout": 4,
+        "final": 8,
     }
     serialized = json.dumps(bundle.manifest, sort_keys=True)
     assert "prompt" not in serialized
@@ -116,7 +102,7 @@ def test_rejects_cross_pool_prompt_overlap(tmp_path: Path):
     root, split = _build_fixture(tmp_path)
     trial = split / "trial_en_safe_1.jsonl"
     rows = [json.loads(line) for line in trial.read_text(encoding="utf-8").splitlines()]
-    rows[0]["prompt"] = "final-en-1"
+    rows[0]["prompt"] = "final-safe-en-S0004"
     _write_jsonl(trial, rows)
 
     with pytest.raises(ValueError, match="prompt overlap"):
@@ -126,13 +112,13 @@ def test_rejects_cross_pool_prompt_overlap(tmp_path: Path):
             languages=("en", "ru"),
             direction_rows_per_cell=2,
             trial_rows_per_cell=1,
-            final_holdout_rows_per_language=2,
+            final_rows_per_cell=2,
         )
 
 
-def test_rejects_cross_language_final_holdout_id_order_drift(tmp_path: Path):
+def test_rejects_cross_language_final_id_order_drift(tmp_path: Path):
     root, split = _build_fixture(tmp_path)
-    path = root / "srg_calibration_ru.jsonl"
+    path = root / "final_ru_unsafe_2.jsonl"
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     _write_jsonl(path, list(reversed(rows)))
 
@@ -143,7 +129,7 @@ def test_rejects_cross_language_final_holdout_id_order_drift(tmp_path: Path):
             languages=("en", "ru"),
             direction_rows_per_cell=2,
             trial_rows_per_cell=1,
-            final_holdout_rows_per_language=2,
+            final_rows_per_cell=2,
         )
 
 
@@ -155,7 +141,7 @@ def test_contract_sha_changes_when_a_source_file_changes(tmp_path: Path):
         languages=("en", "ru"),
         direction_rows_per_cell=2,
         trial_rows_per_cell=1,
-        final_holdout_rows_per_language=2,
+        final_rows_per_cell=2,
     )
     manifest = root / "manifest.json"
     manifest.write_text('{"revision": 2}\n', encoding="utf-8")
@@ -165,7 +151,7 @@ def test_contract_sha_changes_when_a_source_file_changes(tmp_path: Path):
         languages=("en", "ru"),
         direction_rows_per_cell=2,
         trial_rows_per_cell=1,
-        final_holdout_rows_per_language=2,
+        final_rows_per_cell=2,
     )
 
     assert first.manifest["contract_sha256"] != second.manifest["contract_sha256"]
