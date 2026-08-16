@@ -94,6 +94,14 @@ def format_worker_event(prefix: str, event: Mapping[str, object]) -> str | None:
     if kind == "batch_probe_result":
         free_gib = float(event.get("free_gib", 0.0))
         return f"{prefix} Batch {batch_size} fits; {free_gib:.2f} GiB free"
+    if kind == "batch_reserve_floor":
+        free_gib = float(event.get("free_gib", 0.0))
+        required_gib = float(event.get("required_gib", 0.0))
+        return (
+            f"{prefix} Conditional NLL batch 1 completed; "
+            f"reserve {free_gib:.2f}/{required_gib:.2f} GiB, "
+            "continuing longest-first"
+        )
     if kind == "batch_validation":
         tokens = int(event.get("max_new_tokens", 0))
         return f"{prefix} Validating batch {batch_size} with {tokens} generated tokens..."

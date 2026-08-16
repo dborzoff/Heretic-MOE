@@ -312,6 +312,44 @@ def test_conditional_nll_reduces_batch_until_vram_headroom_is_ten_percent(
     assert wrapper.model.batch_sizes[:3] == [4, 2, 3]
 
 
+def test_conditional_nll_accepts_successful_longest_batch_at_one_when_reserve_is_low(
+    monkeypatch,
+) -> None:
+    wrapper = object.__new__(Model)
+    wrapper.model = _CausalModel()
+    wrapper.tokenizer = _Tokenizer()
+    wrapper.settings = type(
+        "Settings",
+        (),
+        {
+            "batch_size": 1,
+            "conditional_nll_batch_size": 0,
+            "max_batch_size": 1,
+            "batch_size_vram_headroom_fraction": 0.10,
+            "batch_size_vram_headroom_gib": 0.0,
+        },
+    )()
+    wrapper._render_chat_prompts = lambda prompts: [prompt.user for prompt in prompts]
+    events: list[dict[str, object]] = []
+    wrapper._batch_event_sink = events.append
+    monkeypatch.setattr(model_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(wrapper, "_cuda_memory_snapshot", lambda: (50, 1000, 0))
+    monkeypatch.setattr(wrapper, "_release_failed_cuda_batch", lambda: None)
+
+    values = wrapper.get_conditional_nll(
+        [Prompt(system="", user="longest"), Prompt(system="", user="shorter")],
+        [[3, 4], [3]],
+    )
+
+    assert len(values) == 2
+    assert wrapper._adaptive_nll_batch_size == 1
+    assert [event["event"] for event in events] == [
+        "batch_probe",
+        "batch_reserve_floor",
+        "batch_selected",
+    ]
+
+
 def test_automatic_conditional_nll_starts_from_quarter_generation_batch() -> None:
     wrapper = object.__new__(Model)
     wrapper.model = _CausalModel()

@@ -184,6 +184,33 @@ def _load_directional_final_pool(
     ]
 
 
+def _interleave_trial_rows_for_workers(
+    rows: list[GeometryRow],
+    *,
+    languages: tuple[str, ...],
+    rows_per_cell: int,
+) -> list[GeometryRow]:
+    """Balance SAFE/UNSAFE and languages in every contiguous GPU shard."""
+
+    by_cell = {
+        (direction, language): [
+            row
+            for row in rows
+            if row.direction == direction and row.language == language
+        ]
+        for language in languages
+        for direction in ("safe", "unsafe")
+    }
+    if any(len(cell) != rows_per_cell for cell in by_cell.values()):
+        raise ValueError("trial rows cannot be interleaved with incomplete cells")
+    return [
+        by_cell[(direction, language)][index]
+        for index in range(rows_per_cell)
+        for language in languages
+        for direction in ("safe", "unsafe")
+    ]
+
+
 def _normalized_prompt_hash(prompt: str) -> str:
     normalized = unicodedata.normalize("NFKC", prompt).casefold()
     normalized = re.sub(r"\s+", " ", normalized).strip()
@@ -291,6 +318,11 @@ def load_multilingual_dataset_bundle(
         trial_files,
         normalized_languages,
         trial_rows_per_cell,
+    )
+    trial_rows = _interleave_trial_rows_for_workers(
+        trial_rows,
+        languages=normalized_languages,
+        rows_per_cell=trial_rows_per_cell,
     )
     final_rows = _load_directional_final_pool(
         root,

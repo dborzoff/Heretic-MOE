@@ -2201,38 +2201,47 @@ class Model:
                 ),
             )
             if automatic and measured_free < required_free:
-                del input_ids, attention_mask, labels, outputs, batch_values
                 if batch_size == 1:
+                    # Rows are processed longest-first.  If the longest row
+                    # completed successfully at batch one, every later row is
+                    # no larger and there is no smaller batch to try.  Keep the
+                    # successful score instead of aborting the complete run;
+                    # transient full-vocabulary logits are released below.
+                    if tuning:
+                        self._emit_batch_event(
+                            "batch_reserve_floor",
+                            "conditional NLL",
+                            batch_size=1,
+                            free_gib=measured_free / 1024**3,
+                            required_gib=required_free / 1024**3,
+                        )
+                else:
+                    del input_ids, attention_mask, labels, outputs, batch_values
+                    smallest_failing_batch = (
+                        batch_size
+                        if smallest_failing_batch is None
+                        else min(smallest_failing_batch, batch_size)
+                    )
+                    next_batch_size = (
+                        max(
+                            largest_passing_batch,
+                            (largest_passing_batch + smallest_failing_batch) // 2,
+                        )
+                        if largest_passing_batch > 0
+                        else max(1, batch_size // 2)
+                    )
+                    if tuning:
+                        self._emit_batch_event(
+                            "batch_backoff",
+                            "conditional NLL",
+                            batch_size=batch_size,
+                            next_batch_size=next_batch_size,
+                            reason="VRAM reserve",
+                        )
+                    batch_size = next_batch_size
+                    self._adaptive_nll_batch_size = batch_size
                     self._release_failed_cuda_batch()
-                    raise RuntimeError(
-                        "conditional NLL cannot preserve the configured VRAM reserve "
-                        "at batch size 1"
-                    )
-                smallest_failing_batch = (
-                    batch_size
-                    if smallest_failing_batch is None
-                    else min(smallest_failing_batch, batch_size)
-                )
-                next_batch_size = (
-                    max(
-                        largest_passing_batch,
-                        (largest_passing_batch + smallest_failing_batch) // 2,
-                    )
-                    if largest_passing_batch > 0
-                    else max(1, batch_size // 2)
-                )
-                if tuning:
-                    self._emit_batch_event(
-                        "batch_backoff",
-                        "conditional NLL",
-                        batch_size=batch_size,
-                        next_batch_size=next_batch_size,
-                        reason="VRAM reserve",
-                    )
-                batch_size = next_batch_size
-                self._adaptive_nll_batch_size = batch_size
-                self._release_failed_cuda_batch()
-                continue
+                    continue
             if automatic and tuning and smallest_failing_batch is not None:
                 largest_passing_batch = max(largest_passing_batch, batch_size)
                 if smallest_failing_batch - largest_passing_batch > 1:

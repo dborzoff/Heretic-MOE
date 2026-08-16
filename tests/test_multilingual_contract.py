@@ -87,6 +87,14 @@ def test_loads_text_free_frozen_contract_with_exact_pool_counts(tmp_path: Path):
     assert len(bundle.trial_rows) == 4
     assert len(bundle.final_rows) == 8
     assert {row.direction for row in bundle.final_rows} == {"safe", "unsafe"}
+    assert [
+        (row.language, row.direction) for row in bundle.trial_rows
+    ] == [
+        ("en", "safe"),
+        ("en", "unsafe"),
+        ("ru", "safe"),
+        ("ru", "unsafe"),
+    ]
     assert bundle.manifest["counts"] == {
         "map": 8,
         "trial": 4,

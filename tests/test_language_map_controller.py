@@ -141,6 +141,22 @@ def test_batch_validation_result_shows_measured_throughput() -> None:
     )
 
 
+def test_batch_reserve_floor_explains_successful_batch_one_fallback() -> None:
+    assert format_worker_event(
+        "[GPU 0]",
+        {
+            "event": "batch_reserve_floor",
+            "mode": "conditional NLL",
+            "batch_size": 1,
+            "free_gib": 1.75,
+            "required_gib": 2.40,
+        },
+    ) == (
+        "[GPU 0] Conditional NLL batch 1 completed; "
+        "reserve 1.75/2.40 GiB, continuing longest-first"
+    )
+
+
 def test_worker_prewarm_phases_explain_compile_pause() -> None:
     assert format_worker_event(
         "[GPU 0]", {"event": "worker_phase", "phase": "prewarm"}
