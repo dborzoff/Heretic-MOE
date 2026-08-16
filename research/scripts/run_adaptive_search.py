@@ -285,6 +285,18 @@ def post_search_completion_status(mode: str) -> str:
     raise ValueError(f"Unknown post-search mode: {mode}")
 
 
+def post_search_next_step(mode: str) -> str:
+    """Return the user-facing next step after adaptive search."""
+
+    if mode == "export":
+        return "TOP-6 finalist recheck and export"
+    if mode == "recheck":
+        return "TOP-6 finalist recheck"
+    if mode == "none":
+        return "complete"
+    raise ValueError(f"Unknown post-search mode: {mode}")
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -1294,6 +1306,7 @@ def _monitor_dynamic_workers(
     queue: TrialWorkQueue,
     executable: Path,
     expected_tasks: int,
+    next_step: str,
     visible_worker_window: bool,
     max_restarts_per_gpu: int = 2,
     lease_timeout_seconds: float = 180.0,
@@ -1495,7 +1508,7 @@ def _monitor_dynamic_workers(
                 "trials": expected_tasks,
                 "workers": len(worker_ids),
                 "recoveries": len(recoveries),
-                "next": "TOP-6 finalist recheck",
+                "next": next_step,
             }
         )
         ui.close()
@@ -1722,6 +1735,7 @@ def wait_dynamic_workers(
     queue: TrialWorkQueue,
     executable: Path,
     expected_tasks: int,
+    next_step: str,
     visible_worker_window: bool,
     max_restarts_per_gpu: int = 2,
     lease_timeout_seconds: float = 180.0,
@@ -1734,6 +1748,7 @@ def wait_dynamic_workers(
             queue=queue,
             executable=executable,
             expected_tasks=expected_tasks,
+            next_step=next_step,
             visible_worker_window=visible_worker_window,
             max_restarts_per_gpu=max_restarts_per_gpu,
             lease_timeout_seconds=lease_timeout_seconds,
@@ -4283,6 +4298,7 @@ def _main_with_args(args: argparse.Namespace) -> None:
                     queue=queue,
                     executable=executable,
                     expected_tasks=queue_expected_tasks,
+                    next_step=post_search_next_step(args.post_search_mode),
                     visible_worker_window=args.visible_worker_windows,
                     max_restarts_per_gpu=args.max_worker_restarts,
                     lease_timeout_seconds=args.lease_timeout_seconds,

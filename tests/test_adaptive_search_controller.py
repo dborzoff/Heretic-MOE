@@ -626,6 +626,17 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
             ):
                 self.parse_args("--recheck-only", conflicting)
 
+    def test_post_search_next_step_matches_selected_mode(self) -> None:
+        self.assertEqual(
+            controller.post_search_next_step("export"),
+            "TOP-6 finalist recheck and export",
+        )
+        self.assertEqual(
+            controller.post_search_next_step("recheck"),
+            "TOP-6 finalist recheck",
+        )
+        self.assertEqual(controller.post_search_next_step("none"), "complete")
+
     def test_recheck_only_returns_before_creating_model_exports(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
