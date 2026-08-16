@@ -51,8 +51,8 @@ class RunSettings(BaseModel):
 
     @model_validator(mode="after")
     def validate_trial_counts(self) -> RunSettings:
-        if self.exploration_trials > self.target_trials:
-            raise ValueError("exploration_trials cannot exceed target_trials")
+        if self.exploration_trials >= self.target_trials:
+            raise ValueError("exploration_trials must be smaller than target_trials")
         return self
 
 

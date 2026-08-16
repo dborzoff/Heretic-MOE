@@ -191,6 +191,17 @@ def test_exploration_cannot_exceed_target(tmp_path: Path) -> None:
         )
 
 
+def test_exploration_cannot_equal_target(tmp_path: Path) -> None:
+    source = tmp_path / "config.yaml"
+    _write_config(source)
+
+    with pytest.raises(ValidationError):
+        load_effective_launch_config(
+            source,
+            LaunchOverrides(target_trials=120, exploration_trials=120),
+        )
+
+
 def test_public_yaml_maps_to_internal_settings_without_exposing_settings(
     tmp_path: Path,
 ) -> None:
