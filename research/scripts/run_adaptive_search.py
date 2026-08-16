@@ -457,7 +457,13 @@ def apply_data_root(base: dict[str, Any], data_root: Path) -> dict[str, Any]:
     root = data_root.resolve()
     multilingual = base.get("multilingual_search")
     if isinstance(multilingual, dict) and multilingual.get("enabled"):
-        split = root / "operative_split_1000_400_v1"
+        configured_dataset = Path(str(multilingual.get("dataset_root") or root)).resolve()
+        configured_split = multilingual.get("split_root")
+        split = (
+            Path(str(configured_split)).resolve()
+            if configured_split and configured_dataset == root
+            else root / "operative_split_1000_400_v1"
+        )
         required = (root / "manifest.json", split / "manifest.json")
         missing = [str(path) for path in required if not path.is_file()]
         if missing:

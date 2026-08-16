@@ -427,6 +427,26 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
         self.assertEqual(config["multilingual_search"]["dataset_root"], root.as_posix())
         self.assertEqual(config["multilingual_search"]["split_root"], split.as_posix())
 
+    def test_multilingual_v4_data_root_preserves_explicit_flat_split(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "manifest.json").write_text("{}\n", encoding="utf-8")
+            config = controller.apply_data_root(
+                {
+                    "model": "example/model",
+                    "multilingual_search": {
+                        "enabled": True,
+                        "dataset_root": root.as_posix(),
+                        "split_root": root.as_posix(),
+                        "languages": ["en", "ru", "zh", "ja"],
+                    },
+                },
+                root,
+            )
+
+        self.assertEqual(config["multilingual_search"]["dataset_root"], root.as_posix())
+        self.assertEqual(config["multilingual_search"]["split_root"], root.as_posix())
+
     def test_multilingual_preparation_commands_use_all_devices_and_frozen_pools(
         self,
     ) -> None:
