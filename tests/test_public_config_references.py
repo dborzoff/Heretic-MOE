@@ -46,10 +46,11 @@ def test_public_readme_uses_config_yaml_and_approved_overrides() -> None:
 
     assert "hereticMOE --config config.yaml" in text
     assert "devices.mode: auto" in text
-    assert "direction_{lang}_{safe,unsafe}.jsonl" in text
+    assert "`map_*_1000.jsonl`" in text
     assert "trial_*_400.jsonl" in text
+    assert "`final_*_200.jsonl`" in text
     assert "built-in cross-model SRG profile" in text
-    assert "independent final holdout" in text
+    assert "disjoint across the three pools" in text
     assert "TOP-6" in text
     for override in (
         "--model",
