@@ -544,14 +544,14 @@ def multilingual_geometry_command(
         command.extend(
             (
                 "--group-a",
-                f"{language}={split_root / f'direction_{language}_safe_{rows}.jsonl'}",
+                f"{language}={split_root / f'map_{language}_safe_{rows}.jsonl'}",
             )
         )
     for language in languages:
         command.extend(
             (
                 "--group-b",
-                f"{language}={split_root / f'direction_{language}_unsafe_{rows}.jsonl'}",
+                f"{language}={split_root / f'map_{language}_unsafe_{rows}.jsonl'}",
             )
         )
     return command

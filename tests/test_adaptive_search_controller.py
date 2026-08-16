@@ -484,6 +484,13 @@ class AdaptiveSearchControllerTests(unittest.TestCase):
         self.assertIn("0,1,3", geometry)
         self.assertEqual(geometry.count("--group-a"), 5)
         self.assertEqual(geometry.count("--group-b"), 5)
+        group_files = [
+            geometry[index + 1]
+            for index, value in enumerate(geometry)
+            if value in {"--group-a", "--group-b"}
+        ]
+        self.assertTrue(all("map_" in value for value in group_files))
+        self.assertTrue(all("direction_" not in value for value in group_files))
         self.assertIn("prepare-multilingual", prepare)
         self.assertEqual(prepare[prepare.index("--devices") + 1], "0,1,3")
         self.assertEqual(prepare[prepare.index("--batch-size") + 1], "8")
