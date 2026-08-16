@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import tempfile
+import unicodedata
 from collections import Counter, defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
@@ -112,6 +113,12 @@ def _hash_rank(
             canonical_id,
         ),
     )
+
+
+def _normalized_prompt_hash(prompt: str) -> str:
+    normalized = unicodedata.normalize("NFKC", prompt).casefold()
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _category_rankings_from_source(
@@ -245,6 +252,92 @@ def _allocate_category_pools(
     return pools, allocation
 
 
+def _repair_unsafe_prompt_overlap(
+    pools: dict[str, list[str]],
+    *,
+    rankings: Mapping[str, Sequence[str]],
+    sources: Mapping[str, Sequence[tuple[bytes, dict[str, Any]]]],
+    languages: Sequence[str],
+) -> list[dict[str, str]]:
+    """Keep translated duplicates inside one pool by swapping from reserve."""
+
+    source_lookup = _source_lookup(sources)
+    first_language = languages[0]
+    categories = {
+        canonical_id: str(row["category_id"])
+        for canonical_id, (_, row) in source_lookup[first_language].items()
+    }
+    prompt_hashes = {
+        canonical_id: {
+            _normalized_prompt_hash(str(source_lookup[language][canonical_id][1]["prompt"]))
+            for language in languages
+        }
+        for canonical_id in categories
+    }
+    priority = {"trial": 0, "final": 1, "map": 2}
+    repairs: list[dict[str, str]] = []
+
+    for _ in range(len(categories)):
+        hash_owners: dict[str, dict[str, set[str]]] = defaultdict(
+            lambda: defaultdict(set)
+        )
+        for pool in priority:
+            for canonical_id in pools[pool]:
+                for prompt_hash in prompt_hashes[canonical_id]:
+                    hash_owners[prompt_hash][pool].add(canonical_id)
+        conflicts = [
+            (prompt_hash, owners)
+            for prompt_hash, owners in hash_owners.items()
+            if len(owners) > 1
+        ]
+        if not conflicts:
+            return repairs
+        prompt_hash, owners = min(conflicts, key=lambda item: item[0])
+        victim_pool = max(owners, key=priority.__getitem__)
+        victim_id = min(owners[victim_pool])
+        category = categories[victim_id]
+        victim_index = pools[victim_pool].index(victim_id)
+
+        pools[victim_pool].pop(victim_index)
+        active_hash_pools: dict[str, set[str]] = defaultdict(set)
+        for pool in priority:
+            for canonical_id in pools[pool]:
+                for candidate_hash in prompt_hashes[canonical_id]:
+                    active_hash_pools[candidate_hash].add(pool)
+        reserve = set(pools["reserve"])
+        replacement_id = next(
+            (
+                canonical_id
+                for canonical_id in rankings[category]
+                if canonical_id in reserve
+                and canonical_id != victim_id
+                and all(
+                    not (active_hash_pools[candidate_hash] - {victim_pool})
+                    for candidate_hash in prompt_hashes[canonical_id]
+                )
+            ),
+            None,
+        )
+        if replacement_id is None:
+            pools[victim_pool].insert(victim_index, victim_id)
+            raise ValueError(
+                f"cannot repair cross-pool translated duplicate in {victim_pool}/{category}"
+            )
+        pools["reserve"].remove(replacement_id)
+        pools["reserve"].append(victim_id)
+        pools[victim_pool].insert(victim_index, replacement_id)
+        repairs.append(
+            {
+                "pool": victim_pool,
+                "category_id": category,
+                "removed_id": victim_id,
+                "replacement_id": replacement_id,
+                "collision_sha256": prompt_hash,
+            }
+        )
+    raise ValueError("translated duplicate repair did not converge")
+
+
 def _source_lookup(
     by_language: Mapping[str, Sequence[tuple[bytes, dict[str, Any]]]],
 ) -> dict[str, dict[str, tuple[bytes, dict[str, Any]]]]:
@@ -311,6 +404,27 @@ def _write_pool(
     return dict(sorted(category_counts.items()))
 
 
+def _cross_pool_prompt_overlap(
+    output_root: Path,
+    *,
+    direction: str,
+    languages: Sequence[str],
+    pool_sizes: Mapping[str, int],
+) -> dict[str, int]:
+    hashes: dict[str, set[str]] = {}
+    for pool, size in pool_sizes.items():
+        values: set[str] = set()
+        for language in languages:
+            path = output_root / f"{pool}_{language}_{direction}_{size}.jsonl"
+            for _, row in _iter_jsonl(path):
+                values.add(_normalized_prompt_hash(str(row["prompt"])))
+        hashes[pool] = values
+    return {
+        f"{left}_{right}": len(hashes[left] & hashes[right])
+        for left, right in (("map", "trial"), ("map", "final"), ("trial", "final"))
+    }
+
+
 def build_four_language_corpus(
     *,
     output_root: str | Path,
@@ -373,6 +487,12 @@ def build_four_language_corpus(
         unsafe_rankings,
         (("trial", trial_rows), ("final", final_rows), ("map", map_rows)),
     )
+    unsafe_repairs = _repair_unsafe_prompt_overlap(
+        unsafe_pools,
+        rankings=unsafe_rankings,
+        sources=unsafe,
+        languages=normalized_languages,
+    )
     for direction, pools in (("safe", safe_pools), ("unsafe", unsafe_pools)):
         names = ("map", "trial", "final")
         for left_index, left in enumerate(names):
@@ -411,6 +531,21 @@ def build_four_language_corpus(
                 languages=normalized_languages,
                 files=files,
             )
+        prompt_overlap = {
+            direction: _cross_pool_prompt_overlap(
+                temporary,
+                direction=direction,
+                languages=normalized_languages,
+                pool_sizes={"map": map_rows, "trial": trial_rows, "final": final_rows},
+            )
+            for direction in ("safe", "unsafe")
+        }
+        if any(
+            count
+            for direction in prompt_overlap.values()
+            for count in direction.values()
+        ):
+            raise ValueError(f"cross-pool prompt overlap remains: {prompt_overlap}")
         counts = {
             "map": {"safe": map_rows, "unsafe": map_rows},
             "trial": {"safe": trial_rows, "unsafe": trial_rows},
@@ -459,6 +594,12 @@ def build_four_language_corpus(
                 "unsafe": unsafe_allocation,
             },
             "cross_pool_overlap": {"safe": 0, "unsafe": 0},
+            "cross_pool_content_overlap": prompt_overlap,
+            "content_overlap_repairs": {
+                "safe": 0,
+                "unsafe": len(unsafe_repairs),
+            },
+            "content_overlap_repair_sha256": _canonical_sha256(unsafe_repairs),
             "files": dict(sorted(files.items())),
             "metadata_files": {
                 membership_path.name: _sha256(membership_path),
