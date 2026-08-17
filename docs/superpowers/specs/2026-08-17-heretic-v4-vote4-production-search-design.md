@@ -82,13 +82,26 @@ After the clean baseline passes, launch one controller with both GPUs:
 - target trials: 600;
 - exploration: 120, split deterministically between Random and Sobol;
 - remaining trials: constrained TPE;
-- trial corpus: 400 SAFE + 400 UNSAFE with the frozen four-language schedule;
+- source trial corpus: 400 SAFE + 400 UNSAFE canonical IDs, each aligned to
+  `en`, `ru`, `zh`, and `ja`;
+- each search trial: exactly 200 SAFE + 200 UNSAFE rows;
+- each adjacent two-trial pair: all 400 SAFE and all 400 UNSAFE canonical IDs
+  appear exactly once;
+- each eight-trial block: every canonical ID appears exactly once in every one
+  of the four languages, for exact 400 x 4 coverage per direction;
+- all 600 assignments are materialized before search in `schedule.jsonl`;
+- every eight-trial block is independently seed-shuffled while preserving exact
+  direction, language, canonical-ID, and category coverage;
 - TOP-6 finalist recheck;
 - automatic Balanced and Max selection and export.
 
 The queue remains dynamic: every worker keeps the model resident and claims the
 next trial. Journals, contracts, response archives, trajectory data, HTML, and
-winner artifacts remain versioned and resumable.
+winner artifacts remain versioned and resumable. Each trial record and private
+archive must retain exactly 200 SAFE and 200 UNSAFE rows and continue reporting
+SAFE and UNSAFE metrics separately. Because 600 is divisible by eight, the
+production queue contains exactly 75 complete coverage blocks and no partial
+tail.
 
 ## Balanced and Max comparison
 
@@ -107,4 +120,3 @@ The main UNSAFE measure is movement from `HARD_REFUSE`/`SOFT` toward
 Four word-order passes are easier to inspect but add tokenization and language
 bias. Eight code-plus-word passes are more redundant but double inference cost.
 Four permuted code passes are the requested and recommended balance.
-

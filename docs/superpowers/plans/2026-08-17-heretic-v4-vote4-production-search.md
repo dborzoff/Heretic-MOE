@@ -17,6 +17,8 @@
 - Vote variants: `code_permuted`, `code_shift_1`, `code_shift_2`, `code_shift_3`.
 - `max_new_tokens=2`, thinking disabled, English classifier system prompt.
 - Search: 600 total trials, 120 exploration trials, two GPUs, TOP-6 recheck, Balanced/Max export.
+- Search evaluation: exactly 200 SAFE + 200 UNSAFE rows per trial; every two
+  trials cover all 400 canonical IDs and every eight cover all four languages.
 - Existing unrelated dirty classification and translation files must be preserved.
 
 ---
@@ -182,7 +184,72 @@ git add config.heretic_moe_4lang_v4_qwen3_8b.yaml tests/test_public_config_refer
 git commit -m "feat: add qwen3 8b production search profile"
 ```
 
-### Task 5: Verify the complete code path
+### Task 5: Freeze the 200+200 eight-trial schedule
+
+**Files:**
+- Modify: `src/heretic/trial_language_schedule.py`
+- Modify: `src/heretic/config.py`
+- Modify: `src/heretic/launch_config.py`
+- Modify: `src/heretic/multilingual_prepare.py`
+- Modify: `src/heretic/multilingual_runtime.py`
+- Modify: `config.heretic_moe_4lang_v4_qwen3_8b.yaml`
+- Test: `tests/test_trial_language_schedule.py`
+- Test: `tests/test_launch_config.py`
+- Test: `tests/test_multilingual_runtime.py`
+
+**Interfaces:**
+- Consumes: 400 SAFE and 400 UNSAFE canonical IDs aligned across four languages.
+- Produces: a frozen 600-row `schedule.jsonl`, each record containing 200 SAFE
+  and 200 UNSAFE row IDs, plus `trial_rows_per_direction=200` in the runtime
+  contract.
+
+- [ ] **Step 1: Write the failing exact-coverage tests**
+
+```python
+records = materialize_trial_language_schedule(
+    index,
+    output_dir=output,
+    languages=("en", "ru", "zh", "ja"),
+    seed=20260817,
+    total_trials=600,
+    source_rows_per_direction=400,
+    trial_rows_per_direction=200,
+)
+assert all(len(record["row_ids"]) == 400 for record in records)
+```
+
+For each direction, assert that adjacent two-trial pairs contain all 400
+canonical IDs once, every eight-trial block contains all 1,600
+`(canonical_id, language)` pairs once, each trial has 50 rows per language,
+and all 75 blocks are complete.
+
+- [ ] **Step 2: Run focused tests and confirm RED**
+
+Run: `.venv/Scripts/python.exe -m pytest -q tests/test_trial_language_schedule.py tests/test_launch_config.py tests/test_multilingual_runtime.py`
+
+- [ ] **Step 3: Implement deterministic category-stratified block scheduling**
+
+Precompute four language phases per eight-trial block. Within each two-trial
+pair, split each assigned-language group 50/50 while distributing category
+oddments deterministically. Seed-shuffle the final row order and record the
+block size, source rows, trial rows, and coverage policy in the schedule hash.
+
+- [ ] **Step 4: Wire the separate source and evaluation counts**
+
+Keep `trial_rows_per_cell=400` for loading and clean reference. Add
+`search.trial_rows_per_direction=200`, propagate it into
+`MultilingualSearchSettings`, schedule materialization, and the search
+evaluator. Finalist evaluation remains the full independent 200+200 x4 set.
+
+- [ ] **Step 5: Verify, commit, and start a new run root**
+
+```powershell
+.venv/Scripts/python.exe -m pytest -q tests/test_trial_language_schedule.py tests/test_launch_config.py tests/test_multilingual_runtime.py
+git add src/heretic/trial_language_schedule.py src/heretic/config.py src/heretic/launch_config.py src/heretic/multilingual_prepare.py src/heretic/multilingual_runtime.py config.heretic_moe_4lang_v4_qwen3_8b.yaml tests/test_trial_language_schedule.py tests/test_launch_config.py tests/test_multilingual_runtime.py
+git commit -m "perf: freeze 200-row multilingual trial panels"
+```
+
+### Task 6: Verify the complete code path
 
 **Files:** No production edits unless a failing test exposes a defect.
 
@@ -201,7 +268,7 @@ coverage, merge, resume, batch backoff, and text-free output.
 
 - [ ] **Step 4: Re-run focused tests after any GPU fix and commit it separately**
 
-### Task 6: Generate the clean Qwen3-8B baseline
+### Task 7: Generate the clean Qwen3-8B baseline
 
 **Files:** Runtime artifacts only under `heretic_out/research/results`.
 
@@ -221,7 +288,7 @@ the prompt/parser contract, resume missing/invalid keys, and repeat validation.
 
 - [ ] **Step 4: Freeze baseline hashes and reports**
 
-### Task 7: Run the production Heretic search
+### Task 8: Run the production Heretic search
 
 **Files:** Runtime artifacts only under a new versioned search root.
 
@@ -234,7 +301,7 @@ the prompt/parser contract, resume missing/invalid keys, and repeat validation.
 Require 600 unique COMPLETE trials, no failed claims, six rechecked finalists,
 valid winners, immutable hashes, and actual Balanced/Max export artifacts.
 
-### Task 8: Benchmark Balanced and Max and compare
+### Task 9: Benchmark Balanced and Max and compare
 
 **Files:** Runtime artifacts only under the frozen vote4 result root.
 
@@ -245,4 +312,3 @@ valid winners, immutable hashes, and actual Balanced/Max export artifacts.
 - [ ] **Step 3: Build original/Balanced/Max transition reports**
 
 - [ ] **Step 4: Deliver paths, hashes, category/language tables, and a concise conclusion**
-
