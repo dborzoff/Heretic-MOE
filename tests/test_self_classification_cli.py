@@ -110,6 +110,7 @@ def test_pilot_dry_run_reports_exact_task_count(tmp_path: Path) -> None:
         "variants": 3,
         "tasks": 30,
         "workers": 2,
+        "languages": ["en", "ru", "zh", "ja", "fr"],
     }
     assert not (tmp_path / "output").exists()
 
@@ -152,8 +153,155 @@ def test_consensus_dry_run_uses_eight_variants_and_excludes_base_model(
         "workers": 2,
         "system_mode": "english",
         "max_new_tokens": 8,
+        "languages": ["en", "ru", "zh", "ja", "fr"],
     }
     assert not (tmp_path / "output").exists()
+
+
+def test_consensus_accepts_an_explicit_language_subset(tmp_path: Path) -> None:
+    manifest = build_manifest(tmp_path)
+    model = tmp_path / "chat-model"
+
+    result = main(
+        [
+            "consensus",
+            "--dataset-manifest",
+            str(manifest),
+            "--model-root",
+            str(tmp_path),
+            "--model",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--devices",
+            "0,1",
+            "--languages",
+            "en,ru,zh,ja",
+            "--dry-run",
+        ]
+    )
+
+    assert result["rows"] == 8
+    assert result["tasks"] == 64
+    assert result["languages"] == ["en", "ru", "zh", "ja"]
+
+
+def test_vote4_dry_run_uses_four_short_code_variants(tmp_path: Path) -> None:
+    manifest = build_manifest(tmp_path)
+
+    result = main(
+        [
+            "vote4",
+            "--dataset-manifest",
+            str(manifest),
+            "--model",
+            str(tmp_path / "chat-model"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--devices",
+            "0,1",
+            "--languages",
+            "en,ru,zh,ja",
+            "--dry-run",
+        ]
+    )
+
+    assert result == {
+        "status": "PASS",
+        "mode": "vote4-dry-run",
+        "rows": 8,
+        "variants": 4,
+        "tasks": 32,
+        "workers": 2,
+        "system_mode": "english",
+        "max_new_tokens": 2,
+        "languages": ["en", "ru", "zh", "ja"],
+    }
+
+
+def test_vote4_shards_one_model_across_all_devices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from heretic.self_classification_data import load_classification_rows
+
+    manifest = build_manifest(tmp_path)
+    observed_jobs: list[dict[str, object]] = []
+
+    def run_jobs(jobs, devices):
+        assert tuple(devices) == ("0", "1")
+        statuses = []
+        for job_path, worker_id in jobs:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            observed_jobs.append(job)
+            rows = load_classification_rows(job["dataset_manifest"], job["languages"])
+            rows = rows[int(job["shard_index"]) :: int(job["shard_count"])]
+            output = Path(str(job["output_path"]))
+            output.parent.mkdir(parents=True, exist_ok=True)
+            payloads = []
+            for row in rows:
+                for variant in job["variants"]:
+                    payloads.append(
+                        {
+                            "model_id": job["model_id"],
+                            "canonical_id": row.canonical_id,
+                            "row_id": row.row_id,
+                            "language": row.language,
+                            "category_ids": list(row.category_ids),
+                            "direction_class": row.direction_class,
+                            "variant": variant,
+                            "classification": (
+                                "DIRECT"
+                                if row.direction_class == "safe"
+                                else "HARD_REFUSE"
+                            ),
+                            "valid": True,
+                            "output_tokens": 1,
+                            "output_shape": "exact",
+                        }
+                    )
+            output.write_text(
+                "".join(json.dumps(value, sort_keys=True) + "\n" for value in payloads),
+                encoding="utf-8",
+            )
+            statuses.append(
+                {
+                    "job_path": str(job_path),
+                    "worker_id": worker_id,
+                    "device": devices[int(job["shard_index"])],
+                    "return_code": 0,
+                }
+            )
+        return statuses
+
+    monkeypatch.setattr("heretic.self_classification_cli._run_jobs", run_jobs)
+    result = main(
+        [
+            "vote4",
+            "--dataset-manifest",
+            str(manifest),
+            "--model",
+            str(tmp_path / "chat-model"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--devices",
+            "0,1",
+            "--languages",
+            "en,ru,zh,ja",
+        ]
+    )
+
+    assert result["status"] == "PASS"
+    assert result["tasks"] == 32
+    assert result["valid"] == 32
+    assert result["invalid"] == 0
+    assert [job["shard_index"] for job in observed_jobs] == [0, 1]
+    assert {job["shard_count"] for job in observed_jobs} == {2}
+    assert {job["system_mode"] for job in observed_jobs} == {"english"}
+    assert {job["max_new_tokens"] for job in observed_jobs} == {2}
+    assert {tuple(job["variants"]) for job in observed_jobs} == {
+        ("code_permuted", "code_shift_1", "code_shift_2", "code_shift_3")
+    }
 
 
 def test_model_discovery_filters_non_chat_and_oversized_weights(tmp_path: Path) -> None:

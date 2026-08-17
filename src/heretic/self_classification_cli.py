@@ -28,6 +28,7 @@ from .self_classification_report import (
 from .utils import get_file_sha256
 
 LANGUAGES = ("en", "ru", "zh", "ja", "fr")
+VOTE4_LANGUAGES = ("en", "ru", "zh", "ja")
 LEGACY_PILOT_VARIANTS = (
     PromptVariant.PHRASE,
     PromptVariant.NUMBER,
@@ -43,12 +44,25 @@ CONSENSUS_VARIANTS = (
     PromptVariant.WORD_ORDER_2,
     PromptVariant.WORD_ORDER_3,
 )
+VOTE4_VARIANTS = (
+    PromptVariant.CODE_PERMUTED,
+    PromptVariant.CODE_SHIFT_1,
+    PromptVariant.CODE_SHIFT_2,
+    PromptVariant.CODE_SHIFT_3,
+)
 
 
 def _devices(value: str) -> tuple[str, ...]:
     result = tuple(part.strip() for part in value.split(",") if part.strip())
     if not result or len(result) != len(set(result)):
         raise argparse.ArgumentTypeError("devices must be unique comma-separated IDs")
+    return result
+
+
+def _languages(value: str) -> tuple[str, ...]:
+    result = tuple(part.strip().lower() for part in value.split(",") if part.strip())
+    if not result or len(result) != len(set(result)):
+        raise argparse.ArgumentTypeError("languages must be unique comma-separated IDs")
     return result
 
 
@@ -62,6 +76,7 @@ def _parser() -> argparse.ArgumentParser:
     pilot.add_argument("--devices", type=_devices, default=("0", "1"))
     pilot.add_argument("--batch-size", type=int, default=32)
     pilot.add_argument("--dtype", default="bfloat16")
+    pilot.add_argument("--languages", type=_languages, default=LANGUAGES)
     pilot.add_argument("--dry-run", action="store_true")
 
     models = subparsers.add_parser("run-models")
@@ -72,6 +87,7 @@ def _parser() -> argparse.ArgumentParser:
     models.add_argument("--devices", type=_devices, default=("0", "1"))
     models.add_argument("--batch-size", type=int, default=32)
     models.add_argument("--dtype", default="bfloat16")
+    models.add_argument("--languages", type=_languages, default=LANGUAGES)
     models.add_argument("--max-models", type=int, default=10)
     models.add_argument("--max-weight-gib", type=float, default=20.0)
     models.add_argument("--dry-run", action="store_true")
@@ -84,10 +100,21 @@ def _parser() -> argparse.ArgumentParser:
     consensus.add_argument("--devices", type=_devices, default=("0", "1"))
     consensus.add_argument("--batch-size", type=int, default=32)
     consensus.add_argument("--dtype", default="bfloat16")
+    consensus.add_argument("--languages", type=_languages, default=LANGUAGES)
     consensus.add_argument("--max-models", type=int, default=20)
     consensus.add_argument("--max-weight-gib", type=float, default=20.0)
     consensus.add_argument("--exclude-model-id", action="append", default=[])
     consensus.add_argument("--dry-run", action="store_true")
+
+    vote4 = subparsers.add_parser("vote4")
+    vote4.add_argument("--dataset-manifest", required=True, type=Path)
+    vote4.add_argument("--model", required=True, type=Path)
+    vote4.add_argument("--output-dir", required=True, type=Path)
+    vote4.add_argument("--devices", type=_devices, default=("0", "1"))
+    vote4.add_argument("--batch-size", type=int, default=32)
+    vote4.add_argument("--dtype", default="bfloat16")
+    vote4.add_argument("--languages", type=_languages, default=VOTE4_LANGUAGES)
+    vote4.add_argument("--dry-run", action="store_true")
 
     worker = subparsers.add_parser("worker")
     worker.add_argument("--job", required=True, type=Path)
@@ -266,7 +293,7 @@ def _expected_keys(
 
 
 def _pilot(args: argparse.Namespace) -> dict[str, object]:
-    rows = load_classification_rows(args.dataset_manifest, LANGUAGES)
+    rows = load_classification_rows(args.dataset_manifest, args.languages)
     if args.dry_run:
         return {
             "status": "PASS",
@@ -275,6 +302,7 @@ def _pilot(args: argparse.Namespace) -> dict[str, object]:
             "variants": len(LEGACY_PILOT_VARIANTS),
             "tasks": len(rows) * len(LEGACY_PILOT_VARIANTS),
             "workers": len(args.devices),
+            "languages": list(args.languages),
         }
     output_dir = Path(args.output_dir).resolve() / "pilot"
     jobs_root = output_dir / "jobs"
@@ -292,7 +320,7 @@ def _pilot(args: argparse.Namespace) -> dict[str, object]:
             {
                 "schema_version": 1,
                 "dataset_manifest": str(Path(args.dataset_manifest).resolve()),
-                "languages": list(LANGUAGES),
+                "languages": list(args.languages),
                 "model": str(model),
                 "model_id": model_id,
                 "variants": [value.value for value in LEGACY_PILOT_VARIANTS],
@@ -323,6 +351,7 @@ def _pilot(args: argparse.Namespace) -> dict[str, object]:
         "model": str(model),
         "model_id": model_id,
         "rows": len(rows),
+        "languages": list(args.languages),
         "tasks": len(merged),
         "winner": summary["winner"],
         "result_sha256": get_file_sha256(merged_path),
@@ -348,7 +377,7 @@ def _model_paths(args: argparse.Namespace) -> list[Path]:
 
 
 def _run_models(args: argparse.Namespace) -> dict[str, object]:
-    rows = load_classification_rows(args.dataset_manifest, LANGUAGES)
+    rows = load_classification_rows(args.dataset_manifest, args.languages)
     output_root = Path(args.output_dir).resolve()
     pilot_summary_path = output_root / "pilot" / "pilot_summary.json"
     if not pilot_summary_path.is_file():
@@ -369,6 +398,7 @@ def _run_models(args: argparse.Namespace) -> dict[str, object]:
             "variant": winner.value,
             "tasks": len(rows) * len(models),
             "workers": len(args.devices),
+            "languages": list(args.languages),
         }
     jobs_root = output_root / "models" / "jobs"
     parts_root = output_root / "models" / "parts"
@@ -384,7 +414,7 @@ def _run_models(args: argparse.Namespace) -> dict[str, object]:
             {
                 "schema_version": 1,
                 "dataset_manifest": str(Path(args.dataset_manifest).resolve()),
-                "languages": list(LANGUAGES),
+                "languages": list(args.languages),
                 "model": str(model),
                 "model_id": model_id,
                 "variants": [winner.value],
@@ -424,6 +454,7 @@ def _run_models(args: argparse.Namespace) -> dict[str, object]:
         "models_failed": len(failed),
         "failed": failed,
         "rows": summary["rows"],
+        "languages": list(args.languages),
         "result_sha256": get_file_sha256(merged_path),
     }
     (output_root / "models" / "manifest.json").write_text(
@@ -433,8 +464,92 @@ def _run_models(args: argparse.Namespace) -> dict[str, object]:
     return manifest
 
 
+def _vote4(args: argparse.Namespace) -> dict[str, object]:
+    rows = load_classification_rows(args.dataset_manifest, args.languages)
+    if args.dry_run:
+        return {
+            "status": "PASS",
+            "mode": "vote4-dry-run",
+            "rows": len(rows),
+            "variants": len(VOTE4_VARIANTS),
+            "tasks": len(rows) * len(VOTE4_VARIANTS),
+            "workers": len(args.devices),
+            "system_mode": "english",
+            "max_new_tokens": 2,
+            "languages": list(args.languages),
+        }
+
+    output_root = Path(args.output_dir).resolve() / "vote4"
+    jobs_root = output_root / "jobs"
+    parts_root = output_root / "parts"
+    model = Path(args.model).resolve()
+    model_id = model.name
+    jobs: list[tuple[Path, str]] = []
+    part_paths: list[Path] = []
+    for index, _device in enumerate(args.devices):
+        worker_id = f"vote4-{index}"
+        part_path = parts_root / f"{worker_id}.jsonl"
+        job_path = jobs_root / f"{worker_id}.json"
+        _write_job(
+            job_path,
+            {
+                "schema_version": 1,
+                "dataset_manifest": str(Path(args.dataset_manifest).resolve()),
+                "languages": list(args.languages),
+                "model": str(model),
+                "model_id": model_id,
+                "variants": [value.value for value in VOTE4_VARIANTS],
+                "system_mode": "english",
+                "max_new_tokens": 2,
+                "output_path": str(part_path),
+                "batch_size": int(args.batch_size),
+                "dtype": str(args.dtype),
+                "shard_index": index,
+                "shard_count": len(args.devices),
+            },
+        )
+        jobs.append((job_path, worker_id))
+        part_paths.append(part_path)
+
+    statuses = _run_jobs(jobs, args.devices)
+    failed = [value for value in statuses if value["return_code"] != 0]
+    if failed:
+        raise RuntimeError(f"vote4 workers failed: {failed}")
+    merged_path = output_root / "vote4_rows.jsonl"
+    merged = merge_result_files(part_paths, merged_path)
+    verify_result_coverage(
+        merged_path,
+        _expected_keys([model_id], rows, VOTE4_VARIANTS),
+    )
+    summary = write_model_reports(output_root, merged)
+    valid = int(summary["valid"])
+    invalid = int(summary["invalid"])
+    manifest = {
+        "schema_version": 1,
+        "status": "PASS",
+        "dataset_sha256": get_file_sha256(Path(args.dataset_manifest)),
+        "model": str(model),
+        "model_id": model_id,
+        "rows": len(rows),
+        "tasks": len(merged),
+        "valid": valid,
+        "invalid": invalid,
+        "variants": [value.value for value in VOTE4_VARIANTS],
+        "system_mode": "english",
+        "max_new_tokens": 2,
+        "languages": list(args.languages),
+        "workers": len(args.devices),
+        "result_sha256": get_file_sha256(merged_path),
+    }
+    (output_root / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
 def _consensus(args: argparse.Namespace) -> dict[str, object]:
-    rows = load_classification_rows(args.dataset_manifest, LANGUAGES)
+    rows = load_classification_rows(args.dataset_manifest, args.languages)
     excluded = {str(value) for value in args.exclude_model_id}
     models = [path for path in _model_paths(args) if path.name not in excluded]
     if not models:
@@ -450,6 +565,7 @@ def _consensus(args: argparse.Namespace) -> dict[str, object]:
             "workers": len(args.devices),
             "system_mode": "english",
             "max_new_tokens": 8,
+            "languages": list(args.languages),
         }
 
     output_root = Path(args.output_dir).resolve() / "consensus"
@@ -467,7 +583,7 @@ def _consensus(args: argparse.Namespace) -> dict[str, object]:
             {
                 "schema_version": 1,
                 "dataset_manifest": str(Path(args.dataset_manifest).resolve()),
-                "languages": list(LANGUAGES),
+                "languages": list(args.languages),
                 "model": str(model),
                 "model_id": model_id,
                 "variants": [value.value for value in CONSENSUS_VARIANTS],
@@ -507,6 +623,7 @@ def _consensus(args: argparse.Namespace) -> dict[str, object]:
         "variants": [value.value for value in CONSENSUS_VARIANTS],
         "system_mode": "english",
         "max_new_tokens": 8,
+        "languages": list(args.languages),
         "excluded_model_ids": sorted(excluded),
         "models_requested": len(models),
         "models_completed": len(successful_model_ids),
@@ -530,6 +647,8 @@ def main(argv: Sequence[str] | None = None) -> dict[str, object]:
         result = _run_models(args)
     elif args.command == "consensus":
         result = _consensus(args)
+    elif args.command == "vote4":
+        result = _vote4(args)
     else:
         from .self_classification_worker import main as worker_main
 
