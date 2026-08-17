@@ -24,6 +24,7 @@ from .self_classification_report import (
     write_consensus_reports,
     write_model_reports,
     write_pilot_reports,
+    write_vote4_reports,
 )
 from .utils import get_file_sha256
 
@@ -522,6 +523,8 @@ def _vote4(args: argparse.Namespace) -> dict[str, object]:
         _expected_keys([model_id], rows, VOTE4_VARIANTS),
     )
     summary = write_model_reports(output_root, merged)
+    vote_summary = write_vote4_reports(output_root, merged)
+    model_vote = vote_summary["models"][0]
     valid = int(summary["valid"])
     invalid = int(summary["invalid"])
     manifest = {
@@ -534,6 +537,7 @@ def _vote4(args: argparse.Namespace) -> dict[str, object]:
         "tasks": len(merged),
         "valid": valid,
         "invalid": invalid,
+        "ready_for_search": bool(model_vote["ready_for_search"]),
         "variants": [value.value for value in VOTE4_VARIANTS],
         "system_mode": "english",
         "max_new_tokens": 2,

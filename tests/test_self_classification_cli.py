@@ -295,6 +295,9 @@ def test_vote4_shards_one_model_across_all_devices(
     assert result["tasks"] == 32
     assert result["valid"] == 32
     assert result["invalid"] == 0
+    assert result["ready_for_search"] is True
+    assert (tmp_path / "output" / "vote4" / "vote4_summary.json").is_file()
+    assert (tmp_path / "output" / "vote4" / "vote4_report.html").is_file()
     assert [job["shard_index"] for job in observed_jobs] == [0, 1]
     assert {job["shard_count"] for job in observed_jobs} == {2}
     assert {job["system_mode"] for job in observed_jobs} == {"english"}
