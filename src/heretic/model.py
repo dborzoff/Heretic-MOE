@@ -1634,13 +1634,13 @@ class Model:
             int(getattr(self.settings, "generation_batch_recovery_tolerance_mib", 256))
             * 1024**2
         )
-        if recovered_free + tolerance < baseline_free:
-            leaked = (baseline_free - recovered_free) / 1024**2
-            raise RuntimeError(
-                "generation batch validation did not release its CUDA cache "
-                f"({leaked:.0f} MiB still resident)"
-            )
         if validation_error is not None:
+            if recovered_free + tolerance < baseline_free:
+                leaked = (baseline_free - recovered_free) / 1024**2
+                raise RuntimeError(
+                    "generation batch validation did not release its CUDA cache "
+                    f"({leaked:.0f} MiB still resident)"
+                )
             raise validation_error.with_traceback(validation_error.__traceback__)
         required_free = max(
             int(float(self.settings.batch_size_vram_headroom_gib) * 1024**3),
@@ -1649,6 +1649,16 @@ class Model:
                 * measured_total
             ),
         )
+        retained_cache_bytes = max(0, baseline_free - recovered_free)
+        if (
+            recovered_free + tolerance < baseline_free
+            and recovered_free < required_free
+        ):
+            leaked = (baseline_free - recovered_free) / 1024**2
+            raise RuntimeError(
+                "generation batch validation did not preserve the CUDA VRAM reserve "
+                f"after cache release ({leaked:.0f} MiB still resident)"
+            )
         status = "PASS" if measured_free >= required_free else "INSUFFICIENT_HEADROOM"
         generated_tokens = validation_size * max_new_tokens
         return {
@@ -1663,6 +1673,7 @@ class Model:
             "working_set_bytes": int(max(0, baseline_free - measured_free)),
             "required_free_bytes": int(required_free),
             "recovered_free_bytes": int(recovered_free),
+            "retained_cache_bytes": int(retained_cache_bytes),
             "peak_allocated_bytes": int(measured_peak),
             "elapsed_seconds": float(elapsed_seconds),
             "generated_tokens": int(generated_tokens),

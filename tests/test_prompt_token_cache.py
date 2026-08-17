@@ -600,6 +600,47 @@ def test_validation_always_measures_100_tokens_even_with_a_lower_runtime_limit(
     assert result["max_new_tokens"] == 100
     assert calls == [{"max_new_tokens": 100, "min_new_tokens": 100}]
 
+
+def test_validation_accepts_persistent_compile_cache_when_headroom_is_safe(
+    monkeypatch,
+) -> None:
+    wrapper = _wrapper()
+    wrapper.settings.generation_backend = "compiled_static"
+    wrapper.settings.max_response_length = 100
+    wrapper.settings.generation_batch_recovery_tolerance_mib = 256
+    wrapper.settings.batch_size_vram_headroom_fraction = 0.10
+    wrapper.settings.batch_size_vram_headroom_gib = 1.0
+    prompts = [Prompt(system="", user="row") for _index in range(8)]
+
+    def generate(batch, **kwargs):
+        assert kwargs == {"max_new_tokens": 100, "min_new_tokens": 100}
+        inputs = {"input_ids": torch.zeros((len(batch), 1), dtype=torch.long)}
+        outputs = torch.ones((len(batch), 101), dtype=torch.long)
+        return inputs, outputs
+
+    wrapper.generate = generate
+    gib = 1024**3
+    snapshots = iter(
+        [
+            (20 * gib, 24 * gib, 0),
+            (4 * gib, 24 * gib, 20 * gib),
+            (int(18.5 * gib), 24 * gib, 0),
+        ]
+    )
+    wrapper._cuda_memory_snapshot = lambda: next(snapshots)
+    wrapper._release_generation_probe_cache = lambda: None
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+
+    result = wrapper.validate_generation_batch_size(
+        prompts,
+        batch_size=8,
+        expected_rows=800,
+    )
+
+    assert result["status"] == "PASS"
+    assert result["retained_cache_bytes"] == int(1.5 * gib)
+
 def test_batch_autotune_validation_oom_reduces_batch_and_retries() -> None:
     wrapper = _wrapper()
     wrapper.settings.generation_backend = "compiled_static"
