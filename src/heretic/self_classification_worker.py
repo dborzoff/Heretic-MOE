@@ -22,7 +22,7 @@ from .self_classification import (
     render_classifier_prompt,
 )
 from .self_classification_data import (
-    append_result_atomic,
+    append_results_atomic,
     load_classification_rows,
     load_completed_keys,
 )
@@ -92,6 +92,12 @@ def classify_rows_with_model(
             )
             for row in pending
         ]
+        order = sorted(
+            range(len(rendered)),
+            key=lambda index: len(rendered[index].system) + len(rendered[index].user),
+        )
+        pending = [pending[index] for index in order]
+        rendered = [rendered[index] for index in order]
         if rendered:
             model.prepare(rendered)
         position = 0
@@ -120,6 +126,7 @@ def classify_rows_with_model(
                 continue
             if len(outputs) != size or len(token_counts) != size:
                 raise RuntimeError("classification model returned the wrong batch size")
+            batch_results: list[ClassificationResult] = []
             for row, prompt, output, output_tokens in zip(
                 batch_rows, batch_prompts, outputs, token_counts, strict=True
             ):
@@ -147,7 +154,9 @@ def classify_rows_with_model(
                         prompt.expected_outputs.values(),
                     ),
                 )
-                append_result_atomic(output_path, result)
+                batch_results.append(result)
+            append_results_atomic(output_path, batch_results)
+            for result in batch_results:
                 completed_keys.add(result.key)
                 completed += 1
             position += size

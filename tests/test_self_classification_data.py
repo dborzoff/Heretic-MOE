@@ -13,6 +13,7 @@ from heretic.self_classification import (
 )
 from heretic.self_classification_data import (
     append_result_atomic,
+    append_results_atomic,
     load_classification_rows,
     load_completed_keys,
     verify_result_coverage,
@@ -110,6 +111,34 @@ def test_checkpoint_contains_only_public_result_fields(tmp_path: Path) -> None:
     assert "prompt" not in serialized
     assert "raw_output" not in serialized
     assert load_completed_keys(path) == {("model-a", "EN-safe-1", "number")}
+
+
+def test_batch_checkpoint_writes_every_public_result_once(tmp_path: Path) -> None:
+    path = tmp_path / "rows.jsonl"
+    first = result("EN-safe-1")
+    second = ClassificationResult(
+        model_id="model-a",
+        canonical_id="safe-2",
+        row_id="EN-safe-2",
+        language="en",
+        category_ids=("C1",),
+        direction_class="safe",
+        variant=PromptVariant.NUMBER,
+        classification=BehaviorClass.DIRECT,
+        valid=True,
+        output_tokens=1,
+    )
+
+    append_results_atomic(path, (first, second))
+
+    assert load_completed_keys(path) == {
+        ("model-a", "EN-safe-1", "number"),
+        ("model-a", "EN-safe-2", "number"),
+    }
+    serialized = path.read_text(encoding="utf-8")
+    assert serialized.count("\n") == 2
+    assert "prompt" not in serialized
+    assert "raw_output" not in serialized
 
 
 def test_completed_key_loader_rejects_duplicate_records(tmp_path: Path) -> None:

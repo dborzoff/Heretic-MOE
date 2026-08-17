@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from heretic.self_classification import (
     BehaviorClass,
     ClassificationInput,
@@ -191,3 +193,68 @@ def test_worker_honors_shared_system_and_generation_limit(tmp_path: Path) -> Non
     ).system
     assert model.systems == [english_system]
     assert model.token_limits == [16]
+
+
+def test_worker_batches_similar_prompt_lengths_together(tmp_path: Path) -> None:
+    class LengthCapturingModel(FakeClassificationModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.length_batches: list[list[int]] = []
+
+        def classify_batch(self, prompts, *, max_new_tokens: int):
+            self.length_batches.append([len(prompt.user) for prompt in prompts])
+            return ["1"] * len(prompts), [1] * len(prompts)
+
+    unsorted_rows = [
+        ClassificationInput(
+            canonical_id=f"P{index}",
+            row_id=f"EN-P{index}",
+            language="en",
+            category_ids=("C1",),
+            direction_class="safe",
+            prompt="x" * length,
+        )
+        for index, length in enumerate((1, 100, 2, 99))
+    ]
+    model = LengthCapturingModel()
+
+    classify_rows_with_model(
+        model,
+        model_id="model-a",
+        rows=unsorted_rows,
+        variants=(PromptVariant.NUMBER,),
+        output_path=tmp_path / "rows.jsonl",
+        batch_size=2,
+    )
+
+    assert len(model.length_batches) == 2
+    assert all(max(batch) - min(batch) <= 2 for batch in model.length_batches)
+
+
+def test_worker_checkpoints_once_per_completed_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from heretic.self_classification_data import append_results_atomic as persist
+
+    batch_sizes: list[int] = []
+
+    def checkpoint(path, results) -> None:
+        batch_sizes.append(len(results))
+        persist(path, results)
+
+    monkeypatch.setattr(
+        "heretic.self_classification_worker.append_results_atomic",
+        checkpoint,
+    )
+
+    classify_rows_with_model(
+        FakeClassificationModel(),
+        model_id="model-a",
+        rows=rows(5),
+        variants=(PromptVariant.NUMBER,),
+        output_path=tmp_path / "rows.jsonl",
+        batch_size=2,
+    )
+
+    assert batch_sizes == [2, 2, 1]

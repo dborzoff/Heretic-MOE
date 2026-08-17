@@ -110,14 +110,29 @@ def load_classification_rows(
 
 
 def append_result_atomic(path: str | Path, result: ClassificationResult) -> None:
+    append_results_atomic(path, (result,))
+
+
+def append_results_atomic(
+    path: str | Path,
+    results: Sequence[ClassificationResult],
+) -> None:
+    """Persist one completed inference batch with a single durable flush."""
+
+    if not results:
+        return
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = result.to_public_dict()
-    if _PROHIBITED_RESULT_FIELDS & payload.keys():
-        raise ValueError("public result contains prohibited text fields")
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n"
+    encoded_rows = []
+    for result in results:
+        payload = result.to_public_dict()
+        if _PROHIBITED_RESULT_FIELDS & payload.keys():
+            raise ValueError("public result contains prohibited text fields")
+        encoded_rows.append(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n"
+        )
     with path.open("a", encoding="utf-8", newline="\n") as handle:
-        handle.write(encoded)
+        handle.write("".join(encoded_rows))
         handle.flush()
         os.fsync(handle.fileno())
 
