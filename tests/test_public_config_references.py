@@ -80,6 +80,9 @@ def test_qwen3_8b_v4_profile_freezes_the_production_contract() -> None:
     assert config["data"]["direction_rows_per_cell"] == 1000
     assert config["data"]["trial_rows_per_cell"] == 400
     assert config["data"]["final_rows_per_cell"] == 200
+    assert config["search"]["trial_rows_per_direction"] == 200
+    assert config["search"]["schedule_version"] == 5
+    assert config["search"]["schedule_capacity"] == 600
     assert config["generation"]["ordinary_max_new_tokens"] == 100
     assert config["finalists"]["top_n"] == 6
     assert config["finalists"]["export_roles"] == ["Balanced", "Max"]

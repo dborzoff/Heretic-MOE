@@ -214,7 +214,7 @@ def load_multilingual_worker_runtime(
             model=model,
             srg_scorer=scorer,
             constraints=constraints,
-            expected_per_direction=contract.trial_rows_per_cell,
+            expected_per_direction=contract.trial_rows_per_direction,
             expected_languages=tuple(contract.languages),
             expected_generation_contract=generation_runtime_contract(settings),
         )

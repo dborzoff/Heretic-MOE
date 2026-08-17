@@ -4,7 +4,7 @@ model:
   path: F:/AI/hf_originals/LLM/Qwen__Qwen3-8B
 
 run:
-  root: F:/AI/hf_originals/heretic_out/research/searches/qwen3_8b_4lang_v4_v1
+  root: F:/AI/hf_originals/heretic_out/research/searches/qwen3_8b_4lang_v4_fast200x200_v1
   incompatible_contract: archive
   target_trials: 600
   exploration_trials: 120
@@ -36,9 +36,10 @@ generation:
   vram_headroom_fraction: 0.10
 
 search:
-  schedule_capacity: 1000
+  schedule_capacity: 600
   schedule_seed: 20260817
-  schedule_version: 4
+  schedule_version: 5
+  trial_rows_per_direction: 200
   direction_modes: [global, per_layer]
   save_responses: true
 

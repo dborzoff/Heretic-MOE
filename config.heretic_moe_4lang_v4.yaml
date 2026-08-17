@@ -38,7 +38,8 @@ generation:
 search:
   schedule_capacity: 1000
   schedule_seed: 20260816
-  schedule_version: 4
+  schedule_version: 5
+  trial_rows_per_direction: 200
   direction_modes: [global, per_layer]
   save_responses: true
 

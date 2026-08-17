@@ -245,12 +245,13 @@ class MultilingualSearchSettings(BaseModel):
     languages: list[str] = Field(default_factory=lambda: ["en", "ru", "zh", "ja"])
     direction_rows_per_cell: PositiveInt = 1000
     trial_rows_per_cell: PositiveInt = 400
+    trial_rows_per_direction: PositiveInt = 200
     final_rows_per_cell: PositiveInt = 200
     ordinary_max_new_tokens: PositiveInt = 100
     final_max_new_tokens: PositiveInt = 100
     evaluation_phase: Literal["search", "finalist"] = "search"
     schedule_seed: int = 20260811
-    schedule_version: PositiveInt = 2
+    schedule_version: PositiveInt = 5
     schedule_capacity: PositiveInt = 1000
     max_safe_ppl_drift: NonNegativeFloat = 0.005
     max_safe_geometry_damage: NonNegativeFloat = 1.0
@@ -275,6 +276,15 @@ class MultilingualSearchSettings(BaseModel):
         if self.trial_rows_per_cell % len(self.languages) != 0:
             raise ValueError(
                 "trial_rows_per_cell must be divisible by the language count"
+            )
+        if (
+            self.trial_rows_per_direction > self.trial_rows_per_cell
+            or self.trial_rows_per_cell % self.trial_rows_per_direction != 0
+            or self.trial_rows_per_direction % len(self.languages) != 0
+        ):
+            raise ValueError(
+                "trial_rows_per_direction must divide trial_rows_per_cell and "
+                "remain divisible by the language count"
             )
         return self
 

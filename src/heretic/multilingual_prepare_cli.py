@@ -162,7 +162,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         languages=tuple(contract.languages),
         schedule_seed=contract.schedule_seed,
         schedule_capacity=contract.schedule_capacity,
-        expected_per_direction=contract.trial_rows_per_cell,
+        expected_per_direction=contract.trial_rows_per_direction,
     )
     print(
         "✓ Runtime contract | "
@@ -253,7 +253,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
             max_truncated_response_rate=float(contract.max_truncated_response_rate),
             max_safe_d_to_r_rate=float(contract.max_safe_d_to_r_rate),
         ),
-        expected_per_direction=contract.trial_rows_per_cell,
+        expected_per_direction=contract.trial_rows_per_direction,
         expected_languages=tuple(contract.languages),
         expected_generation_contract=generation_runtime_contract(settings),
     )

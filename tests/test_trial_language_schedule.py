@@ -1,5 +1,6 @@
-from collections import Counter
+import itertools
 import json
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -11,17 +12,20 @@ from heretic.trial_language_schedule import (
     trial_language_indices,
 )
 
-
 LANGUAGES = ("en", "ru", "zh", "es", "fr")
+FOUR_LANGUAGES = ("en", "ru", "zh", "ja")
 
 
-def _aligned_index(rows_per_direction: int = 400) -> list[dict[str, object]]:
+def _aligned_index(
+    rows_per_direction: int = 400,
+    languages: tuple[str, ...] = LANGUAGES,
+) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for direction, prefix in (("safe", "S"), ("unsafe", "U")):
         for number in range(rows_per_direction):
             canonical_id = f"{prefix}{number + 1:04d}"
             category_id = f"C{number % 14 + 1:02d}"
-            for language in LANGUAGES:
+            for language in languages:
                 rows.append(
                     {
                         "canonical_id": canonical_id,
@@ -102,7 +106,7 @@ def test_schedule_randomizes_five_trial_blocks_without_losing_coverage() -> None
     assert languages_by_trial[:5] != languages_by_trial[5:]
     assert all(
         current != following
-        for current, following in zip(languages_by_trial, languages_by_trial[1:])
+        for current, following in itertools.pairwise(languages_by_trial)
     )
 
 
@@ -234,3 +238,86 @@ def test_schedule_is_materialized_text_free_and_resume_safe(tmp_path: Path) -> N
             total_trials=10,
             expected_per_direction=10,
         )
+
+
+def test_four_language_schedule_freezes_exact_eight_trial_coverage(
+    tmp_path: Path,
+) -> None:
+    index = _aligned_index(languages=FOUR_LANGUAGES)
+    by_row_id = {str(row["row_id"]): row for row in index}
+    output = tmp_path / "schedule-v5"
+
+    manifest = materialize_trial_language_schedule(
+        index,
+        output_dir=output,
+        languages=FOUR_LANGUAGES,
+        seed=20260817,
+        total_trials=600,
+        expected_per_direction=200,
+    )
+    _loaded_manifest, records = load_trial_language_schedule(output)
+
+    assert manifest["trials"] == 600
+    assert manifest["source_rows_per_direction"] == 400
+    assert manifest["expected_per_direction"] == 200
+    assert manifest["rows_per_trial"] == 400
+    assert manifest["coverage_block_trials"] == 8
+    assert len(records) == 600
+
+    for record in records:
+        chosen = [by_row_id[row_id] for row_id in record["row_ids"]]
+        assert len(chosen) == 400
+        assert Counter(str(row["direction_class"]) for row in chosen) == Counter(
+            {"safe": 200, "unsafe": 200}
+        )
+        assert Counter(
+            (str(row["direction_class"]), str(row["language"]))
+            for row in chosen
+        ) == Counter(
+            {
+                (direction, language): 50
+                for direction in ("safe", "unsafe")
+                for language in FOUR_LANGUAGES
+            }
+        )
+        for direction in ("safe", "unsafe"):
+            category_counts = Counter(
+                str(row["category_id"])
+                for row in chosen
+                if row["direction_class"] == direction
+            )
+            assert len(category_counts) == 14
+            assert max(category_counts.values()) - min(category_counts.values()) <= 3
+        directions = [str(row["direction_class"]) for row in chosen]
+        assert any(
+            left != right for left, right in itertools.pairwise(directions)
+        )
+
+    for pair_start in range(0, 600, 2):
+        pair = records[pair_start : pair_start + 2]
+        for direction in ("safe", "unsafe"):
+            canonical = [
+                str(by_row_id[row_id]["canonical_id"])
+                for record in pair
+                for row_id in record["row_ids"]
+                if by_row_id[row_id]["direction_class"] == direction
+            ]
+            assert len(canonical) == 400
+            assert len(set(canonical)) == 400
+
+    for block_start in range(0, 600, 8):
+        block = records[block_start : block_start + 8]
+        for direction in ("safe", "unsafe"):
+            cells = [
+                (
+                    str(by_row_id[row_id]["canonical_id"]),
+                    str(by_row_id[row_id]["language"]),
+                )
+                for record in block
+                for row_id in record["row_ids"]
+                if by_row_id[row_id]["direction_class"] == direction
+            ]
+            assert len(cells) == 1600
+            assert len(set(cells)) == 1600
+
+    assert records[:8] != records[8:16]

@@ -57,6 +57,7 @@ def _write_config(path: Path) -> None:
             "schedule_capacity": 1000,
             "schedule_seed": 20260811,
             "schedule_version": 2,
+            "trial_rows_per_direction": 200,
             "direction_modes": ["global", "per_layer"],
             "save_responses": True,
         },
@@ -100,6 +101,8 @@ def test_repository_example_contains_the_complete_public_schema() -> None:
     assert config.data.direction_rows_per_cell == 1000
     assert config.data.trial_rows_per_cell == 400
     assert config.data.final_rows_per_cell == 200
+    assert config.search.trial_rows_per_direction == 200
+    assert config.search.schedule_version == 5
     assert config.metrics.contract_version == "multilingual_v4"
     assert config.finalists.top_n == 6
     assert config.geometry.render_html is True
@@ -233,6 +236,7 @@ def test_public_yaml_maps_to_internal_settings_without_exposing_settings(
     assert multilingual.languages == ["en", "ru", "zh", "ja"]
     assert multilingual.direction_rows_per_cell == 1000
     assert multilingual.trial_rows_per_cell == 400
+    assert multilingual.trial_rows_per_direction == 200
     assert multilingual.final_rows_per_cell == 200
     assert not hasattr(multilingual, "srg_calibration_source")
     assert multilingual.ordinary_max_new_tokens == 100

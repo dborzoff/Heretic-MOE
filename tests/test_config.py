@@ -93,6 +93,7 @@ class SearchSettingsTests(unittest.TestCase):
         self.assertEqual(contract.languages, ["en", "ru", "zh", "ja"])
         self.assertEqual(contract.direction_rows_per_cell, 1000)
         self.assertEqual(contract.trial_rows_per_cell, 400)
+        self.assertEqual(contract.trial_rows_per_direction, 200)
         self.assertEqual(contract.final_rows_per_cell, 200)
         self.assertEqual(contract.ordinary_max_new_tokens, 100)
         self.assertEqual(contract.final_max_new_tokens, 100)

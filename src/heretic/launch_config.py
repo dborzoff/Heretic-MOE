@@ -123,7 +123,8 @@ class SearchSettings(BaseModel):
 
     schedule_capacity: PositiveInt = 1000
     schedule_seed: int = 20260811
-    schedule_version: PositiveInt = 2
+    schedule_version: PositiveInt = 5
+    trial_rows_per_direction: PositiveInt = 200
     direction_modes: list[DirectionMode] = Field(
         default_factory=lambda: ["global", "per_layer"]
     )
@@ -207,6 +208,21 @@ class LaunchConfig(BaseModel):
     finalists: FinalistSettings = Field(default_factory=FinalistSettings)
     geometry: GeometrySettings = Field(default_factory=GeometrySettings)
     recovery: RecoverySettings = Field(default_factory=RecoverySettings)
+
+    @model_validator(mode="after")
+    def validate_trial_panel_contract(self) -> LaunchConfig:
+        rows = self.search.trial_rows_per_direction
+        source = self.data.trial_rows_per_cell
+        if (
+            rows > source
+            or source % rows != 0
+            or rows % len(self.data.languages) != 0
+        ):
+            raise ValueError(
+                "search.trial_rows_per_direction must divide "
+                "data.trial_rows_per_cell and remain language-balanced"
+            )
+        return self
 
 
 @dataclass(frozen=True)
@@ -451,6 +467,7 @@ def build_internal_settings(config: LaunchConfig) -> Settings:
         languages=config.data.languages,
         direction_rows_per_cell=config.data.direction_rows_per_cell,
         trial_rows_per_cell=config.data.trial_rows_per_cell,
+        trial_rows_per_direction=config.search.trial_rows_per_direction,
         final_rows_per_cell=config.data.final_rows_per_cell,
         ordinary_max_new_tokens=config.generation.ordinary_max_new_tokens,
         final_max_new_tokens=config.generation.final_max_new_tokens,
