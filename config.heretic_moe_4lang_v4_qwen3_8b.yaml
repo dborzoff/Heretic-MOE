@@ -1,0 +1,68 @@
+version: 1
+
+model:
+  path: F:/AI/hf_originals/LLM/Qwen__Qwen3-8B
+
+run:
+  root: F:/AI/hf_originals/heretic_out/research/searches/qwen3_8b_4lang_v4_v1
+  incompatible_contract: archive
+  target_trials: 600
+  exploration_trials: 120
+  seed: 20260817
+  post_search: export
+
+devices:
+  mode: auto
+  include: []
+  max_workers: null
+  min_free_gib: 4
+  min_free_fraction: 0.70
+
+data:
+  dataset_root: F:/AI/hf_originals/heretic_out/research/datasets/heretic_moe_4lang_v4
+  split_root: F:/AI/hf_originals/heretic_out/research/datasets/heretic_moe_4lang_v4
+  languages: [en, ru, zh, ja]
+  direction_rows_per_cell: 1000
+  trial_rows_per_cell: 400
+  final_rows_per_cell: 200
+
+generation:
+  ordinary_max_new_tokens: 100
+  final_max_new_tokens: 100
+  batch_size: auto
+  conditional_nll_batch_size: auto
+  max_batch_size: 4096
+  backend: compiled_static
+  vram_headroom_fraction: 0.10
+
+search:
+  schedule_capacity: 1000
+  schedule_seed: 20260817
+  schedule_version: 4
+  direction_modes: [global, per_layer]
+  save_responses: true
+
+metrics:
+  contract_version: multilingual_v4
+  max_safe_ppl_drift: 0.005
+  max_safe_geometry_damage: 1.0
+  max_language_instability: 1.0
+  max_category_instability: 1.0
+  max_empty_rate: 0.0
+  max_truncated_rate: 0.0
+  max_safe_d_to_r_rate: 0.02
+
+finalists:
+  top_n: 6
+  balanced_removal_fraction: 0.80
+  export_roles: [Balanced, Max]
+
+geometry:
+  trajectory: true
+  capture_trials: true
+  render_html: true
+
+recovery:
+  worker_heartbeat_seconds: 15
+  worker_timeout_seconds: 180
+  max_restarts_per_gpu: 2

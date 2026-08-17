@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_TEXT_FILES = (
     ROOT / "README.md",
@@ -63,3 +65,21 @@ def test_public_readme_uses_config_yaml_and_approved_overrides() -> None:
         "--dry-run",
     ):
         assert override in text
+
+
+def test_qwen3_8b_v4_profile_freezes_the_production_contract() -> None:
+    path = ROOT / "config.heretic_moe_4lang_v4_qwen3_8b.yaml"
+    config = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    assert config["model"]["path"].endswith("/Qwen__Qwen3-8B")
+    assert config["run"]["target_trials"] == 600
+    assert config["run"]["exploration_trials"] == 120
+    assert config["run"]["post_search"] == "export"
+    assert config["devices"]["mode"] == "auto"
+    assert config["data"]["languages"] == ["en", "ru", "zh", "ja"]
+    assert config["data"]["direction_rows_per_cell"] == 1000
+    assert config["data"]["trial_rows_per_cell"] == 400
+    assert config["data"]["final_rows_per_cell"] == 200
+    assert config["generation"]["ordinary_max_new_tokens"] == 100
+    assert config["finalists"]["top_n"] == 6
+    assert config["finalists"]["export_roles"] == ["Balanced", "Max"]
