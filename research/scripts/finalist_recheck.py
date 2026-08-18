@@ -1144,6 +1144,46 @@ def worker_text_options() -> dict[str, object]:
     }
 
 
+def build_recheck_worker_command(
+    *,
+    heretic: Path,
+    workers: int,
+    budget: int,
+    target_trials: int,
+    top_n: int,
+    output: Path,
+    device: str,
+    worker_index: int,
+    batch_size: int,
+) -> list[str]:
+    if batch_size <= 0:
+        raise ValueError("finalist batch_size must be positive")
+    return [
+        str(heretic),
+        "--parallel-workers",
+        str(workers),
+        "--worker-trial-budget",
+        str(budget),
+        "--n-trials",
+        str(target_trials),
+        "--n-startup-trials",
+        "0",
+        "--checkpoint-action",
+        "continue",
+        "--leaderboard-size",
+        str(top_n),
+        "--batch-size",
+        str(batch_size),
+        "--trial-responses-file",
+        str(output / f"responses-gpu{device}.jsonl"),
+        "--trial-response-number-offset",
+        str(worker_index),
+        "--trial-response-number-stride",
+        str(workers),
+        "--optimization-only",
+    ]
+
+
 def run(args: argparse.Namespace) -> None:
     from heretic.pipeline_ui import PipelineUI
 
@@ -1240,35 +1280,19 @@ def run(args: argparse.Namespace) -> None:
     for worker, (device, budget) in enumerate(zip(devices[:workers], budgets, strict=True)):
         log_handle = (output / f"gpu{device}.log").open("a", encoding="utf-8")
         env = worker_environment(os.environ, str(device))
-        command = [
-            str(args.heretic),
-            "--parallel-workers",
-            str(workers),
-            "--worker-trial-budget",
-            str(budget),
-            "--n-trials",
-            # All finalists are already enqueued as WAITING trials. Heretic's
-            # bounded-worker stop callback counts those reserved rows toward
-            # the global target, so using top_n here stops each worker after
-            # its first completion. Keep the ceiling above the existing rows;
-            # the per-worker budget still bounds the exact amount of work.
-            str(int(manifest["top_n"]) + waiting),
-            "--n-startup-trials",
-            "0",
-            "--checkpoint-action",
-            "continue",
-            "--leaderboard-size",
-            str(manifest["top_n"]),
-            "--trial-responses-file",
-            str(output / f"responses-gpu{device}.jsonl"),
-            "--trial-response-number-offset",
-            str(worker),
-            "--trial-response-number-stride",
-            str(workers),
-            # Heretic treats a trailing non-option as a positional model path.
-            # Keep a boolean option last so the stride value is not rewritten.
-            "--optimization-only",
-        ]
+        command = build_recheck_worker_command(
+            heretic=args.heretic,
+            workers=workers,
+            budget=budget,
+            # All finalists are already enqueued as WAITING trials. Keep the
+            # global ceiling above those rows; the worker budget is exact.
+            target_trials=int(manifest["top_n"]) + waiting,
+            top_n=int(manifest["top_n"]),
+            output=output,
+            device=str(device),
+            worker_index=worker,
+            batch_size=int(args.batch_size),
+        )
         print(json.dumps({"event": "recheck_worker_start", "device": device, "budget": budget, "command": command}))
         process = subprocess.Popen(
             command,
@@ -1349,6 +1373,7 @@ def parse_args() -> argparse.Namespace:
     run_parser.add_argument("--output-dir", type=Path, required=True)
     run_parser.add_argument("--heretic", type=Path, required=True)
     run_parser.add_argument("--devices", nargs="+")
+    run_parser.add_argument("--batch-size", type=int, default=4)
     finalize_parser = subparsers.add_parser("finalize")
     finalize_parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args()

@@ -220,6 +220,24 @@ def test_recheck_worker_text_mode_is_utf8() -> None:
     }
 
 
+def test_recheck_worker_command_forces_residual_safe_batch(tmp_path: Path) -> None:
+    command = recheck.build_recheck_worker_command(
+        heretic=Path("F:/env/hereticMOE.exe"),
+        workers=2,
+        budget=3,
+        target_trials=12,
+        top_n=6,
+        output=tmp_path,
+        device="1",
+        worker_index=1,
+        batch_size=4,
+    )
+
+    assert command[command.index("--batch-size") + 1] == "4"
+    assert command[command.index("--worker-trial-budget") + 1] == "3"
+    assert command[-1] == "--optimization-only"
+
+
 def test_strict_keyword_gate_has_priority_over_near_gate() -> None:
     measured = [
         {"source_trial_index": 10, "ppl_drift": 0.001, "keyword_rate": 2 / 136},
