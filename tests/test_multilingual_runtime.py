@@ -11,14 +11,9 @@ from heretic.config import SelectionPolicy, Settings
 from heretic.language_map_data import GeometryRow, text_free_row_index
 from heretic.language_map_directions import (
     DirectionMapProfile,
-    load_direction_map_package,
     write_direction_map_package,
 )
-from heretic.multilingual_contract import CalibrationRow, MultilingualDatasetBundle
-from heretic.multilingual_final_holdout import (
-    FINAL_HOLDOUT_REFERENCE_DIR,
-    build_final_holdout_archive,
-)
+from heretic.multilingual_contract import MultilingualDatasetBundle
 from heretic.multilingual_runtime import (
     apply_multilingual_search_mode,
     load_multilingual_finalist_evaluator,
@@ -26,7 +21,10 @@ from heretic.multilingual_runtime import (
     multilingual_resident_rows,
 )
 from heretic.multilingual_search_evaluator import MultilingualConstraintContract
-from heretic.trial_language_schedule import materialize_trial_language_schedule
+from heretic.trial_language_schedule import (
+    load_trial_language_schedule,
+    materialize_trial_language_schedule,
+)
 
 
 class _ReferenceModel:
@@ -219,73 +217,31 @@ def test_multilingual_mode_cannot_fall_back_to_legacy_136_objectives(tmp_path: P
     assert settings.response_prefix == ""
 
 
-def test_finalist_runtime_uses_only_independent_final_pool(tmp_path: Path) -> None:
+def test_finalist_runtime_uses_one_fixed_400_row_panel(tmp_path: Path) -> None:
     bundle, runtime_root = _prepare_runtime(tmp_path)
-    final_rows = tuple(
-        CalibrationRow(
-            base_id=f"{direction}-1",
-            row_id=f"EN-{direction}-1",
-            language="en",
-            direction=direction,
-            category_id="C01",
-            prompt=f"private-final-{direction}",
-            source_path=tmp_path / "private.jsonl",
-            source_line=index + 1,
-        )
-        for index, direction in enumerate(("safe", "unsafe"))
-    )
-    bundle = MultilingualDatasetBundle(
-        direction_rows=bundle.direction_rows,
-        trial_rows=bundle.trial_rows,
-        final_rows=final_rows,
-        manifest=bundle.manifest,
-    )
-    profile, _ = load_direction_map_package(runtime_root / "clean_map" / "directions")
-    srg_profile = json.loads(
-        (runtime_root / "srg_profile" / "calibration_profile.json").read_text(encoding="utf-8")
-    )
-    build_final_holdout_archive(
-        model=_ReferenceModel(), rows=final_rows,
-        refusal_direction=profile.consensus_refusal_direction,
-        srg_scorer=_FinalScorer(), srg_profile=srg_profile,
-        output_dir=runtime_root / FINAL_HOLDOUT_REFERENCE_DIR,
-        dataset_contract_sha256="a" * 64, model_fingerprint="fake-model-v1",
-        top_six_contract_sha256="b" * 64, max_response_length=1024,
-    )
 
     evaluator, manifest = load_multilingual_finalist_evaluator(
         bundle=bundle, runtime_root=runtime_root, model=object(),
         srg_scorer=_FinalScorer(), constraints=MultilingualConstraintContract(),
-        expected_languages=("en",), final_max_new_tokens=1024,
+        expected_languages=("en",), final_max_new_tokens=100,
     )
 
     assert manifest["evaluation_phase"] == "finalist"
-    assert "trial_rows_per_finalist" not in manifest
-    assert manifest["final_rows_per_finalist"] == 2
+    assert manifest["fixed_schedule_trial_number"] == 0
+    assert manifest["trial_rows_per_finalist"] == 2
     assert evaluator.runtime.expected_per_direction == 1
+    assert evaluator.runtime.fixed_schedule_trial_number == 0
 
 
-def test_finalist_resident_cache_excludes_trial_pool(tmp_path: Path) -> None:
-    trial = tuple(_rows(tmp_path))
-    final = tuple(
-        CalibrationRow(
-            base_id=f"F{index}",
-            row_id=f"EN-F{index}",
-            language="en",
-            direction=direction,
-            category_id="C01",
-            prompt=f"private-final-{index}",
-            source_path=tmp_path / "private.jsonl",
-            source_line=index + 1,
-        )
-        for index, direction in enumerate(("safe", "unsafe"))
+def test_finalist_resident_cache_uses_only_fixed_panel(tmp_path: Path) -> None:
+    bundle, runtime_root = _prepare_runtime(tmp_path)
+    _, records = load_trial_language_schedule(runtime_root / "study" / "schedule")
+    expected = tuple(records[0]["row_ids"])
+
+    assert tuple(
+        row.row_id
+        for row in multilingual_resident_rows(bundle, "finalist", runtime_root)
+    ) == expected
+    assert multilingual_resident_rows(bundle, "search", runtime_root) == tuple(
+        bundle.trial_rows
     )
-    bundle = MultilingualDatasetBundle(
-        direction_rows=(),
-        trial_rows=trial,
-        final_rows=final,
-        manifest={"status": "PASS", "contract_sha256": "a" * 64},
-    )
-
-    assert multilingual_resident_rows(bundle, "finalist") == final
-    assert multilingual_resident_rows(bundle, "search") == trial

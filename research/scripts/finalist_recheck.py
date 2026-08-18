@@ -656,6 +656,8 @@ def prepare_multilingual(
         "version": 1,
         "status": "prepared",
         "contract": "multilingual_v3_full_recheck",
+        "evaluation_contract": "fixed_panel_400_v1",
+        "rows_per_finalist": 400,
         "source_journal": str(args.source_journal.resolve()),
         "source_journal_sha256": source_sha,
         "base_config": str(args.base_config.resolve()),
@@ -1177,6 +1179,13 @@ def build_recheck_worker_command(
     ]
 
 
+def needs_final_holdout_reference(manifest: dict[str, Any]) -> bool:
+    return (
+        manifest.get("contract") == "multilingual_v3_full_recheck"
+        and manifest.get("evaluation_contract") != "fixed_panel_400_v1"
+    )
+
+
 def run(args: argparse.Namespace) -> None:
     from heretic.pipeline_ui import PipelineUI
 
@@ -1191,7 +1200,7 @@ def run(args: argparse.Namespace) -> None:
     if waiting == 0:
         finalize(output)
         return
-    if manifest.get("contract") == "multilingual_v3_full_recheck":
+    if needs_final_holdout_reference(manifest):
         runtime_root = Path(manifest["runtime_root"])
         final_reference = runtime_root / FINAL_HOLDOUT_REFERENCE_DIR / "manifest.json"
         if not final_reference.is_file():
@@ -1232,7 +1241,10 @@ def run(args: argparse.Namespace) -> None:
     progress.stage(
         "TOP-6 finalist recheck",
         total=waiting,
-        description=f"Full trial pool + independent holdout on {workers} GPU(s)",
+        description=(
+            f"Fixed {int(manifest.get('rows_per_finalist', 400))}-row panel "
+            f"on {workers} GPU(s)"
+        ),
     )
     budget_by_worker = dict(zip(worker_ids, budgets, strict=True))
     for worker_id in worker_ids:

@@ -392,6 +392,8 @@ def test_multilingual_prepare_freezes_top_six_and_finalist_phase() -> None:
         config_data = recheck.tomllib.loads((output / "config.toml").read_text(encoding="utf-8"))
         prepared = recheck.load_study(Path(manifest["journal"]))
         assert manifest["contract"] == "multilingual_v3_full_recheck"
+        assert manifest["evaluation_contract"] == "fixed_panel_400_v1"
+        assert manifest["rows_per_finalist"] == 400
         assert manifest["top_n"] == 6
         assert (output / "top6_manifest.json").is_file()
         top_six = json.loads(
@@ -560,6 +562,15 @@ def test_final_holdout_prepare_command_is_bound_to_frozen_top_six() -> None:
         "--devices",
         "1,3",
     ]
+
+
+def test_fixed_panel_recheck_does_not_require_final_holdout_reference() -> None:
+    assert recheck.needs_final_holdout_reference(
+        {
+            "contract": "multilingual_v3_full_recheck",
+            "evaluation_contract": "fixed_panel_400_v1",
+        }
+    ) is False
 
 
 def test_existing_final_holdout_must_match_current_top_six(tmp_path: Path) -> None:

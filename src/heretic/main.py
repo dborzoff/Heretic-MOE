@@ -1018,10 +1018,11 @@ def run():
             for row in multilingual_resident_rows(
                 multilingual_worker_runtime.bundle,
                 evaluation_phase,
+                settings.multilingual_search.runtime_root,
             )
         ]
         if evaluation_phase == "finalist":
-            resident_rows = len(multilingual_worker_runtime.bundle.final_rows)
+            resident_rows = len(resident_prompts)
         else:
             resident_rows = 2 * settings.multilingual_search.trial_rows_per_cell
         if settings.batch_size == 0:
@@ -1228,9 +1229,12 @@ def run():
         prewarm = model.prewarm_generation_backend(
             resident_prompts,
             expected_rows=(
-                resident_rows,
-                len(multilingual_worker_runtime.bundle.trial_rows),
-                len(multilingual_worker_runtime.bundle.final_rows),
+                (resident_rows,)
+                if evaluation_phase == "finalist"
+                else (
+                    resident_rows,
+                    len(multilingual_worker_runtime.bundle.trial_rows),
+                )
             ),
         )
         if prewarm["status"] == "PASS":

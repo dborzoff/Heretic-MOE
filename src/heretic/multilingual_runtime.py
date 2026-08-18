@@ -19,10 +19,6 @@ from .multilingual_contract import (
     MultilingualDatasetBundle,
     load_multilingual_dataset_bundle,
 )
-from .multilingual_final_holdout import (
-    FINAL_HOLDOUT_REFERENCE_DIR,
-    load_final_holdout_archive,
-)
 from .multilingual_finalist_evaluator import MultilingualFinalistEvaluator
 from .multilingual_search_evaluator import (
     MultilingualConstraintContract,
@@ -69,9 +65,23 @@ def apply_multilingual_search_mode(settings: Settings) -> None:
 def multilingual_resident_rows(
     bundle: MultilingualDatasetBundle,
     evaluation_phase: str,
+    runtime_root: str | Path,
 ) -> tuple[Any, ...]:
     if evaluation_phase == "finalist":
-        return tuple(bundle.final_rows)
+        _, schedule_records = load_trial_language_schedule(
+            Path(runtime_root).resolve() / "study" / "schedule"
+        )
+        fixed = next(
+            (record for record in schedule_records if int(record["trial_number"]) == 0),
+            None,
+        )
+        if not isinstance(fixed, dict):
+            raise ValueError("frozen finalist schedule panel is missing")
+        by_id = {row.row_id: row for row in bundle.trial_rows}
+        try:
+            return tuple(by_id[str(row_id)] for row_id in fixed["row_ids"])
+        except KeyError as error:
+            raise ValueError("frozen finalist panel is outside the trial corpus") from error
     if evaluation_phase == "search":
         return tuple(bundle.trial_rows)
     raise ValueError(f"unsupported multilingual evaluation phase: {evaluation_phase}")
@@ -178,7 +188,7 @@ def load_multilingual_worker_runtime(
     prompt_cache_stats: dict[str, Any] | None = None
     if hasattr(model, "prepare_prompt_cache"):
         cache_rows: Sequence[Any] = multilingual_resident_rows(
-            bundle, contract.evaluation_phase
+            bundle, contract.evaluation_phase, contract.runtime_root
         )
         prepared = model.prepare_prompt_cache(
             [Prompt(system="", user=row.prompt) for row in cache_rows]
@@ -395,55 +405,58 @@ def load_multilingual_finalist_evaluator(
     final_max_new_tokens: int = 1024,
     expected_generation_contract: Mapping[str, object] | None = None,
 ) -> tuple[MultilingualSearchEvaluator, dict[str, Any]]:
-    """Wire only the independent post-freeze final pool."""
+    """Wire one identical frozen 400-row panel for every finalist."""
 
     root = Path(runtime_root).resolve()
-    profile, direction_manifest = load_direction_map_package(
-        root / "clean_map" / "directions"
+    schedule_manifest, schedule_records = load_trial_language_schedule(
+        root / "study" / "schedule"
     )
-    final_manifest, final_records = load_final_holdout_archive(
-        root / FINAL_HOLDOUT_REFERENCE_DIR
+    fixed_schedule_trial_number = 0
+    fixed_record = next(
+        (
+            record
+            for record in schedule_records
+            if int(record["trial_number"]) == fixed_schedule_trial_number
+        ),
+        None,
     )
-    srg_profile_path = root / "srg_profile" / "calibration_profile.json"
-    srg_profile = _load_profile(srg_profile_path)
-    if final_manifest.get("dataset_contract_sha256") != bundle.manifest.get(
-        "contract_sha256"
-    ):
-        raise ValueError("finalist reference dataset contract mismatch")
-    if expected_generation_contract is not None and dict(
-        final_manifest.get("generation_contract", {})
-    ) != dict(expected_generation_contract):
-        raise ValueError("final-holdout generation backend contract mismatch")
-    expected_final_ids = [row.row_id for row in bundle.final_rows]
-    if [record.get("row_id") for record in final_records] != expected_final_ids:
-        raise ValueError("final-holdout reference order differs from R pool")
-    languages = tuple(language.lower() for language in expected_languages)
-    if not languages or len(bundle.final_rows) % (2 * len(languages)):
-        raise ValueError("final pool cannot balance languages and directions")
-    expected_per_direction = len(bundle.final_rows) // 2
-    runtime = MultilingualFinalistEvaluator(
+    if not isinstance(fixed_record, dict):
+        raise TypeError("frozen finalist schedule panel is missing")
+    fixed_row_ids = tuple(str(value) for value in fixed_record["row_ids"])
+    if not fixed_row_ids or len(fixed_row_ids) % 2:
+        raise ValueError("frozen finalist schedule panel must balance directions")
+    expected_per_direction = len(fixed_row_ids) // 2
+    base_evaluator, base_manifest = load_multilingual_search_evaluator(
+        bundle=bundle,
+        runtime_root=root,
         model=model,
-        final_rows=bundle.final_rows,
-        clean_final_records=final_records,
-        refusal_direction=profile.consensus_refusal_direction,
-        layer_reliability=profile.layer_reliability,
         srg_scorer=srg_scorer,
-        srg_profile=srg_profile,
-        private_output_dir=root / "recheck" / "private_responses",
+        constraints=constraints,
         expected_per_direction=expected_per_direction,
-        expected_languages=languages,
-        final_max_new_tokens=final_max_new_tokens,
+        expected_languages=expected_languages,
+        expected_generation_contract=expected_generation_contract,
+    )
+    frozen_runtime = base_evaluator.runtime
+    frozen_runtime.private_output_dir = root / "recheck" / "private_responses"
+    runtime = MultilingualFinalistEvaluator(
+        runtime=frozen_runtime,
+        fixed_schedule_trial_number=fixed_schedule_trial_number,
     )
     evaluator = MultilingualSearchEvaluator(runtime, constraints=constraints)
     manifest: dict[str, Any] = {
         "schema_version": 1,
         "status": "PASS",
         "evaluation_phase": "finalist",
-        "dataset_contract_sha256": bundle.manifest["contract_sha256"],
-        "direction_package_sha256": direction_manifest["package_sha256"],
-        "final_holdout_contract_sha256": final_manifest["archive_contract_sha256"],
-        "srg_profile_sha256": hashlib.sha256(srg_profile_path.read_bytes()).hexdigest(),
-        "final_rows_per_finalist": len(bundle.final_rows),
+        "dataset_contract_sha256": base_manifest["dataset_contract_sha256"],
+        "direction_package_sha256": base_manifest["direction_package_sha256"],
+        "schedule_contract_sha256": schedule_manifest["schedule_contract_sha256"],
+        "clean_reference_contract_sha256": base_manifest[
+            "clean_reference_contract_sha256"
+        ],
+        "srg_profile_sha256": base_manifest["srg_profile_sha256"],
+        "fixed_schedule_trial_number": fixed_schedule_trial_number,
+        "fixed_panel_row_ids_sha256": _canonical_sha256(fixed_row_ids),
+        "trial_rows_per_finalist": len(fixed_row_ids),
         "final_max_new_tokens": int(final_max_new_tokens),
         "objectives": ["Removal", "Preservation loss"],
         "constraints": evaluator.get_constraint_names(),
