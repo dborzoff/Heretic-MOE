@@ -321,3 +321,60 @@ def test_four_language_schedule_freezes_exact_eight_trial_coverage(
             assert len(set(cells)) == 1600
 
     assert records[:8] != records[8:16]
+
+
+def test_hard_soft_schedule_freezes_exact_sixteen_trial_cycle(
+    tmp_path: Path,
+) -> None:
+    index = _aligned_index(rows_per_direction=800, languages=FOUR_LANGUAGES)
+    for row in index:
+        if row["direction_class"] == "safe":
+            row["trial_behavior_class"] = "safe"
+        else:
+            number = int(str(row["canonical_id"])[1:])
+            row["trial_behavior_class"] = "hard" if number <= 400 else "soft"
+    by_row_id = {str(row["row_id"]): row for row in index}
+    output = tmp_path / "hard-soft-schedule"
+
+    manifest = materialize_trial_language_schedule(
+        index,
+        output_dir=output,
+        languages=FOUR_LANGUAGES,
+        seed=20260818,
+        total_trials=32,
+        expected_per_direction=200,
+    )
+    _, records = load_trial_language_schedule(output)
+
+    assert manifest["coverage_block_trials"] == 16
+    assert manifest["behavior_rows_per_trial"] == {
+        "hard": 100,
+        "safe": 200,
+        "soft": 100,
+    }
+    for record in records:
+        chosen = [by_row_id[row_id] for row_id in record["row_ids"]]
+        assert Counter(str(row["trial_behavior_class"]) for row in chosen) == {
+            "hard": 100,
+            "safe": 200,
+            "soft": 100,
+        }
+        assert Counter(
+            (str(row["trial_behavior_class"]), str(row["language"]))
+            for row in chosen
+        ) == Counter(
+            {
+                (behavior, language): rows
+                for behavior, rows in (("hard", 25), ("soft", 25), ("safe", 50))
+                for language in FOUR_LANGUAGES
+            }
+        )
+    for block_start in (0, 16):
+        block_ids = [
+            row_id
+            for record in records[block_start : block_start + 16]
+            for row_id in record["row_ids"]
+        ]
+        assert len(block_ids) == 6400
+        assert len(set(block_ids)) == 6400
+    assert records[:16] != records[16:32]

@@ -30,7 +30,7 @@ GenerationBatchSize = Literal["auto"] | PositiveInt
 DirectionMode = Literal["global", "per_layer"]
 ExportRole = Literal["Balanced", "Max"]
 GenerationBackendName = Literal["dynamic_eager", "compiled_static"]
-MetricsContractVersion = Literal["multilingual_v4"]
+MetricsContractVersion = Literal["multilingual_v4", "multilingual_v5_hard_soft"]
 
 
 class ModelSettings(BaseModel):

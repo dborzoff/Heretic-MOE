@@ -69,6 +69,39 @@ def test_loads_balanced_aligned_rows_without_leaking_prompt(tmp_path: Path):
     assert index[0]["canonical_id"] == "S0001"
 
 
+def test_loads_text_free_trial_behavior_class(tmp_path: Path) -> None:
+    files = balanced_files(tmp_path)
+    for name in ("en_unsafe.jsonl", "ru_unsafe.jsonl"):
+        path = tmp_path / name
+        values = [json.loads(line) for line in path.read_text().splitlines()]
+        values[0]["trial_behavior_class"] = "hard"
+        values[1]["trial_behavior_class"] = "soft"
+        path.write_text(
+            "".join(json.dumps(value) + "\n" for value in values),
+            encoding="utf-8",
+        )
+
+    rows = load_aligned_corpus(
+        files,
+        expected_languages=("en", "ru"),
+        expected_per_cell=2,
+    )
+    unsafe = [row for row in rows if row.direction == "unsafe"]
+
+    assert [row.trial_behavior_class for row in unsafe] == [
+        "hard",
+        "soft",
+        "hard",
+        "soft",
+    ]
+    assert [row["trial_behavior_class"] for row in text_free_row_index(unsafe)] == [
+        "hard",
+        "soft",
+        "hard",
+        "soft",
+    ]
+
+
 def test_loads_asymmetric_direction_counts_and_multiple_categories(
     tmp_path: Path,
 ) -> None:

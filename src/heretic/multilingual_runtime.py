@@ -275,7 +275,11 @@ def _canonical_sha256(value: object) -> str:
     ).hexdigest()
 
 
-def _trial_index_sha256(rows: Sequence[GeometryRow]) -> str:
+def _trial_index_sha256(
+    rows: Sequence[GeometryRow],
+    *,
+    include_behavior: bool = False,
+) -> str:
     return _canonical_sha256(
         [
             {
@@ -284,6 +288,11 @@ def _trial_index_sha256(rows: Sequence[GeometryRow]) -> str:
                 "language": row.language.lower(),
                 "direction_class": row.direction.lower(),
                 "category_id": row.category_id,
+                **(
+                    {"trial_behavior_class": row.trial_behavior_class}
+                    if include_behavior
+                    else {}
+                ),
             }
             for row in rows
         ]
@@ -342,7 +351,10 @@ def load_multilingual_search_evaluator(
         "package_sha256"
     ):
         raise ValueError("clean reference direction contract mismatch")
-    if schedule_manifest.get("index_sha256") != _trial_index_sha256(bundle.trial_rows):
+    if schedule_manifest.get("index_sha256") != _trial_index_sha256(
+        bundle.trial_rows,
+        include_behavior=int(schedule_manifest.get("schema_version", 1)) >= 3,
+    ):
         raise ValueError("trial schedule dataset index mismatch")
     expected_row_ids = [row.row_id for row in bundle.trial_rows]
     if [record.get("row_id") for record in clean_records] != expected_row_ids:

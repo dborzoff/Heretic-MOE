@@ -219,19 +219,48 @@ def _normalized_prompt_hash(prompt: str) -> str:
 
 def _assert_pool_prompt_disjoint(
     pools: dict[str, list[GeometryRow] | list[CalibrationRow]],
-) -> None:
+) -> int:
+    return _assert_pool_prompt_overlap_contract(pools, allowed_map_trial_ids=set())
+
+
+def _assert_pool_prompt_overlap_contract(
+    pools: dict[str, list[GeometryRow] | list[CalibrationRow]],
+    *,
+    allowed_map_trial_ids: set[str],
+) -> int:
     hashed = {
-        name: {_normalized_prompt_hash(row.prompt) for row in rows}
+        name: {
+            _normalized_prompt_hash(row.prompt): str(
+                getattr(row, "canonical_id", getattr(row, "base_id", ""))
+            )
+            for row in rows
+        }
         for name, rows in pools.items()
     }
     names = tuple(hashed)
+    observed_allowed: set[str] = set()
+    intentional_rows = 0
     for left_index, left in enumerate(names):
         for right in names[left_index + 1 :]:
-            overlap = hashed[left] & hashed[right]
+            overlap = set(hashed[left]) & set(hashed[right])
             if overlap:
+                if {left, right} == {"map", "trial"}:
+                    for prompt_hash in overlap:
+                        left_id = hashed[left][prompt_hash]
+                        right_id = hashed[right][prompt_hash]
+                        if left_id != right_id or left_id not in allowed_map_trial_ids:
+                            raise ValueError(
+                                "unmanifested prompt overlap between map and trial"
+                            )
+                        observed_allowed.add(left_id)
+                        intentional_rows += 1
+                    continue
                 raise ValueError(
                     f"prompt overlap between {left} and {right}: {len(overlap)}"
                 )
+    if observed_allowed != allowed_map_trial_ids:
+        raise ValueError("intentional map/trial overlap manifest coverage mismatch")
+    return intentional_rows
 
 
 def _file_record(
@@ -276,6 +305,16 @@ def load_multilingual_dataset_bundle(
         if split_root is not None
         else root
     )
+    dataset_manifest = root / "manifest.json"
+    source_dataset_manifest = json.loads(dataset_manifest.read_text(encoding="utf-8"))
+    raw_allowed_overlap = source_dataset_manifest.get(
+        "intentional_map_trial_overlap_canonical_ids", []
+    )
+    if not isinstance(raw_allowed_overlap, list) or any(
+        not isinstance(value, str) or not value for value in raw_allowed_overlap
+    ):
+        raise TypeError("intentional map/trial overlap IDs must be a string list")
+    allowed_map_trial_ids = set(raw_allowed_overlap)
     normalized_languages = tuple(language.lower() for language in languages)
     if not normalized_languages or len(set(normalized_languages)) != len(
         normalized_languages
@@ -329,12 +368,13 @@ def load_multilingual_dataset_bundle(
         languages=normalized_languages,
         expected_rows=final_rows_per_cell,
     )
-    _assert_pool_prompt_disjoint(
+    intentional_overlap_rows = _assert_pool_prompt_overlap_contract(
         {
             "map": direction_rows,
             "trial": trial_rows,
             "final": final_rows,
-        }
+        },
+        allowed_map_trial_ids=allowed_map_trial_ids,
     )
 
     file_records: dict[str, dict[str, object]] = {}
@@ -377,7 +417,6 @@ def load_multilingual_dataset_bundle(
                 ids=ids,
             )
 
-    dataset_manifest = root / "manifest.json"
     split_manifest = split / "manifest.json"
     source_manifests = {
         "dataset_manifest_sha256": _sha256(dataset_manifest),
@@ -399,7 +438,8 @@ def load_multilingual_dataset_bundle(
         },
         "source_manifests": source_manifests,
         "files": dict(sorted(file_records.items())),
-        "cross_pool_exact_overlap": 0,
+        "intentional_map_trial_overlap_rows": intentional_overlap_rows,
+        "unexpected_cross_pool_overlap": 0,
     }
     manifest["contract_sha256"] = _canonical_sha256(manifest)
     return MultilingualDatasetBundle(

@@ -75,6 +75,195 @@ def _phase_for_trial(
     return current[position]
 
 
+def _balanced_canonical_panels(
+    keys: list[tuple[str, str]],
+    groups: dict[tuple[str, str], list[int]],
+    index: list[dict[str, object]],
+    *,
+    panel_count: int,
+    seed: int,
+    block: int,
+    behavior: str,
+) -> list[list[tuple[str, str]]]:
+    if not keys or len(keys) % panel_count:
+        raise ValueError("behavior rows cannot form exact canonical panels")
+    target = len(keys) // panel_count
+    panels: list[list[tuple[str, str]]] = [[] for _ in range(panel_count)]
+    category_counts: list[Counter[str]] = [Counter() for _ in range(panel_count)]
+    by_category: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for key in keys:
+        category = str(index[groups[key][0]]["category_id"])
+        by_category[category].append(key)
+    for category in sorted(by_category):
+        ordered = sorted(
+            by_category[category],
+            key=lambda key: _stable_key(
+                seed, "behavior-panel", block, behavior, category, key[1]
+            ),
+        )
+        for key in ordered:
+            candidates = [
+                panel for panel in range(panel_count) if len(panels[panel]) < target
+            ]
+            chosen = min(
+                candidates,
+                key=lambda panel: (
+                    category_counts[panel][category],
+                    len(panels[panel]),
+                    _stable_key(
+                        seed,
+                        "behavior-panel-tie",
+                        block,
+                        behavior,
+                        category,
+                        key[1],
+                        panel,
+                    ),
+                ),
+            )
+            panels[chosen].append(key)
+            category_counts[chosen][category] += 1
+    if any(len(panel) != target for panel in panels):
+        raise ValueError("behavior canonical panels are not size-balanced")
+    return panels
+
+
+def _balanced_language_slots(
+    keys: list[tuple[str, str]],
+    groups: dict[tuple[str, str], list[int]],
+    index: list[dict[str, object]],
+    *,
+    language_count: int,
+    seed: int,
+    block: int,
+    behavior: str,
+    panel: int,
+) -> dict[tuple[str, str], int]:
+    if len(keys) % language_count:
+        raise ValueError("behavior panel cannot balance languages")
+    target = len(keys) // language_count
+    slots: list[list[tuple[str, str]]] = [[] for _ in range(language_count)]
+    category_counts: list[Counter[str]] = [Counter() for _ in range(language_count)]
+    ordered = sorted(
+        keys,
+        key=lambda key: _stable_key(
+            seed, "behavior-slot-order", block, behavior, panel, key[1]
+        ),
+    )
+    for key in ordered:
+        category = str(index[groups[key][0]]["category_id"])
+        candidates = [slot for slot in range(language_count) if len(slots[slot]) < target]
+        chosen = min(
+            candidates,
+            key=lambda slot: (
+                category_counts[slot][category],
+                len(slots[slot]),
+                _stable_key(
+                    seed,
+                    "behavior-slot-tie",
+                    block,
+                    behavior,
+                    panel,
+                    category,
+                    key[1],
+                    slot,
+                ),
+            ),
+        )
+        slots[chosen].append(key)
+        category_counts[chosen][category] += 1
+    return {
+        key: slot for slot, slot_keys in enumerate(slots) for key in slot_keys
+    }
+
+
+def _hard_soft_trial_indices(
+    index: list[dict[str, object]],
+    groups: dict[tuple[str, str], list[int]],
+    *,
+    languages: tuple[str, ...],
+    trial_number: int,
+    seed: int,
+    expected_per_direction: int,
+) -> list[int]:
+    if expected_per_direction % 2:
+        raise ValueError("hard/soft schedule requires an even UNSAFE quota")
+    strata: dict[str, list[tuple[str, str]]] = {"safe": [], "hard": [], "soft": []}
+    for key, positions in groups.items():
+        row = index[positions[0]]
+        direction = str(row["direction_class"]).lower()
+        behavior = (
+            "safe"
+            if direction == "safe"
+            else str(row.get("trial_behavior_class", "")).lower()
+        )
+        if behavior not in strata or (direction == "unsafe" and behavior == "safe"):
+            raise ValueError("hard/soft schedule has an invalid behavior class")
+        strata[behavior].append(key)
+    quota = {
+        "safe": expected_per_direction,
+        "hard": expected_per_direction // 2,
+        "soft": expected_per_direction // 2,
+    }
+    coverage = {
+        behavior: len(keys) * len(languages) // quota[behavior]
+        for behavior, keys in strata.items()
+    }
+    if len(set(coverage.values())) != 1:
+        raise ValueError("hard/soft strata do not share one coverage cycle")
+    coverage_trials = next(iter(coverage.values()))
+    if coverage_trials % len(languages):
+        raise ValueError("hard/soft coverage cannot form language phases")
+    panel_count = coverage_trials // len(languages)
+    block = trial_number // coverage_trials
+    block_position = trial_number % coverage_trials
+    phase_position = block_position // panel_count
+    panel_index = block_position % panel_count
+    phase_order = sorted(
+        range(len(languages)),
+        key=lambda phase: _stable_key(seed, "behavior-phase", block, phase),
+    )
+    phase = phase_order[phase_position]
+    selected: list[int] = []
+    for behavior in ("safe", "hard", "soft"):
+        panels = _balanced_canonical_panels(
+            strata[behavior],
+            groups,
+            index,
+            panel_count=panel_count,
+            seed=seed,
+            block=block,
+            behavior=behavior,
+        )
+        panel = panels[panel_index]
+        slots = _balanced_language_slots(
+            panel,
+            groups,
+            index,
+            language_count=len(languages),
+            seed=seed,
+            block=block,
+            behavior=behavior,
+            panel=panel_index,
+        )
+        for key in panel:
+            language = languages[(slots[key] + phase) % len(languages)]
+            by_language = {
+                str(index[position]["language"]).lower(): position
+                for position in groups[key]
+            }
+            selected.append(by_language[language])
+    return sorted(
+        selected,
+        key=lambda position: _stable_key(
+            seed,
+            "hard-soft-row-order",
+            trial_number,
+            index[position]["row_id"],
+        ),
+    )
+
+
 def _balanced_language_panels(
     assigned: dict[str, list[tuple[str, str]]],
     groups: dict[tuple[str, str], list[int]],
@@ -259,7 +448,33 @@ def trial_language_indices(
             str(index[position]["category_id"]) for position in positions
         }
         if len(categories) != 1:
-            raise ValueError("canonical group category mismatch between translations")
+                raise ValueError("canonical group category mismatch between translations")
+        behaviors = {
+            str(index[position].get("trial_behavior_class", "")).lower()
+            for position in positions
+        }
+        if len(behaviors) != 1:
+            raise ValueError("canonical group behavior mismatch between translations")
+
+    behavior_values = {
+        str(row.get("trial_behavior_class", "")).lower()
+        for row in index
+        if str(row.get("direction_class", "")).lower() == "unsafe"
+    }
+    behavior_values.discard("")
+    if behavior_values:
+        if behavior_values != {"hard", "soft"}:
+            raise ValueError("UNSAFE trial behaviors must be exactly hard and soft")
+        if expected_per_direction is None:
+            raise ValueError("hard/soft schedule requires an explicit trial quota")
+        return _hard_soft_trial_indices(
+            index,
+            groups,
+            languages=normalized_languages,
+            trial_number=trial_number,
+            seed=seed,
+            expected_per_direction=int(expected_per_direction),
+        )
 
     directions = sorted({key[0] for key in groups})
     source_counts = {
@@ -395,8 +610,26 @@ def materialize_trial_language_schedule(
     ) * len(normalized_languages)
     if total_trials % coverage_block_trials != 0:
         raise ValueError("total trials must contain complete coverage blocks")
+    unsafe_behaviors = {
+        str(row.get("trial_behavior_class", "")).lower()
+        for row in index
+        if str(row.get("direction_class", "")).lower() == "unsafe"
+    }
+    unsafe_behaviors.discard("")
+    hard_soft = unsafe_behaviors == {"hard", "soft"}
+    if unsafe_behaviors and not hard_soft:
+        raise ValueError("UNSAFE trial behaviors must be exactly hard and soft")
+    behavior_rows_per_trial = (
+        {
+            "safe": expected_per_direction,
+            "hard": expected_per_direction // 2,
+            "soft": expected_per_direction // 2,
+        }
+        if hard_soft
+        else None
+    )
     contract = {
-        "schema_version": 2,
+        "schema_version": 3 if hard_soft else 2,
         "languages": list(normalized_languages),
         "seed": int(seed),
         "trials": int(total_trials),
@@ -411,11 +644,22 @@ def materialize_trial_language_schedule(
                     "language": str(row.get("language", "")).lower(),
                     "direction_class": str(row.get("direction_class", "")).lower(),
                     "category_id": str(row.get("category_id", "")),
+                    **(
+                        {
+                            "trial_behavior_class": str(
+                                row.get("trial_behavior_class", "")
+                            ).lower()
+                        }
+                        if hard_soft
+                        else {}
+                    ),
                 }
                 for row in index
             ]
         ),
     }
+    if behavior_rows_per_trial is not None:
+        contract["behavior_rows_per_trial"] = behavior_rows_per_trial
     contract_sha = _canonical_sha256(contract)
     output = Path(output_dir).resolve()
     manifest_path = output / "manifest.json"
@@ -507,6 +751,8 @@ def load_trial_language_schedule(
         contract_keys.extend(
             ("source_rows_per_direction", "coverage_block_trials")
         )
+    if int(manifest.get("schema_version", 1)) >= 3:
+        contract_keys.append("behavior_rows_per_trial")
     contract = {key: manifest[key] for key in contract_keys}
     if manifest.get("schedule_contract_sha256") != _canonical_sha256(contract):
         raise ValueError("trial language schedule contract hash mismatch")

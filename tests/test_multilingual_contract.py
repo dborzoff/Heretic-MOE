@@ -124,6 +124,35 @@ def test_rejects_cross_pool_prompt_overlap(tmp_path: Path):
         )
 
 
+def test_allows_manifested_map_trial_overlap_only(tmp_path: Path) -> None:
+    root, split = _build_fixture(tmp_path)
+    for language in ("en", "ru"):
+        path = split / f"trial_{language}_safe_1.jsonl"
+        row = json.loads(path.read_text(encoding="utf-8"))
+        row["canonical_id"] = "S0001"
+        row["row_id"] = f"{language.upper()}-S0001"
+        row["prompt"] = f"direction-safe-{language}-S0001"
+        _write_jsonl(path, [row])
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {"intentional_map_trial_overlap_canonical_ids": ["S0001"]}
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_multilingual_dataset_bundle(
+        dataset_root=root,
+        split_root=split,
+        languages=("en", "ru"),
+        direction_rows_per_cell=2,
+        trial_rows_per_cell=1,
+        final_rows_per_cell=2,
+    )
+
+    assert bundle.manifest["intentional_map_trial_overlap_rows"] == 2
+    assert bundle.manifest["unexpected_cross_pool_overlap"] == 0
+
+
 def test_rejects_cross_language_final_id_order_drift(tmp_path: Path):
     root, split = _build_fixture(tmp_path)
     path = root / "final_ru_unsafe_2.jsonl"

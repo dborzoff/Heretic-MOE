@@ -108,6 +108,18 @@ def test_repository_example_contains_the_complete_public_schema() -> None:
     assert config.geometry.render_html is True
 
 
+def test_accepts_hard_soft_metrics_contract(tmp_path: Path) -> None:
+    source = tmp_path / "config.yaml"
+    _write_config(source)
+    payload = yaml.safe_load(source.read_text(encoding="utf-8"))
+    payload["metrics"]["contract_version"] = "multilingual_v5_hard_soft"
+    source.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    config = load_effective_launch_config(source, LaunchOverrides())
+
+    assert config.metrics.contract_version == "multilingual_v5_hard_soft"
+
+
 def test_loads_public_yaml_and_applies_cli_overrides_last(tmp_path: Path) -> None:
     source = tmp_path / "config.yaml"
     _write_config(source)

@@ -32,6 +32,7 @@ class GeometryRow:
     source_path: Path
     source_line: int
     category_ids: tuple[str, ...] = ()
+    trial_behavior_class: str = ""
 
     def __post_init__(self) -> None:
         if not self.category_ids:
@@ -41,7 +42,7 @@ class GeometryRow:
 def _required_string(row: dict[str, object], key: str, path: Path, line: int) -> str:
     value = row.get(key)
     if not isinstance(value, str):
-        raise ValueError(f"{path.name}:{line} has invalid {key}")
+        raise TypeError(f"{path.name}:{line} has invalid {key}")
     if not value.strip():
         description = "blank prompt" if key == "prompt" else f"blank {key}"
         raise ValueError(f"{path.name}:{line} has {description}")
@@ -61,7 +62,7 @@ def _read_file(specification: LanguageFile) -> list[GeometryRow]:
                 continue
             value = json.loads(line)
             if not isinstance(value, dict):
-                raise ValueError(f"{path.name}:{line_number} must be a JSON object")
+                raise TypeError(f"{path.name}:{line_number} must be a JSON object")
             language = _required_string(value, "language", path, line_number).lower()
             direction = (
                 specification.direction
@@ -104,6 +105,11 @@ def _read_file(specification: LanguageFile) -> list[GeometryRow]:
                 raise ValueError(
                     f"{path.name}:{line_number} category_id missing from category_ids"
                 )
+            raw_behavior = value.get("trial_behavior_class", "")
+            if not isinstance(raw_behavior, str):
+                raise TypeError(
+                    f"{path.name}:{line_number} has invalid trial_behavior_class"
+                )
             rows.append(
                 GeometryRow(
                     canonical_id=canonical_id,
@@ -115,6 +121,7 @@ def _read_file(specification: LanguageFile) -> list[GeometryRow]:
                     prompt=_required_string(value, "prompt", path, line_number),
                     source_path=path,
                     source_line=line_number,
+                    trial_behavior_class=raw_behavior.strip().lower(),
                 )
             )
     return rows
@@ -180,7 +187,12 @@ def load_aligned_corpus(
         reference = by_cell[(direction, languages[0])]
         reference_ids = [row.canonical_id for row in reference]
         reference_categories = {
-            row.canonical_id: (row.category_id, row.category_ids) for row in reference
+            row.canonical_id: (
+                row.category_id,
+                row.category_ids,
+                row.trial_behavior_class,
+            )
+            for row in reference
         }
         for language in languages:
             rows = by_cell[(direction, language)]
@@ -193,6 +205,7 @@ def load_aligned_corpus(
                 if reference_categories[row.canonical_id] != (
                     row.category_id,
                     row.category_ids,
+                    row.trial_behavior_class,
                 ):
                     raise ValueError(
                         f"{direction}/{row.canonical_id} category drift"
@@ -216,6 +229,7 @@ def text_free_row_index(rows: list[GeometryRow]) -> list[dict[str, object]]:
             "direction_class": row.direction,
             "category_id": row.category_id,
             "category_ids": list(row.category_ids),
+            "trial_behavior_class": row.trial_behavior_class,
             "source_file": row.source_path.name,
             "source_line": row.source_line,
         }
