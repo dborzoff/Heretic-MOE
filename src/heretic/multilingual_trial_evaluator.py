@@ -135,13 +135,20 @@ class FrozenMultilingualTrialEvaluator:
         self,
         trial_number: int,
         *,
+        artifact_trial_number: int | None = None,
         residual_capture: Callable[[list[Prompt], Tensor], None] | None = None,
     ) -> TrialMeasurement:
         if trial_number not in self._schedule:
             raise KeyError(f"trial {trial_number} is not present in frozen schedule")
+        artifact_number = (
+            trial_number if artifact_trial_number is None else artifact_trial_number
+        )
+        if artifact_number < 0:
+            raise ValueError("artifact trial number must be non-negative")
         rows = [self._rows[row_id] for row_id in self._schedule[trial_number]]
         return evaluate_multilingual_trial(
-            trial_number=trial_number,
+            trial_number=artifact_number,
+            schedule_trial_number=trial_number,
             model=self.model,
             rows=rows,
             clean_records=self.clean_records,
@@ -151,7 +158,7 @@ class FrozenMultilingualTrialEvaluator:
             srg_profile=self.srg_profile,
             clean_srg_margins=self._ensure_clean_srg_margins(),
             private_records_path=(
-                self.private_output_dir / f"trial-{trial_number:06d}.jsonl"
+                self.private_output_dir / f"trial-{artifact_number:06d}.jsonl"
             ),
             expected_per_direction=self.expected_per_direction,
             expected_languages=self.expected_languages,
@@ -210,6 +217,7 @@ def _margins(score: object, expected: int) -> list[float]:
 def evaluate_multilingual_trial(
     *,
     trial_number: int,
+    schedule_trial_number: int | None = None,
     model: Any,
     rows: Sequence[GeometryRow],
     clean_records: Sequence[Mapping[str, object]],
@@ -258,6 +266,11 @@ def evaluate_multilingual_trial(
             raise ValueError("trial must be balanced by language in both directions")
     if trial_number < 0:
         raise ValueError("trial number must be nonnegative")
+    effective_schedule_number = (
+        trial_number if schedule_trial_number is None else schedule_trial_number
+    )
+    if effective_schedule_number < 0:
+        raise ValueError("schedule trial number must be nonnegative")
     if max_response_length <= 0:
         raise ValueError("max_response_length must be positive")
     direction = refusal_direction.detach().to(torch.float32).cpu()
@@ -433,6 +446,7 @@ def evaluate_multilingual_trial(
     for index, row in enumerate(ordered):
         record = {
             "trial_number": trial_number,
+            "schedule_trial_number": effective_schedule_number,
             "canonical_id": row.canonical_id,
             "row_id": row.row_id,
             "language": row.language,
@@ -457,6 +471,7 @@ def evaluate_multilingual_trial(
         unsafe_rows=unsafe_rows,
         metrics=metrics,
         diagnostics={
+            "schedule_trial_number": effective_schedule_number,
             "srg": {
                 key: value for key, value in srg.items() if key != "standardized_gain"
             },

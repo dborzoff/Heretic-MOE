@@ -323,3 +323,33 @@ def test_frozen_evaluator_resolves_global_trial_schedule(tmp_path: Path) -> None
     assert (tmp_path / "trials" / "trial-000017.jsonl").is_file()
     with pytest.raises(KeyError, match="18"):
         evaluator.evaluate(18)
+
+
+def test_frozen_evaluator_separates_schedule_and_artifact_numbers(
+    tmp_path: Path,
+) -> None:
+    rows = _rows(tmp_path)
+    evaluator = FrozenMultilingualTrialEvaluator(
+        model=_FakeModel(rows),
+        trial_rows=rows,
+        schedule_records=[
+            {"trial_number": 17, "row_ids": [row.row_id for row in rows]}
+        ],
+        clean_records=_clean_records(rows),
+        refusal_direction=torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
+        layer_reliability=torch.ones(2),
+        srg_scorer=_FakeSRG(),
+        srg_profile=_profile(),
+        private_output_dir=tmp_path / "trials",
+        expected_per_direction=4,
+        expected_languages=("en", "ru"),
+    )
+
+    measurement = evaluator.evaluate(17, artifact_trial_number=604)
+
+    assert measurement.trial_number == 604
+    assert measurement.diagnostics["schedule_trial_number"] == 17
+    private = tmp_path / "trials" / "trial-000604.jsonl"
+    records = [json.loads(line) for line in private.read_text().splitlines()]
+    assert {record["trial_number"] for record in records} == {604}
+    assert {record["schedule_trial_number"] for record in records} == {17}

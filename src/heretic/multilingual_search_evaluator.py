@@ -64,16 +64,22 @@ class MultilingualSearchEvaluator:
         self,
         response_archive_id: str | int | None = None,
         residual_capture: Callable[[list[Prompt], Tensor], None] | None = None,
+        *,
+        schedule_trial_number: int | None = None,
     ) -> list[tuple[str, Score]]:
         if not isinstance(response_archive_id, int) or response_archive_id < 0:
             raise ValueError("multilingual evaluation requires a global trial number")
-        measurement = (
-            self.runtime.evaluate(response_archive_id)
-            if residual_capture is None
-            else self.runtime.evaluate(
-                response_archive_id,
-                residual_capture=residual_capture,
-            )
+        schedule_number = (
+            response_archive_id
+            if schedule_trial_number is None
+            else schedule_trial_number
+        )
+        if not isinstance(schedule_number, int) or schedule_number < 0:
+            raise ValueError("multilingual evaluation requires a schedule trial number")
+        measurement = self.runtime.evaluate(
+            schedule_number,
+            artifact_trial_number=response_archive_id,
+            residual_capture=residual_capture,
         )
         metrics = measurement.metrics
         public = measurement.to_public_dict()

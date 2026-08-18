@@ -14,10 +14,17 @@ from heretic.multilingual_trial_metrics import compose_trial_metrics
 class _FrozenRuntime:
     def __init__(self, measurement: TrialMeasurement) -> None:
         self.measurement = measurement
-        self.calls: list[int] = []
+        self.calls: list[tuple[int, int | None]] = []
 
-    def evaluate(self, trial_number: int) -> TrialMeasurement:
-        self.calls.append(trial_number)
+    def evaluate(
+        self,
+        trial_number: int,
+        *,
+        artifact_trial_number: int | None = None,
+        residual_capture=None,
+    ) -> TrialMeasurement:
+        del residual_capture
+        self.calls.append((trial_number, artifact_trial_number))
         return self.measurement
 
 
@@ -67,7 +74,7 @@ def test_adapter_exposes_two_objectives_cost_and_frozen_constraints() -> None:
 
     scores = evaluator.get_scores(response_archive_id=17)
 
-    assert runtime.calls == [17]
+    assert runtime.calls == [(17, 17)]
     assert [name for name, _ in scores] == [
         "Removal",
         "Preservation loss",
@@ -111,6 +118,18 @@ def test_adapter_requires_an_integer_global_trial_number() -> None:
         assert "global trial number" in str(error)
     else:
         raise AssertionError("non-integer archive IDs must be rejected")
+
+
+def test_adapter_separates_schedule_and_artifact_trial_numbers() -> None:
+    runtime = _FrozenRuntime(_measurement())
+    evaluator = MultilingualSearchEvaluator(
+        runtime,
+        constraints=MultilingualConstraintContract(),
+    )
+
+    evaluator.get_scores(response_archive_id=604, schedule_trial_number=598)
+
+    assert runtime.calls == [(598, 604)]
 
 
 @pytest.mark.parametrize("invalid", [float("inf"), float("nan")])

@@ -159,6 +159,13 @@ def _trial_progress_index(trial: Any) -> int:
     return int(trial.number) + 1
 
 
+def _trial_schedule_number(trial: Any) -> int:
+    """Return the frozen queue schedule ID without changing artifact identity."""
+
+    queue_task_id = trial.user_attrs.get("queue_task_id")
+    return int(trial.number if queue_task_id is None else queue_task_id)
+
+
 def _study_has_saved_settings(study: Any) -> bool:
     """Distinguish a real prior run from a controller-created empty journal."""
 
@@ -1568,14 +1575,19 @@ def run():
             else None
         )
         print("* Evaluating...")
-        scores = evaluator.get_scores(
-            response_archive_id=trial.number,
-            residual_capture=(
+        score_arguments: dict[str, Any] = {
+            "response_archive_id": trial.number,
+            "residual_capture": (
                 geometry_session.capture_evaluation
                 if geometry_session is not None and settings.geometry_capture_evaluation
                 else None
             ),
-        )
+        }
+        if settings.multilingual_search.enabled:
+            schedule_trial_number = _trial_schedule_number(trial)
+            trial.set_user_attr("schedule_trial_number", schedule_trial_number)
+            score_arguments["schedule_trial_number"] = schedule_trial_number
+        scores = evaluator.get_scores(**score_arguments)
         objective_values = evaluator.get_objective_values(scores)
         constraint_values = evaluator.get_constraint_values(scores)
         record_trial_constraints(trial, constraint_values)

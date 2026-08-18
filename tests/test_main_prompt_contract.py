@@ -77,6 +77,18 @@ def test_queue_task_controls_progress_without_renumbering_optuna_trial() -> None
     assert _trial_progress_index(retried_trial) == 12
 
 
+def test_queue_task_controls_frozen_schedule_without_renumbering_artifacts() -> None:
+    from heretic.main import _trial_schedule_number
+
+    retried_trial = SimpleNamespace(
+        number=604,
+        user_attrs={"queue_task_id": 598},
+    )
+
+    assert _trial_schedule_number(retried_trial) == 598
+    assert retried_trial.number == 604
+
+
 def test_non_queue_progress_uses_optuna_trial_number() -> None:
     from heretic.main import _trial_progress_index
 
