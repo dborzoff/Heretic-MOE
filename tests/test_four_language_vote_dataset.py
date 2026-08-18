@@ -96,6 +96,22 @@ def test_materializes_aligned_schema_v1_vote_view(tmp_path: Path) -> None:
     assert '"prompt"' not in public
 
 
+def test_materializes_final_only_audit_view(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _build_source(source)
+    output = tmp_path / "final-audit"
+
+    manifest = materialize_vote_dataset(source, output, pools=("final",))
+
+    assert manifest["source_pools"] == ["final"]
+    assert manifest["directions"] == {"safe": 1, "unsafe": 1}
+    assert manifest["rows"] == 8
+    rows = load_classification_rows(output / "manifest.json", LANGUAGES)
+    assert len(rows) == 8
+    assert all(row.canonical_id in {"S-final-0", "U-final-0"} for row in rows)
+
+
 def test_rejects_source_hash_drift(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -105,4 +121,3 @@ def test_rejects_source_hash_drift(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="hash drift"):
         materialize_vote_dataset(source, tmp_path / "vote4")
-

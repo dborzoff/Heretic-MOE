@@ -59,14 +59,22 @@ def materialize_vote_dataset(
     output_root: str | Path,
     *,
     languages: Sequence[str] = LANGUAGES,
+    pools: Sequence[str] = POOLS,
 ) -> dict[str, Any]:
-    """Concatenate map, trial, and final pools into a verified schema-v1 view."""
+    """Materialize selected frozen pools into a verified schema-v1 view."""
 
     source_root = Path(source_root).resolve()
     output_root = Path(output_root).resolve()
     normalized_languages = tuple(str(value).strip().lower() for value in languages)
+    normalized_pools = tuple(str(value).strip().lower() for value in pools)
     if normalized_languages != LANGUAGES:
         raise ValueError(f"vote dataset languages must be {LANGUAGES}")
+    if (
+        not normalized_pools
+        or len(set(normalized_pools)) != len(normalized_pools)
+        or any(pool not in POOLS for pool in normalized_pools)
+    ):
+        raise ValueError(f"vote dataset pools must be a unique subset of {POOLS}")
     source_manifest_path = source_root / "manifest.json"
     source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
     if source_manifest.get("schema_version") != 4:
@@ -99,7 +107,7 @@ def materialize_vote_dataset(
         for language in normalized_languages:
             for direction in DIRECTIONS:
                 combined: list[dict[str, object]] = []
-                for pool in POOLS:
+                for pool in normalized_pools:
                     name, entry = _source_entry(
                         files,
                         pool=pool,
@@ -161,7 +169,7 @@ def materialize_vote_dataset(
             "status": "PASS",
             "source_manifest_sha256": get_file_sha256(source_manifest_path),
             "source_contract_sha256": source_manifest.get("contract_sha256"),
-            "source_pools": list(POOLS),
+            "source_pools": list(normalized_pools),
             "languages": list(normalized_languages),
             "directions": direction_counts,
             "canonical_rows": sum(direction_counts.values()),
@@ -180,4 +188,3 @@ def materialize_vote_dataset(
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
-
