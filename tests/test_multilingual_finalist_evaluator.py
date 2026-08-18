@@ -25,11 +25,23 @@ def _trial_rows(tmp_path: Path) -> list[GeometryRow]:
 
 
 def _final_rows(tmp_path: Path) -> list[CalibrationRow]:
-    return [CalibrationRow(
-        base_id=f"R{index+1}", row_id=f"{language}-R{index+1}", language=language,
-        category_id=f"C0{index+1}", prompt=f"private-final-{language}-{index}",
-        source_path=tmp_path / "private.jsonl", source_line=index + 1,
-    ) for language in ("en", "ru") for index in range(2)]
+    return [
+        CalibrationRow(
+            base_id=f"{direction}-{language}",
+            row_id=f"{language}-{direction}",
+            language=language,
+            direction=direction,
+            category_id="C01",
+            prompt=f"private-final-{direction}-{language}",
+            source_path=tmp_path / "private.jsonl",
+            source_line=index + 1,
+        )
+        for index, (language, direction) in enumerate(
+            (language, direction)
+            for language in ("en", "ru")
+            for direction in ("safe", "unsafe")
+        )
+    ]
 
 
 class _Model:
@@ -58,35 +70,27 @@ def _profile() -> dict[str, object]:
 
 
 def test_finalist_evaluator_runs_full_pool_and_independent_holdout(tmp_path: Path) -> None:
-    trial_rows = _trial_rows(tmp_path)
     final_rows = _final_rows(tmp_path)
-    model = _Model(trial_rows)
-    clean_trial = [{
-        "row_id": row.row_id, "clean_response": f"clean-{i}",
-        "clean_response_token_ids": [i + 1],
-        "clean_prompt_residual_projection": [1.0, 1.0],
-        "clean_conditional_nll": 1.0 if row.direction == "safe" else None,
-    } for i, row in enumerate(trial_rows)]
+    model = _Model([])
     clean_final = [{
         "row_id": row.row_id, "clean_response": f"clean-final-{i}",
+        "clean_response_token_ids": [i + 1],
+        "clean_conditional_nll": 1.0 if row.direction == "safe" else None,
         "clean_margin": 1.0,
         "clean_prompt_residual_projection": [1.0, 1.0],
     } for i, row in enumerate(final_rows)]
     evaluator = MultilingualFinalistEvaluator(
-        model=model, trial_rows=trial_rows, clean_trial_records=clean_trial,
-        final_rows=final_rows, clean_final_records=clean_final,
+        model=model, final_rows=final_rows, clean_final_records=clean_final,
         refusal_direction=torch.ones((2, 2)), layer_reliability=torch.ones(2),
         srg_scorer=_Scorer(), srg_profile=_profile(),
-        private_output_dir=tmp_path / "private", expected_per_direction=4,
-        expected_languages=("en", "ru"), final_max_new_tokens=1024,
+        private_output_dir=tmp_path / "private", expected_per_direction=2,
+        expected_languages=("en", "ru"), final_max_new_tokens=100,
     )
 
     result = evaluator.evaluate(7, artifact_trial_number=42)
 
-    assert model.calls == 2
+    assert model.calls == 1
     assert model.nll_calls == 1
-    assert result.rows == 8
-    assert result.to_public_dict()["diagnostics"]["final_holdout"]["rows"] == 4
-    assert result.to_public_dict()["diagnostics"]["final_holdout"]["removal"] > 0.0
-    assert (tmp_path / "private" / "trial_pool" / "trial-000042.jsonl").is_file()
-    assert (tmp_path / "private" / "final_holdout" / "trial-000042.jsonl").is_file()
+    assert result.rows == 4
+    assert result.metrics.removal > 0.0
+    assert (tmp_path / "private" / "final_pool" / "trial-000042.jsonl").is_file()

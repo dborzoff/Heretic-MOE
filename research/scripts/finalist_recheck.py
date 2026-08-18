@@ -21,6 +21,7 @@ from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 from optuna.trial import FrozenTrial, TrialState
 
 from heretic.config import SelectionPolicy
+from heretic.multilingual_final_holdout import FINAL_HOLDOUT_REFERENCE_DIR
 from heretic.multilingual_finalists import (
     freeze_top_six_manifest,
     select_multilingual_winners,
@@ -344,21 +345,11 @@ def multilingual_trial_metrics(trial: FrozenTrial) -> dict[str, Any]:
     diagnostics = public.get("diagnostics")
     if not isinstance(metrics, dict) or not isinstance(diagnostics, dict):
         raise TypeError(f"Trial {trial.number} has incomplete multilingual diagnostics")
-    final = diagnostics.get("final_holdout")
-    trial_groups = diagnostics.get("srg_groups")
-    if not isinstance(final, dict) or not isinstance(trial_groups, dict):
-        raise TypeError(f"Trial {trial.number} has no independent final holdout")
-    final_groups = final.get("groups")
+    final_groups = diagnostics.get("srg_groups")
     if not isinstance(final_groups, dict):
-        raise TypeError(f"Trial {trial.number} final holdout has no group summary")
-    worst_language = min(
-        float(trial_groups["worst_language"]),
-        float(final_groups["worst_language"]),
-    )
-    worst_category = min(
-        float(trial_groups["worst_category"]),
-        float(final_groups["worst_category"]),
-    )
+        raise TypeError(f"Trial {trial.number} final pool has no group summary")
+    worst_language = float(final_groups["worst_language"])
+    worst_category = float(final_groups["worst_category"])
     constraints = trial.user_attrs.get("constraints")
     feasible = trial.user_attrs.get("feasible")
     if not isinstance(feasible, bool):
@@ -378,7 +369,7 @@ def multilingual_trial_metrics(trial: FrozenTrial) -> dict[str, Any]:
         "safe_geometry_damage": float(metrics["safe_geometry_drift"]),
         "worst_language": worst_language,
         "worst_category": worst_category,
-        "final_holdout_removal": float(final["removal"]),
+        "final_holdout_removal": float(metrics["removal"]),
     }
 
 
@@ -407,6 +398,8 @@ def validate_final_holdout_reference(reference: Path, top_six_path: Path) -> Non
         raise FileNotFoundError(reference)
     top_six = json.loads(top_six_path.read_text(encoding="utf-8"))
     manifest = json.loads(reference.read_text(encoding="utf-8"))
+    if int(manifest.get("schema_version", 0)) < 3:
+        raise RuntimeError("Final holdout reference has no frozen SAFE NLL baseline")
     expected = top_six.get("shortlist_contract_sha256")
     if (
         top_six.get("status") != "FROZEN"
@@ -1200,7 +1193,7 @@ def run(args: argparse.Namespace) -> None:
         return
     if manifest.get("contract") == "multilingual_v3_full_recheck":
         runtime_root = Path(manifest["runtime_root"])
-        final_reference = runtime_root / "final_holdout_reference" / "manifest.json"
+        final_reference = runtime_root / FINAL_HOLDOUT_REFERENCE_DIR / "manifest.json"
         if not final_reference.is_file():
             command = final_holdout_prepare_command(
                 args.heretic,

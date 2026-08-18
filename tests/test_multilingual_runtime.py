@@ -15,11 +15,15 @@ from heretic.language_map_directions import (
     write_direction_map_package,
 )
 from heretic.multilingual_contract import CalibrationRow, MultilingualDatasetBundle
-from heretic.multilingual_final_holdout import build_final_holdout_archive
+from heretic.multilingual_final_holdout import (
+    FINAL_HOLDOUT_REFERENCE_DIR,
+    build_final_holdout_archive,
+)
 from heretic.multilingual_runtime import (
     apply_multilingual_search_mode,
     load_multilingual_finalist_evaluator,
     load_multilingual_search_evaluator,
+    multilingual_resident_rows,
 )
 from heretic.multilingual_search_evaluator import MultilingualConstraintContract
 from heretic.trial_language_schedule import materialize_trial_language_schedule
@@ -215,13 +219,20 @@ def test_multilingual_mode_cannot_fall_back_to_legacy_136_objectives(tmp_path: P
     assert settings.response_prefix == ""
 
 
-def test_finalist_runtime_uses_full_pool_and_frozen_r_archive(tmp_path: Path) -> None:
+def test_finalist_runtime_uses_only_independent_final_pool(tmp_path: Path) -> None:
     bundle, runtime_root = _prepare_runtime(tmp_path)
-    final_rows = (
+    final_rows = tuple(
         CalibrationRow(
-            base_id="R1", row_id="EN-R1", language="en", category_id="C01",
-            prompt="private-final", source_path=tmp_path / "private.jsonl", source_line=1,
-        ),
+            base_id=f"{direction}-1",
+            row_id=f"EN-{direction}-1",
+            language="en",
+            direction=direction,
+            category_id="C01",
+            prompt=f"private-final-{direction}",
+            source_path=tmp_path / "private.jsonl",
+            source_line=index + 1,
+        )
+        for index, direction in enumerate(("safe", "unsafe"))
     )
     bundle = MultilingualDatasetBundle(
         direction_rows=bundle.direction_rows,
@@ -237,7 +248,7 @@ def test_finalist_runtime_uses_full_pool_and_frozen_r_archive(tmp_path: Path) ->
         model=_ReferenceModel(), rows=final_rows,
         refusal_direction=profile.consensus_refusal_direction,
         srg_scorer=_FinalScorer(), srg_profile=srg_profile,
-        output_dir=runtime_root / "final_holdout_reference",
+        output_dir=runtime_root / FINAL_HOLDOUT_REFERENCE_DIR,
         dataset_contract_sha256="a" * 64, model_fingerprint="fake-model-v1",
         top_six_contract_sha256="b" * 64, max_response_length=1024,
     )
@@ -249,6 +260,32 @@ def test_finalist_runtime_uses_full_pool_and_frozen_r_archive(tmp_path: Path) ->
     )
 
     assert manifest["evaluation_phase"] == "finalist"
-    assert manifest["trial_rows_per_finalist"] == 2
-    assert manifest["final_holdout_rows"] == 1
+    assert "trial_rows_per_finalist" not in manifest
+    assert manifest["final_rows_per_finalist"] == 2
     assert evaluator.runtime.expected_per_direction == 1
+
+
+def test_finalist_resident_cache_excludes_trial_pool(tmp_path: Path) -> None:
+    trial = tuple(_rows(tmp_path))
+    final = tuple(
+        CalibrationRow(
+            base_id=f"F{index}",
+            row_id=f"EN-F{index}",
+            language="en",
+            direction=direction,
+            category_id="C01",
+            prompt=f"private-final-{index}",
+            source_path=tmp_path / "private.jsonl",
+            source_line=index + 1,
+        )
+        for index, direction in enumerate(("safe", "unsafe"))
+    )
+    bundle = MultilingualDatasetBundle(
+        direction_rows=(),
+        trial_rows=trial,
+        final_rows=final,
+        manifest={"status": "PASS", "contract_sha256": "a" * 64},
+    )
+
+    assert multilingual_resident_rows(bundle, "finalist") == final
+    assert multilingual_resident_rows(bundle, "search") == trial

@@ -52,6 +52,9 @@ class _Model:
             torch.full((len(prompts), 2, 2), residual),
         )
 
+    def get_conditional_nll(self, prompts, targets):
+        return [1.0] * len(prompts)
+
 
 class _Scorer:
     def score_responses(self, prompts, responses):
@@ -117,6 +120,16 @@ def test_final_holdout_freezes_clean_reference_then_rechecks_candidate(
     assert manifest["rows"] == 8
     assert manifest["max_response_length"] == 1024
     assert manifest["top_six_contract_sha256"] == "b" * 64
+    assert all(
+        record["clean_conditional_nll"] == 1.0
+        for record in clean_records
+        if record["direction_class"] == "safe"
+    )
+    assert all(
+        record["clean_conditional_nll"] is None
+        for record in clean_records
+        if record["direction_class"] == "unsafe"
+    )
     assert measurement["rows"] == 8
     assert measurement["direction_rows"] == {"safe": 4, "unsafe": 4}
     assert measurement["srg"]["rows"] == 4

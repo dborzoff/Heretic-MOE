@@ -493,7 +493,7 @@ def test_multilingual_constraint_overrides_update_finalist_settings_and_names() 
     ]
 
 
-def test_multilingual_trial_metrics_use_full_pool_and_independent_r() -> None:
+def test_multilingual_trial_metrics_use_independent_final_pool() -> None:
     trial = create_trial(
         values=[0.7, 0.2],
         user_attrs={
@@ -517,13 +517,6 @@ def test_multilingual_trial_metrics_use_full_pool_and_independent_r() -> None:
                                 "worst_language": 0.61,
                                 "worst_category": 0.52,
                             },
-                            "final_holdout": {
-                                "removal": 0.66,
-                                "groups": {
-                                    "worst_language": 0.57,
-                                    "worst_category": 0.49,
-                                },
-                            },
                         },
                     },
                 },
@@ -538,9 +531,9 @@ def test_multilingual_trial_metrics_use_full_pool_and_independent_r() -> None:
     assert row["source_trial_index"] == 124
     assert row["removal"] == 0.7
     assert row["safe_ppl_drift"] == 0.03
-    assert row["final_holdout_removal"] == 0.66
-    assert row["worst_language"] == 0.57
-    assert row["worst_category"] == 0.49
+    assert row["final_holdout_removal"] == 0.7
+    assert row["worst_language"] == 0.61
+    assert row["worst_category"] == 0.52
 
 
 def test_final_holdout_prepare_command_is_bound_to_frozen_top_six() -> None:
@@ -578,9 +571,38 @@ def test_existing_final_holdout_must_match_current_top_six(tmp_path: Path) -> No
     )
     reference.parent.mkdir()
     reference.write_text(
-        json.dumps({"status": "PASS", "top_six_contract_sha256": "b" * 64}),
+        json.dumps(
+            {
+                "schema_version": 3,
+                "status": "PASS",
+                "top_six_contract_sha256": "b" * 64,
+            }
+        ),
         encoding="utf-8",
     )
 
     with pytest.raises(RuntimeError, match="TOP-6"):
+        recheck.validate_final_holdout_reference(reference, top_six)
+
+
+def test_final_holdout_reference_requires_safe_nll_schema(tmp_path: Path) -> None:
+    top_six = tmp_path / "top6_manifest.json"
+    reference = tmp_path / "final_holdout_reference_v3" / "manifest.json"
+    top_six.write_text(
+        json.dumps({"status": "FROZEN", "shortlist_contract_sha256": "a" * 64}),
+        encoding="utf-8",
+    )
+    reference.parent.mkdir()
+    reference.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "status": "PASS",
+                "top_six_contract_sha256": "a" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="SAFE NLL"):
         recheck.validate_final_holdout_reference(reference, top_six)

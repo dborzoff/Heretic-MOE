@@ -24,6 +24,8 @@ from .trial_geometry_metrics import evaluate_trial_geometry
 from .utils import Prompt
 
 _FORBIDDEN_PUBLIC_KEYS = {"prompt", "response", "answer", "text"}
+FINAL_HOLDOUT_REFERENCE_DIR = "final_holdout_reference_v3"
+FINAL_HOLDOUT_SHARDS_DIR = "final_holdout_reference_shards_v3"
 
 
 def _generation_contract(
@@ -175,7 +177,7 @@ def build_final_holdout_archive(
     if direction.ndim != 2 or not bool(torch.isfinite(direction).all()):
         raise ValueError("final-holdout refusal direction must be finite")
     contract = {
-        "schema_version": 2,
+        "schema_version": 3,
         "dataset_contract_sha256": dataset_contract_sha256,
         "model_fingerprint": model_fingerprint,
         "top_six_contract_sha256": top_six_contract_sha256,
@@ -217,6 +219,20 @@ def build_final_holdout_archive(
     ):
         raise ValueError("clean final-holdout generation artifacts are not aligned")
     margins = _margins(srg_scorer.score_responses(prompts, responses), len(ordered))
+    safe_indices = [
+        index for index, row in enumerate(ordered) if row.direction == "safe"
+    ]
+    clean_nll_values = (
+        model.get_conditional_nll(
+            [prompts[index] for index in safe_indices],
+            [token_ids[index] for index in safe_indices],
+        )
+        if safe_indices
+        else []
+    )
+    if len(clean_nll_values) != len(safe_indices):
+        raise ValueError("clean final-holdout SAFE NLL coverage mismatch")
+    clean_nll = dict(zip(safe_indices, clean_nll_values, strict=True))
     projections = torch.einsum(
         "blh,lh->bl", residuals.to(torch.float32).cpu(), direction
     )
@@ -231,6 +247,9 @@ def build_final_holdout_archive(
             "prompt": row.prompt,
             "clean_response": responses[index],
             "clean_response_token_ids": [int(value) for value in token_ids[index]],
+            "clean_conditional_nll": (
+                float(clean_nll[index]) if index in clean_nll else None
+            ),
             "clean_margin": margins[index],
             "clean_prompt_residual_projection": [
                 float(value) for value in projections[index]
@@ -358,7 +377,7 @@ def merge_final_holdout_archives(
         if any(manifest.get(key) != value for key, value in expected_common.items()):
             raise ValueError("final-holdout shard contract differs")
     contract = {
-        "schema_version": 2,
+        "schema_version": 3,
         **expected_common,
         "row_contract_sha256": _canonical_sha256(_row_contract(ordered)),
     }

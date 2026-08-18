@@ -64,6 +64,8 @@ def main(argv: Sequence[str] | None = None) -> dict[str, object]:
     from .model import Model
     from .multilingual_contract import load_multilingual_dataset_bundle
     from .multilingual_final_holdout import (
+        FINAL_HOLDOUT_REFERENCE_DIR,
+        FINAL_HOLDOUT_SHARDS_DIR,
         build_final_holdout_archive,
         merge_final_holdout_archives,
     )
@@ -109,7 +111,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, object]:
             len(bundle.final_rows) * index // worker_count
             for index in range(worker_count + 1)
         ]
-        shards_root = runtime_root / "final_holdout_reference_shards"
+        shards_root = runtime_root / FINAL_HOLDOUT_SHARDS_DIR
         specifications = []
         for index, device in enumerate(devices[:worker_count]):
             start, end = boundaries[index], boundaries[index + 1]
@@ -180,7 +182,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, object]:
             rows=bundle.final_rows,
             refusal_direction=profile.consensus_refusal_direction,
             srg_profile=srg_profile,
-            output_dir=runtime_root / "final_holdout_reference",
+            output_dir=runtime_root / FINAL_HOLDOUT_REFERENCE_DIR,
             dataset_contract_sha256=str(bundle.manifest["contract_sha256"]),
             model_fingerprint=str(model_fingerprint),
             top_six_contract_sha256=top_six_sha,
@@ -247,7 +249,11 @@ def main(argv: Sequence[str] | None = None) -> dict[str, object]:
             encoding="utf-8"
         )
     )
-    output_dir = args.output_dir if args.worker else runtime_root / "final_holdout_reference"
+    output_dir = (
+        args.output_dir
+        if args.worker
+        else runtime_root / FINAL_HOLDOUT_REFERENCE_DIR
+    )
 
     def progress(completed: int, total: int, batch_size: int) -> None:
         print(

@@ -86,6 +86,7 @@ from .model import AbliterationParameters, Model, get_model_class
 from .multilingual_runtime import (
     apply_multilingual_search_mode,
     load_multilingual_worker_runtime,
+    multilingual_resident_rows,
     recommended_model_layer_bounds,
 )
 from .promotion import load_seed_parameters
@@ -1014,17 +1015,13 @@ def run():
         evaluation_phase = settings.multilingual_search.evaluation_phase
         resident_prompts = [
             Prompt(system="", user=row.prompt)
-            for row in multilingual_worker_runtime.bundle.trial_rows
+            for row in multilingual_resident_rows(
+                multilingual_worker_runtime.bundle,
+                evaluation_phase,
+            )
         ]
         if evaluation_phase == "finalist":
-            resident_prompts.extend(
-                Prompt(system="", user=row.prompt)
-                for row in multilingual_worker_runtime.bundle.final_rows
-            )
-            resident_rows = max(
-                len(multilingual_worker_runtime.bundle.trial_rows),
-                len(multilingual_worker_runtime.bundle.final_rows),
-            )
+            resident_rows = len(multilingual_worker_runtime.bundle.final_rows)
         else:
             resident_rows = 2 * settings.multilingual_search.trial_rows_per_cell
         if settings.batch_size == 0:
