@@ -435,19 +435,34 @@ def _multilingual_final_holdout_sha256(settings: dict[str, Any]) -> str:
     files = manifest.get("files")
     if not isinstance(files, dict):
         raise TypeError("multilingual dataset manifest has no files mapping")
-    records = []
-    for language in ("en", "ru", "zh", "es", "fr"):
-        name = f"srg_calibration_{language}.jsonl"
-        record = files.get(name)
-        if not isinstance(record, dict):
-            raise TypeError(f"multilingual dataset manifest is missing {name}")
-        records.append(
+    final_pool = sorted(
+        (name, record)
+        for name, record in files.items()
+        if isinstance(record, dict) and record.get("pool") == "final"
+    )
+    if final_pool:
+        records = [
             {
                 "name": name,
                 "rows": int(record["rows"]),
                 "sha256": str(record["sha256"]),
             }
-        )
+            for name, record in final_pool
+        ]
+    else:
+        records = []
+        for language in ("en", "ru", "zh", "es", "fr"):
+            name = f"srg_calibration_{language}.jsonl"
+            record = files.get(name)
+            if not isinstance(record, dict):
+                raise TypeError(f"multilingual dataset manifest is missing {name}")
+            records.append(
+                {
+                    "name": name,
+                    "rows": int(record["rows"]),
+                    "sha256": str(record["sha256"]),
+                }
+            )
     payload = json.dumps(records, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -1108,6 +1123,8 @@ def runtime_pool_rows(runtime_root: Path, pool: str) -> int:
         (runtime_root / "dataset" / "manifest.json").read_text(encoding="utf-8")
     )
     counts = manifest.get("counts")
+    if isinstance(counts, dict) and pool == "final_holdout" and pool not in counts:
+        pool = "final"
     if not isinstance(counts, dict) or pool not in counts:
         raise RuntimeError(f"Frozen runtime manifest has no {pool!r} row count")
     rows = int(counts[pool])

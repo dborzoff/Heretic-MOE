@@ -117,6 +117,62 @@ def test_multilingual_holdout_hash_uses_frozen_runtime_manifest(tmp_path: Path) 
     assert value == expected
 
 
+def test_multilingual_holdout_hash_uses_v4_final_pool(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    runtime_dataset = tmp_path / "runtime" / "dataset"
+    runtime_dataset.mkdir(parents=True)
+    files = {
+        "map_en_safe_1000.jsonl": {
+            "pool": "map",
+            "language": "en",
+            "direction_class": "safe",
+            "rows": 1000,
+            "sha256": f"{1:064x}",
+        },
+        **{
+            f"final_{language}_{direction}_200.jsonl": {
+                "pool": "final",
+                "language": language,
+                "direction_class": direction,
+                "rows": 200,
+                "sha256": f"{index + 2:064x}",
+            }
+            for index, (language, direction) in enumerate(
+                (language, direction)
+                for language in ("en", "ru", "zh", "ja")
+                for direction in ("safe", "unsafe")
+            )
+        },
+    }
+    (runtime_dataset / "manifest.json").write_text(
+        json.dumps({"schema_version": 2, "files": files}), encoding="utf-8"
+    )
+
+    value = recheck._multilingual_final_holdout_sha256(
+        {
+            "multilingual_search": {
+                "dataset_root": dataset.as_posix(),
+                "runtime_root": (tmp_path / "runtime").as_posix(),
+            }
+        }
+    )
+
+    records = [
+        {
+            "name": name,
+            "rows": int(record["rows"]),
+            "sha256": str(record["sha256"]),
+        }
+        for name, record in sorted(files.items())
+        if record.get("pool") == "final"
+    ]
+    expected = recheck.hashlib.sha256(
+        json.dumps(records, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    assert value == expected
+
+
 def test_recheck_workers_use_device_specific_compiler_caches() -> None:
     assert hasattr(recheck, "worker_environment")
     environment = recheck.worker_environment(
@@ -142,6 +198,17 @@ def test_runtime_pool_rows_uses_frozen_dataset_counts(tmp_path: Path) -> None:
     )
 
     assert recheck.runtime_pool_rows(tmp_path / "runtime", "final_holdout") == 10
+
+
+def test_runtime_pool_rows_maps_v4_final_pool_to_final_holdout(tmp_path: Path) -> None:
+    dataset = tmp_path / "runtime" / "dataset"
+    dataset.mkdir(parents=True)
+    (dataset / "manifest.json").write_text(
+        json.dumps({"counts": {"final": 1600}}),
+        encoding="utf-8",
+    )
+
+    assert recheck.runtime_pool_rows(tmp_path / "runtime", "final_holdout") == 1600
 
 
 def test_recheck_worker_text_mode_is_utf8() -> None:
