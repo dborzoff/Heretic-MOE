@@ -81,10 +81,12 @@ def test_finalist_evaluator_runs_full_pool_and_independent_holdout(tmp_path: Pat
         expected_languages=("en", "ru"), final_max_new_tokens=1024,
     )
 
-    result = evaluator.evaluate(7)
+    result = evaluator.evaluate(7, artifact_trial_number=42)
 
     assert model.calls == 2
     assert model.nll_calls == 1
     assert result.rows == 8
     assert result.to_public_dict()["diagnostics"]["final_holdout"]["rows"] == 4
     assert result.to_public_dict()["diagnostics"]["final_holdout"]["removal"] > 0.0
+    assert (tmp_path / "private" / "trial_pool" / "trial-000042.jsonl").is_file()
+    assert (tmp_path / "private" / "final_holdout" / "trial-000042.jsonl").is_file()

@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -80,9 +80,21 @@ class MultilingualFinalistEvaluator:
         self.expected_languages = expected_languages
         self.final_max_new_tokens = final_max_new_tokens
 
-    def evaluate(self, trial_number: int, *, residual_capture=None) -> TrialMeasurement:
+    def evaluate(
+        self,
+        trial_number: int,
+        *,
+        artifact_trial_number: int | None = None,
+        residual_capture: Callable[[list[Prompt], Tensor], None] | None = None,
+    ) -> TrialMeasurement:
+        artifact_number = (
+            trial_number if artifact_trial_number is None else artifact_trial_number
+        )
+        if artifact_number < 0:
+            raise ValueError("artifact trial number must be non-negative")
         full = evaluate_multilingual_trial(
-            trial_number=trial_number,
+            trial_number=artifact_number,
+            schedule_trial_number=trial_number,
             model=self.model,
             rows=self.trial_rows,
             clean_records=self.clean_trial_records,
@@ -94,7 +106,7 @@ class MultilingualFinalistEvaluator:
             private_records_path=(
                 self.private_output_dir
                 / "trial_pool"
-                / f"trial-{trial_number:06d}.jsonl"
+                / f"trial-{artifact_number:06d}.jsonl"
             ),
             expected_per_direction=self.expected_per_direction,
             expected_languages=self.expected_languages,
@@ -102,7 +114,7 @@ class MultilingualFinalistEvaluator:
             residual_capture=residual_capture,
         )
         final = evaluate_final_holdout(
-            trial_number=trial_number,
+            trial_number=artifact_number,
             model=self.model,
             rows=self.final_rows,
             clean_records=self.clean_final_records,
@@ -113,7 +125,7 @@ class MultilingualFinalistEvaluator:
             private_records_path=(
                 self.private_output_dir
                 / "final_holdout"
-                / f"trial-{trial_number:06d}.jsonl"
+                / f"trial-{artifact_number:06d}.jsonl"
             ),
             max_response_length=self.final_max_new_tokens,
         )
