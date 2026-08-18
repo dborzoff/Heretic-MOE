@@ -10,8 +10,19 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import tomllib
+
+
+def _autotune_final_holdout_batch(
+    model: Any,
+    prompts: Sequence[Any],
+    batch_size: int,
+):
+    if batch_size != 0 or not hasattr(model, "autotune_generation_batch_size"):
+        return None
+    return model.autotune_generation_batch_size(prompts, expected_rows=len(prompts))
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -189,11 +200,46 @@ def main(argv: Sequence[str] | None = None) -> dict[str, object]:
     if not model_path.is_dir():
         raise ValueError("final-holdout preparation requires a local model directory")
     model_fingerprint = fingerprint_local_model(model_path)["model_fingerprint"]
-    model = Model(settings)
-    model.prepare_prompt_cache(
-        [Prompt(system="", user=row.prompt) for row in selected_rows]
+    worker_id = f"gpu-{devices[0]}"
+    print(
+        json.dumps(
+            {"event": "worker_phase", "phase": "model_load", "worker_id": worker_id},
+            sort_keys=True,
+        ),
+        flush=True,
     )
-    model.pin_prompt_cache()
+    model = Model(settings)
+    print(
+        json.dumps(
+            {"event": "worker_phase", "phase": "model_ready", "worker_id": worker_id},
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    if hasattr(model, "set_batch_event_sink"):
+        model.set_batch_event_sink(
+            lambda event: print(
+                json.dumps({**event, "worker_id": worker_id}, sort_keys=True),
+                flush=True,
+            )
+        )
+    selected_prompts = [Prompt(system="", user=row.prompt) for row in selected_rows]
+    prepared = model.prepare_prompt_cache(selected_prompts)
+    packed = model.pin_prompt_cache()
+    print(
+        json.dumps(
+            {
+                "event": "token_cache_ready",
+                "worker_id": worker_id,
+                "rows": int(prepared["rows"]),
+                "tokens": int(packed["tokens"]),
+                "pinned": bool(packed["pinned"]),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    _autotune_final_holdout_batch(model, selected_prompts, int(settings.batch_size))
     scorer = build_multilingual_srg_scorer(settings, model, runtime_root)
     profile, _ = load_direction_map_package(runtime_root / "clean_map" / "directions")
     srg_profile = json.loads(
