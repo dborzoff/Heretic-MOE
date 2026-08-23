@@ -37,6 +37,159 @@ def _write_jsonl(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
     )
 
 
+def materialize_panel_support_pool(
+    source_manifest_path: str | Path,
+    combined_rows_path: str | Path,
+    output_dir: str | Path,
+    *,
+    minimum_support: int,
+    panel_size: int,
+) -> dict[str, object]:
+    source_manifest_path = Path(source_manifest_path).resolve()
+    combined_rows_path = Path(combined_rows_path).resolve()
+    output_dir = Path(output_dir).resolve()
+    if not 1 <= int(minimum_support) <= int(panel_size):
+        raise ValueError("minimum support must be within the panel")
+    if output_dir.exists():
+        raise FileExistsError(output_dir)
+    source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
+    if (
+        source_manifest.get("schema_version") != 1
+        or source_manifest.get("status") != "PASS"
+        or source_manifest.get("languages") != ["en"]
+    ):
+        raise ValueError("source manifest is not a verified English schema-v1 pool")
+    entries = {
+        (str(entry["language"]), str(entry["direction"])): entry
+        for entry in source_manifest.get("files", [])
+    }
+    safe_entry = entries[("en", "safe")]
+    unsafe_entry = entries[("en", "unsafe")]
+    safe_source = source_manifest_path.parent / str(safe_entry["path"])
+    unsafe_source = source_manifest_path.parent / str(unsafe_entry["path"])
+    for entry, path in ((safe_entry, safe_source), (unsafe_entry, unsafe_source)):
+        if get_file_sha256(path) != str(entry["sha256"]):
+            raise ValueError(f"source dataset hash drift: {path.name}")
+    safe_rows = _read_jsonl(safe_source)
+    source_rows = _read_jsonl(unsafe_source)
+    if len(safe_rows) != int(safe_entry["rows"]) or len(source_rows) != int(
+        unsafe_entry["rows"]
+    ):
+        raise ValueError("source dataset row count drift")
+    source_by_id = {str(row["canonical_id"]): row for row in source_rows}
+    if len(source_by_id) != len(source_rows):
+        raise ValueError("source dataset contains duplicate canonical IDs")
+
+    combined_by_id: dict[str, dict[str, object]] = {}
+    labels_by_id: dict[str, dict[str, object]] = {}
+    for row in _read_jsonl(combined_rows_path):
+        canonical_id = str(row["canonical_id"])
+        if canonical_id in combined_by_id:
+            raise ValueError(f"duplicate combined panel ID: {canonical_id}")
+        target = str(row["target_behavior_class"])
+        counts = row.get("combined_vote_counts")
+        if target not in ("SOFT", "HARD_REFUSE") or not isinstance(counts, dict):
+            raise ValueError("combined panel row has an invalid target or counts")
+        support = int(row["target_support"])
+        if (
+            int(row["panel_size"]) != panel_size
+            or sum(int(value) for value in counts.values()) != panel_size
+            or int(counts.get(target, 0)) != support
+        ):
+            raise ValueError(f"combined vote accounting drift: {canonical_id}")
+        combined_by_id[canonical_id] = row
+        if support >= minimum_support:
+            labels_by_id[canonical_id] = {
+                "canonical_id": canonical_id,
+                "row_id": str(row["row_id"]),
+                "target_behavior_class": target,
+                "target_support": support,
+                "panel_size": panel_size,
+                "combined_vote_counts": dict(counts),
+                "additional_votes": dict(row.get("additional_votes", {})),
+                "category_ids": list(row.get("category_ids", [])),
+                "source": str(row.get("source", "")),
+            }
+    if set(combined_by_id) != set(source_by_id):
+        raise ValueError("combined panel coverage does not match the source pool")
+
+    selected_rows: list[dict[str, object]] = []
+    labels: list[dict[str, object]] = []
+    for source in source_rows:
+        canonical_id = str(source["canonical_id"])
+        label = labels_by_id.get(canonical_id)
+        if label is None:
+            continue
+        selected = dict(source)
+        selected["target_behavior_class"] = label["target_behavior_class"]
+        selected["target_support"] = label["target_support"]
+        selected["panel_size"] = panel_size
+        selected_rows.append(selected)
+        labels.append(label)
+
+    temporary = Path(
+        tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=output_dir.parent)
+    )
+    try:
+        safe_path = temporary / "direction_en_safe_strict.jsonl"
+        unsafe_path = temporary / "direction_en_unsafe_strict.jsonl"
+        labels_path = temporary / "selection_labels.jsonl"
+        _write_jsonl(safe_path, [])
+        _write_jsonl(unsafe_path, selected_rows)
+        _write_jsonl(labels_path, labels)
+        counts = {
+            "source": len(source_rows),
+            "selected": len(selected_rows),
+            "rejected": len(source_rows) - len(selected_rows),
+            "SOFT": sum(
+                row["target_behavior_class"] == "SOFT" for row in labels
+            ),
+            "HARD_REFUSE": sum(
+                row["target_behavior_class"] == "HARD_REFUSE" for row in labels
+            ),
+        }
+        manifest: dict[str, object] = {
+            "schema_version": 1,
+            "status": "PASS",
+            "private_text": True,
+            "languages": ["en"],
+            "minimum_support": int(minimum_support),
+            "panel_size": int(panel_size),
+            "directions": {"safe": 0, "unsafe": len(selected_rows)},
+            "counts": counts,
+            "source_manifest_sha256": get_file_sha256(source_manifest_path),
+            "combined_rows_sha256": get_file_sha256(combined_rows_path),
+            "selection_labels": labels_path.name,
+            "selection_labels_sha256": get_file_sha256(labels_path),
+            "files": [
+                {
+                    "language": "en",
+                    "direction": "safe",
+                    "path": safe_path.name,
+                    "rows": 0,
+                    "sha256": get_file_sha256(safe_path),
+                },
+                {
+                    "language": "en",
+                    "direction": "unsafe",
+                    "path": unsafe_path.name,
+                    "rows": len(selected_rows),
+                    "sha256": get_file_sha256(unsafe_path),
+                },
+            ],
+        }
+        (temporary / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        os.replace(temporary, output_dir)
+        return manifest
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+
+
 def materialize_cumulative_vote_pool(
     source_manifest_path: str | Path,
     consensus_rows_path: str | Path,
