@@ -59,7 +59,7 @@ class _OverallPercentColumn(TaskProgressColumn):
 
 class _QueueCountColumn(ProgressColumn):
     def __init__(self) -> None:
-        super().__init__(table_column=Column(min_width=8, no_wrap=True))
+        super().__init__(table_column=Column(min_width=10, no_wrap=True))
 
     def render(self, task: Task) -> Text:
         completed = int(task.completed)
@@ -468,8 +468,13 @@ class PipelineUI:
         elapsed = time.monotonic() - self._started
         rows.append(("elapsed", _format_duration(elapsed)))
         if self._rich:
+            preserve_progress = bool(self._workers) and bool(
+                self._progress.live.transient
+            )
             if self._progress.live.is_started:
                 self._progress.stop()
+            if preserve_progress:
+                self.console.print(self._progress.get_renderable())
             suffix = " | ".join(f"{name} {value}" for name, value in rows)
             icon = "✓" if status == "PASS" else "✗"
             line = f"{icon} {status} {self._stage}"
