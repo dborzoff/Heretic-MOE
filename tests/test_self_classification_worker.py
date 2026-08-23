@@ -258,3 +258,36 @@ def test_worker_checkpoints_once_per_completed_batch(
     )
 
     assert batch_sizes == [2, 2, 1]
+
+
+def test_worker_caps_batch_by_total_utf8_input_size(tmp_path: Path) -> None:
+    """Catches packing long multilingual inputs into one memory-heavy batch."""
+    model = FakeClassificationModel()
+
+    classify_rows_with_model(
+        model,
+        model_id="model-a",
+        rows=rows(3),
+        variants=(PromptVariant.NUMBER,),
+        output_path=tmp_path / "rows.jsonl",
+        batch_size=3,
+        max_batch_input_bytes=1,
+    )
+
+    assert model.batch_sizes == [1, 1, 1]
+
+
+def test_worker_resets_oom_backoff_for_each_prompt_variant(tmp_path: Path) -> None:
+    """Catches carrying a long-tail batch reduction into the next short prefix."""
+    model = FakeClassificationModel(maximum_batch=2)
+
+    classify_rows_with_model(
+        model,
+        model_id="model-a",
+        rows=rows(3),
+        variants=(PromptVariant.NUMBER, PromptVariant.CODE_PERMUTED),
+        output_path=tmp_path / "rows.jsonl",
+        batch_size=4,
+    )
+
+    assert model.batch_sizes == [3, 2, 1, 3, 2, 1]

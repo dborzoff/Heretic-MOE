@@ -55,10 +55,13 @@ def classify_rows_with_model(
     batch_size: int,
     system_mode: str = "localized",
     max_new_tokens: int | None = None,
+    max_batch_input_bytes: int = 65_536,
     event_sink: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, int]:
     if batch_size <= 0:
         raise ValueError("classification batch size must be positive")
+    if max_batch_input_bytes <= 0:
+        raise ValueError("maximum batch input bytes must be positive")
     if not model_id or not variants or len(set(variants)) != len(variants):
         raise ValueError("model ID and unique variants are required")
     output_path = Path(output_path)
@@ -78,6 +81,7 @@ def classify_rows_with_model(
 
     total = len(rows) * len(variants)
     for variant in variants:
+        active_batch_size = int(batch_size)
         pending = [
             row
             for row in rows
@@ -98,11 +102,23 @@ def classify_rows_with_model(
         )
         pending = [pending[index] for index in order]
         rendered = [rendered[index] for index in order]
+        rendered_bytes = [
+            len(prompt.system.encode("utf-8")) + len(prompt.user.encode("utf-8"))
+            for prompt in rendered
+        ]
         if rendered:
             model.prepare(rendered)
         position = 0
         while position < len(pending):
             size = min(active_batch_size, len(pending) - position)
+            bounded_size = 0
+            bounded_bytes = 0
+            for input_bytes in rendered_bytes[position : position + size]:
+                if bounded_size and bounded_bytes + input_bytes > max_batch_input_bytes:
+                    break
+                bounded_size += 1
+                bounded_bytes += input_bytes
+            size = max(1, bounded_size)
             batch_rows = pending[position : position + size]
             batch_prompts = rendered[position : position + size]
             try:
@@ -311,6 +327,7 @@ def run_worker_job(
             if job.get("max_new_tokens") is not None
             else None
         ),
+        max_batch_input_bytes=int(job.get("max_batch_input_bytes", 65_536)),
         event_sink=lambda event: print(
             json.dumps({**event, "worker_id": worker_id}, sort_keys=True),
             flush=True,
