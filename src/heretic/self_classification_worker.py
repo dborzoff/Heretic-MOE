@@ -56,12 +56,15 @@ def classify_rows_with_model(
     system_mode: str = "localized",
     max_new_tokens: int | None = None,
     max_batch_input_bytes: int = 65_536,
+    progress_every_rows: int = 256,
     event_sink: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, int]:
     if batch_size <= 0:
         raise ValueError("classification batch size must be positive")
     if max_batch_input_bytes <= 0:
         raise ValueError("maximum batch input bytes must be positive")
+    if progress_every_rows <= 0:
+        raise ValueError("progress event row interval must be positive")
     if not model_id or not variants or len(set(variants)) != len(variants):
         raise ValueError("model ID and unique variants are required")
     output_path = Path(output_path)
@@ -80,6 +83,7 @@ def classify_rows_with_model(
             event_sink(event)
 
     total = len(rows) * len(variants)
+    last_progress_completed = skipped
     for variant in variants:
         active_batch_size = int(batch_size)
         pending = [
@@ -176,16 +180,22 @@ def classify_rows_with_model(
                 completed_keys.add(result.key)
                 completed += 1
             position += size
-            emit(
-                {
-                    "event": "classification_progress",
-                    "model_id": model_id,
-                    "variant": variant.value,
-                    "completed": completed + skipped,
-                    "total": total,
-                    "batch_size": active_batch_size,
-                }
-            )
+            current_completed = completed + skipped
+            if (
+                current_completed - last_progress_completed >= progress_every_rows
+                or position == len(pending)
+            ):
+                emit(
+                    {
+                        "event": "classification_progress",
+                        "model_id": model_id,
+                        "variant": variant.value,
+                        "completed": current_completed,
+                        "total": total,
+                        "batch_size": active_batch_size,
+                    }
+                )
+                last_progress_completed = current_completed
     return {
         "completed": completed,
         "skipped": skipped,
@@ -328,6 +338,7 @@ def run_worker_job(
             else None
         ),
         max_batch_input_bytes=int(job.get("max_batch_input_bytes", 65_536)),
+        progress_every_rows=int(job.get("progress_every_rows", 256)),
         event_sink=lambda event: print(
             json.dumps({**event, "worker_id": worker_id}, sort_keys=True),
             flush=True,

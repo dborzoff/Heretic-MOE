@@ -291,3 +291,24 @@ def test_worker_resets_oom_backoff_for_each_prompt_variant(tmp_path: Path) -> No
     )
 
     assert model.batch_sizes == [3, 2, 1, 3, 2, 1]
+
+
+def test_worker_rate_limits_progress_events_but_emits_variant_tail(
+    tmp_path: Path,
+) -> None:
+    """Catches writing one flushed console event for every small GPU batch."""
+    events: list[dict[str, object]] = []
+
+    classify_rows_with_model(
+        FakeClassificationModel(),
+        model_id="model-a",
+        rows=rows(5),
+        variants=(PromptVariant.NUMBER,),
+        output_path=tmp_path / "rows.jsonl",
+        batch_size=2,
+        progress_every_rows=4,
+        event_sink=events.append,
+    )
+
+    progress = [event for event in events if event["event"] == "classification_progress"]
+    assert [event["completed"] for event in progress] == [4, 5]
