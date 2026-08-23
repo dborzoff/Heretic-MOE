@@ -6,16 +6,19 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
 
-def test_llama_client_applies_chat_template_before_completion() -> None:
+
+def test_llama_client_uses_one_chat_completion_request() -> None:
     gguf = importlib.import_module("heretic.self_classification_gguf")
     calls: list[tuple[str, dict[str, object]]] = []
 
     def post_json(path: str, payload: dict[str, object]) -> dict[str, object]:
         calls.append((path, payload))
-        if path == "/apply-template":
-            return {"prompt": "rendered-chat"}
-        return {"content": "A", "tokens_predicted": 1}
+        return {
+            "choices": [{"message": {"content": "A"}}],
+            "usage": {"completion_tokens": 1},
+        }
 
     client = gguf.LlamaCompletionClient(post_json=post_json)
     text, tokens = client.generate(
@@ -27,19 +30,14 @@ def test_llama_client_applies_chat_template_before_completion() -> None:
     assert (text, tokens) == ("A", 1)
     assert calls == [
         (
-            "/apply-template",
+            "/v1/chat/completions",
             {
+                "model": "local",
                 "messages": [
                     {"role": "system", "content": "classifier-system"},
                     {"role": "user", "content": "classifier-input"},
-                ]
-            },
-        ),
-        (
-            "/completion",
-            {
-                "prompt": "rendered-chat",
-                "n_predict": 4,
+                ],
+                "max_tokens": 4,
                 "temperature": 0.0,
                 "stream": False,
             },
@@ -215,6 +213,54 @@ def test_gguf_runner_supports_eight_pass_english_consensus(tmp_path: Path) -> No
     assert {call[2] for call in client.calls} == {8}
     assert len({call[0] for call in client.calls}) == 1
     assert len(output.read_text(encoding="utf-8").splitlines()) == 8
+
+
+def test_gguf_runner_checkpoints_results_in_atomic_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches flushing and fsyncing once for every GGUF classification row."""
+    gguf = importlib.import_module("heretic.self_classification_gguf")
+    from heretic.self_classification import ClassificationInput, PromptVariant
+    from heretic.self_classification_data import append_results_atomic as persist
+
+    checkpoint_sizes: list[int] = []
+
+    def checkpoint(path, results) -> None:
+        checkpoint_sizes.append(len(results))
+        persist(path, results)
+
+    monkeypatch.setattr(gguf, "append_results_atomic", checkpoint)
+
+    class FakeClient:
+        def generate(
+            self, *, system: str, user: str, max_new_tokens: int
+        ) -> tuple[str, int]:
+            return "A", 1
+
+    rows = [
+        ClassificationInput(
+            canonical_id=f"P{index}",
+            row_id=f"EN-P{index}",
+            language="en",
+            category_ids=("C01",),
+            direction_class="unsafe",
+            prompt=f"private-{index}",
+        )
+        for index in range(5)
+    ]
+
+    gguf.classify_rows_with_gguf(
+        client=FakeClient(),
+        model_id="model.gguf",
+        rows=rows,
+        variant=PromptVariant.CODE_PERMUTED,
+        output_path=tmp_path / "rows.jsonl",
+        parallel=2,
+        checkpoint_rows=2,
+    )
+
+    assert checkpoint_sizes == [2, 2, 1]
 
 
 def test_post_json_uses_real_http_boundary() -> None:

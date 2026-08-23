@@ -19,7 +19,7 @@ from .self_classification import (
     render_classifier_prompt,
 )
 from .self_classification_data import (
-    append_result_atomic,
+    append_results_atomic,
     load_classification_rows,
     load_completed_keys,
     verify_result_coverage,
@@ -83,27 +83,28 @@ class LlamaCompletionClient:
         user: str,
         max_new_tokens: int,
     ) -> tuple[str, int]:
-        template = self._post_json(
-            "/apply-template",
+        completion = self._post_json(
+            "/v1/chat/completions",
             {
+                "model": "local",
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
-                ]
-            },
-        )
-        rendered = str(template["prompt"])
-        completion = self._post_json(
-            "/completion",
-            {
-                "prompt": rendered,
-                "n_predict": max_new_tokens,
+                ],
+                "max_tokens": max_new_tokens,
                 "temperature": 0.0,
                 "stream": False,
             },
         )
-        return str(completion.get("content", "")), int(
-            completion.get("tokens_predicted", 0)
+        choices = completion.get("choices")
+        usage = completion.get("usage")
+        if not isinstance(choices, list) or not choices or not isinstance(usage, dict):
+            raise TypeError("llama-server returned an invalid chat completion")
+        choice = choices[0]
+        if not isinstance(choice, dict) or not isinstance(choice.get("message"), dict):
+            raise TypeError("llama-server returned an invalid chat choice")
+        return str(choice["message"].get("content", "")), int(
+            usage.get("completion_tokens", 0)
         )
 
 
@@ -199,10 +200,13 @@ def classify_rows_with_gguf(
     max_new_tokens: int | None = None,
     output_path: str | Path,
     parallel: int,
+    checkpoint_rows: int = 256,
     progress: ProgressCallback | None = None,
 ) -> dict[str, int]:
     if parallel < 1:
         raise ValueError("parallel must be positive")
+    if checkpoint_rows < 1:
+        raise ValueError("checkpoint rows must be positive")
     if variant is not None and variants is not None:
         raise ValueError("pass variant or variants, not both")
     selected = tuple(variants or ((variant,) if variant is not None else ()))
@@ -255,10 +259,21 @@ def classify_rows_with_gguf(
             )
 
         with ThreadPoolExecutor(max_workers=parallel) as executor:
+            checkpoint: list[ClassificationResult] = []
             for result in executor.map(classify_one, rendered):
-                append_result_atomic(output_path, result)
-                completed += 1
-                generated += 1
+                checkpoint.append(result)
+                if len(checkpoint) >= checkpoint_rows:
+                    append_results_atomic(output_path, checkpoint)
+                    completed += len(checkpoint)
+                    generated += len(checkpoint)
+                    checkpoint.clear()
+                    if progress is not None:
+                        progress(completed, total)
+            if checkpoint:
+                append_results_atomic(output_path, checkpoint)
+                completed += len(checkpoint)
+                generated += len(checkpoint)
+                checkpoint.clear()
                 if progress is not None:
                     progress(completed, total)
     return {"completed": completed, "generated": generated, "total": total}
