@@ -4,6 +4,7 @@ import importlib
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -302,6 +303,43 @@ def test_post_json_uses_real_http_boundary() -> None:
         "path": "/completion",
         "payload": {"prompt": "rendered", "n_predict": 4},
     }
+
+
+def test_post_json_retries_a_transient_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches aborting a resume-safe multi-hour panel on one socket timeout."""
+    gguf = importlib.import_module("heretic.self_classification_gguf")
+    calls = 0
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return BytesIO(b'{"content":"A"}').read()
+
+    def flaky_urlopen(_request, *, timeout: float):
+        nonlocal calls
+        calls += 1
+        assert timeout == 5.0
+        if calls == 1:
+            raise TimeoutError("transient")
+        return Response()
+
+    monkeypatch.setattr(gguf, "urlopen", flaky_urlopen)
+
+    result = gguf.post_json(
+        "http://127.0.0.1:8183",
+        "/completion",
+        {"prompt": "rendered"},
+        timeout=5.0,
+        retries=1,
+    )
+
+    assert calls == 2
+    assert result == {"content": "A"}
 
 
 def test_finalize_gguf_results_verifies_coverage_and_writes_manifest(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -57,7 +58,10 @@ def post_json(
     payload: dict[str, object],
     *,
     timeout: float,
+    retries: int = 2,
 ) -> dict[str, object]:
+    if retries < 0:
+        raise ValueError("HTTP retries must be nonnegative")
     encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = Request(
         base_url.rstrip("/") + "/" + path.lstrip("/"),
@@ -65,8 +69,15 @@ def post_json(
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urlopen(request, timeout=timeout) as response:
-        result = json.loads(response.read().decode("utf-8"))
+    for attempt in range(retries + 1):
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            break
+        except TimeoutError:
+            if attempt == retries:
+                raise
+            time.sleep(0.25 * (2**attempt))
     if not isinstance(result, dict):
         raise TypeError("llama-server returned a non-object JSON response")
     return result
