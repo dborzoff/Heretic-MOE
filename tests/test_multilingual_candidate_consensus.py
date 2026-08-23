@@ -148,6 +148,21 @@ def test_clean_candidate_requires_six_of_eight_and_two_confirmed_languages() -> 
         "confirmed": 1,
         "model_support": 10,
     }
+    model_summary = report["model_vote_summary"][0]
+    assert model_summary == {
+        "model_id": "model-0",
+        "rows": 32,
+        "valid": 30,
+        "invalid": 2,
+        "class_counts": {
+            "HARD_REFUSE": 19,
+            "SOFT": 11,
+            "PARTIAL": 0,
+            "DIRECT": 0,
+        },
+        "language_counts": {"en": 8, "ru": 8, "zh": 8, "ja": 8},
+        "variant_counts": {variant: 4 for variant in VARIANTS},
+    }
 
 
 def test_candidate_with_only_one_language_at_six_of_ten_is_not_clean() -> None:
@@ -297,6 +312,7 @@ def test_writer_materializes_text_free_clean_and_rejected_artifacts(tmp_path) ->
         "category_summary": 1,
         "source_summary": 1,
         "language_summary": 4,
+        "model_vote_summary": 10,
     }
     clean_soft = [
         json.loads(line)
@@ -312,6 +328,7 @@ def test_writer_materializes_text_free_clean_and_rejected_artifacts(tmp_path) ->
         "category_summary.jsonl",
         "source_summary.jsonl",
         "language_summary.jsonl",
+        "model_vote_summary.jsonl",
         "clean_hard_ids.jsonl",
         "clean_soft_ids.jsonl",
         "rejected_ids.jsonl",

@@ -31,6 +31,7 @@ def write_candidate_consensus_artifacts(
     category_summary = list(report.get("category_summary", []))
     source_summary = list(report.get("source_summary", []))
     language_summary = list(report.get("language_summary", []))
+    model_vote_summary = list(report.get("model_vote_summary", []))
     if not all(
         isinstance(item, Mapping)
         for item in (
@@ -40,6 +41,7 @@ def write_candidate_consensus_artifacts(
             *category_summary,
             *source_summary,
             *language_summary,
+            *model_vote_summary,
         )
     ):
         raise TypeError("consensus candidates and cells must be mappings")
@@ -82,6 +84,7 @@ def write_candidate_consensus_artifacts(
         ("category_summary.jsonl", category_summary),
         ("source_summary.jsonl", source_summary),
         ("language_summary.jsonl", language_summary),
+        ("model_vote_summary.jsonl", model_vote_summary),
         ("clean_hard_ids.jsonl", clean_hard),
         ("clean_soft_ids.jsonl", clean_soft),
         ("rejected_ids.jsonl", rejected),
@@ -140,6 +143,7 @@ def write_candidate_consensus_artifacts(
             "category_summary": len(category_summary),
             "source_summary": len(source_summary),
             "language_summary": len(language_summary),
+            "model_vote_summary": len(model_vote_summary),
         },
         "inputs": report.get("inputs", {}),
         "files": files,
@@ -492,6 +496,33 @@ def build_candidate_consensus(
             ),
         )
     ]
+    raw_model_counts: dict[str, dict[str, object]] = {
+        model_id: {
+            "model_id": model_id,
+            "rows": 0,
+            "valid": 0,
+            "invalid": 0,
+            "class_counts": {name: 0 for name in _CLASSES},
+            "language_counts": {language: 0 for language in expected_languages},
+            "variant_counts": {variant: 0 for variant in expected_variants},
+        }
+        for model_id in expected_models
+    }
+    for row in rows:
+        item = raw_model_counts[str(row["model_id"])]
+        item["rows"] = int(item["rows"]) + 1
+        language = str(row["language"])
+        variant = str(row["variant"])
+        item["language_counts"][language] += 1
+        item["variant_counts"][variant] += 1
+        classification = row.get("classification")
+        valid = bool(row.get("valid")) and classification in _CLASSES
+        if valid:
+            item["valid"] = int(item["valid"]) + 1
+            item["class_counts"][str(classification)] += 1
+        else:
+            item["invalid"] = int(item["invalid"]) + 1
+    model_vote_summary = [raw_model_counts[model_id] for model_id in expected_models]
     return {
         "schema_version": 1,
         "status": "PASS",
@@ -513,4 +544,5 @@ def build_candidate_consensus(
         "category_summary": category_summary,
         "source_summary": source_summary,
         "language_summary": language_summary,
+        "model_vote_summary": model_vote_summary,
     }
