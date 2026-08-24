@@ -180,6 +180,7 @@ def prepare_static_multilingual_runtime(
             "language": row.language,
             "direction_class": row.direction,
             "category_id": row.category_id,
+            "trial_behavior_class": row.trial_behavior_class,
         }
         for row in bundle.trial_rows
     ]

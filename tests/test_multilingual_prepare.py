@@ -77,6 +77,45 @@ def _bundle() -> MultilingualDatasetBundle:
     )
 
 
+def _hard_soft_bundle() -> MultilingualDatasetBundle:
+    languages = ("en", "ru", "zh", "ja")
+    rows = []
+    for direction, prefix, count in (("safe", "S", 8), ("unsafe", "U", 8)):
+        for canonical_number in range(count):
+            canonical_id = f"{prefix}{canonical_number + 1:04d}"
+            behavior = (
+                "safe"
+                if direction == "safe"
+                else "hard" if canonical_number < 4 else "soft"
+            )
+            for language in languages:
+                rows.append(
+                    GeometryRow(
+                        canonical_id=canonical_id,
+                        row_id=f"{language.upper()}-{canonical_id}",
+                        language=language,
+                        direction=direction,
+                        category_id="C01",
+                        prompt="private",
+                        source_path=Path("private.jsonl"),
+                        source_line=canonical_number + 1,
+                        trial_behavior_class=behavior,
+                    )
+                )
+    return MultilingualDatasetBundle(
+        direction_rows=tuple(rows),
+        trial_rows=tuple(rows),
+        final_rows=(),
+        manifest={
+            "schema_version": 1,
+            "status": "PASS",
+            "contract_sha256": "b" * 64,
+            "counts": {"trial": len(rows)},
+            "rows_per_cell": {"final_holdout": 132},
+        },
+    )
+
+
 def test_direction_package_is_copied_and_verified_portably(tmp_path: Path) -> None:
     source = _direction_source(tmp_path)
     destination = tmp_path / "runtime" / "clean_map" / "directions"
@@ -133,6 +172,34 @@ def test_static_runtime_freezes_dataset_direction_builtin_srg_and_schedule(
         )
         == manifest
     )
+
+
+def test_static_runtime_preserves_hard_soft_trial_behavior(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime-hard-soft"
+
+    prepare_static_multilingual_runtime(
+        bundle=_hard_soft_bundle(),
+        direction_source=_direction_source(tmp_path),
+        runtime_root=runtime,
+        languages=("en", "ru", "zh", "ja"),
+        schedule_seed=23,
+        schedule_capacity=4,
+        expected_per_direction=8,
+    )
+
+    schedule_manifest, records = load_trial_language_schedule(
+        runtime / "study" / "schedule"
+    )
+    assert schedule_manifest["schema_version"] == 3
+    assert schedule_manifest["coverage_block_trials"] == 4
+    assert schedule_manifest["behavior_rows_per_trial"] == {
+        "hard": 4,
+        "safe": 8,
+        "soft": 4,
+    }
+    assert len(records) == 4
 
 
 class _ReferenceModel:
