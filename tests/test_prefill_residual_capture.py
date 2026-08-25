@@ -166,3 +166,44 @@ def test_adaptive_artifact_batch_buckets_lengths_and_recovers_from_oom() -> None
     assert [len(value) for value in attempted[-1]] == sorted(
         len(value) for value in attempted[-1]
     )
+
+
+def test_adaptive_artifact_batch_uses_token_budget_for_short_rows() -> None:
+    wrapper = object.__new__(Model)
+    wrapper.settings = SimpleNamespace(
+        batch_size=0,
+        max_batch_size=8,
+        max_response_length=100,
+        generation_batch_probe_start=8,
+    )
+    wrapper._adaptive_generation_batch_size = 1
+    wrapper._adaptive_generation_token_budget = 400
+    attempted: list[list[str]] = []
+
+    def capture(self, prompts, skip_special_tokens=False):
+        del skip_special_tokens
+        attempted.append([prompt.user for prompt in prompts])
+        values = [int(prompt.user.split("-")[0]) for prompt in prompts]
+        return (
+            [f"r-{value}" for value in values],
+            [[value] for value in values],
+            torch.tensor(values, dtype=torch.float32).reshape(-1, 1, 1),
+        )
+
+    wrapper.get_response_artifacts_with_prefill_residuals = MethodType(
+        capture, wrapper
+    )
+    prompts = [
+        *(Prompt(system="", user=f"{index}-xxxxxxxx") for index in range(6)),
+        Prompt(system="", user="6-" + "x" * 248),
+    ]
+
+    responses, token_ids, residuals = (
+        wrapper.get_response_artifacts_with_prefill_residuals_batched(prompts)
+    )
+
+    assert responses == [f"r-{index}" for index in range(7)]
+    assert token_ids == [[index] for index in range(7)]
+    assert residuals.flatten().tolist() == [float(index) for index in range(7)]
+    assert [len(batch) for batch in attempted] == [3, 3, 1]
+    assert attempted[-1] == [prompts[-1].user]

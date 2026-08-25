@@ -1409,11 +1409,70 @@ class Model:
                 len(prompt.system) + len(prompt.user) for prompt in prompts
             ]
         order = sorted(range(len(prompts)), key=prompt_lengths.__getitem__)
+        token_budget = (
+            int(getattr(self, "_adaptive_generation_token_budget", 0))
+            if automatic
+            else 0
+        )
+        tuned_batch_size = batch_size
+        automatic_ceiling = (
+            max(
+                tuned_batch_size,
+                int(
+                    getattr(
+                        self.settings,
+                        "generation_batch_probe_start",
+                        tuned_batch_size,
+                    )
+                ),
+            )
+            if token_budget > 0
+            else int(
+                getattr(
+                    self.settings,
+                    "max_batch_size",
+                    max(1, batch_size),
+                )
+            )
+        )
+        maximum_batch_size = min(
+            int(
+                getattr(
+                    self.settings,
+                    "max_batch_size",
+                    max(1, batch_size),
+                )
+            ),
+            automatic_ceiling,
+            len(prompts),
+        )
+        max_response_length = int(
+            getattr(self.settings, "max_response_length", 0)
+        )
         responses: list[str | None] = [None] * len(prompts)
         token_ids: list[list[int] | None] = [None] * len(prompts)
         residuals: list[Tensor | None] = [None] * len(prompts)
         position = 0
+        retry_limit: int | None = None
         while position < len(order):
+            if token_budget > 0:
+                available = min(maximum_batch_size, len(order) - position)
+                if retry_limit is not None:
+                    available = min(available, retry_limit)
+                planned = 1
+                maximum_length = 0
+                for size in range(1, available + 1):
+                    prompt_index = order[position + size - 1]
+                    maximum_length = max(
+                        maximum_length,
+                        prompt_lengths[prompt_index],
+                    )
+                    if size * (maximum_length + max_response_length) > token_budget:
+                        break
+                    planned = size
+                batch_size = planned
+            elif retry_limit is not None:
+                batch_size = min(batch_size, retry_limit)
             selected = order[position : position + batch_size]
             batch = [prompts[index] for index in selected]
             try:
@@ -1436,7 +1495,9 @@ class Model:
                         reason="OOM",
                     )
                 batch_size = next_batch_size
-                self._adaptive_generation_batch_size = batch_size
+                retry_limit = next_batch_size
+                if token_budget <= 0:
+                    self._adaptive_generation_batch_size = batch_size
                 self._release_failed_cuda_batch()
                 continue
             if tuning:
@@ -1449,10 +1510,13 @@ class Model:
                 token_ids[original] = batch_token_ids[local]
                 residuals[original] = batch_residuals[local]
             position += len(selected)
+            retry_limit = None
             if progress is not None:
                 progress(position, len(order), batch_size)
         if automatic:
-            self._adaptive_generation_batch_size = batch_size
+            self._adaptive_generation_batch_size = (
+                tuned_batch_size if token_budget > 0 else batch_size
+            )
         if any(value is None for value in responses + token_ids + residuals):
             raise RuntimeError("adaptive generation batch lost row coverage")
         return (
@@ -1981,6 +2045,25 @@ class Model:
             validation = max(passing, key=lambda record: int(record["batch_size"]))
         candidate = int(validation["batch_size"])
         self._adaptive_generation_batch_size = candidate
+        if hasattr(self, "tokenizer"):
+            prompt_lengths = [
+                int(row.numel()) for row in self._cached_prompt_token_ids(prompts)
+            ]
+        else:
+            prompt_lengths = [
+                len(prompt.system) + len(prompt.user) for prompt in prompts
+            ]
+        maximum_prompt_length = max(prompt_lengths)
+        bucket_multiple = int(
+            getattr(self.settings, "generation_prompt_bucket_multiple", 0)
+        )
+        if bucket_multiple > 0:
+            maximum_prompt_length = (
+                math.ceil(maximum_prompt_length / bucket_multiple) * bucket_multiple
+            )
+        self._adaptive_generation_token_budget = candidate * (
+            maximum_prompt_length + int(self.settings.max_response_length)
+        )
         self._emit_batch_event(
             "batch_selected", "generation", batch_size=candidate
         )
@@ -2006,6 +2089,7 @@ class Model:
                 ),
                 "elapsed_seconds": float(validation.get("elapsed_seconds", 0.0)),
             },
+            "token_budget": int(self._adaptive_generation_token_budget),
         }
 
     def get_responses_with_prefill_residuals_batched(
