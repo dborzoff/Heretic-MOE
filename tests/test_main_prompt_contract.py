@@ -197,6 +197,20 @@ def test_cached_generation_batch_revalidation_emits_visible_events() -> None:
     ]
 
 
+def test_cached_generation_batch_restores_batch_and_token_budget() -> None:
+    from heretic import main
+
+    model = SimpleNamespace()
+
+    main._restore_cached_generation_batch(
+        model,
+        {"batch_size": 1, "token_budget": 5636},
+    )
+
+    assert model._adaptive_generation_batch_size == 1
+    assert model._adaptive_generation_token_budget == 5636
+
+
 def test_multilingual_trial_timings_render_as_one_compact_line() -> None:
     from heretic.main import _display_multilingual_trial_timings
 

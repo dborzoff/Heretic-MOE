@@ -51,7 +51,7 @@ import random
 import re
 import time
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from os.path import commonprefix
 from pathlib import Path
@@ -236,6 +236,17 @@ def _emit_cached_batch_revalidation(
         )
         return
     raise ValueError(f"unsupported cached batch phase: {phase}")
+
+
+def _restore_cached_generation_batch(model: Any, cached: Mapping[str, Any]) -> None:
+    """Restore every adaptive generation limit required by length bucketing."""
+
+    batch_size = int(cached["batch_size"])
+    token_budget = int(cached["token_budget"])
+    if batch_size <= 0 or token_budget <= 0:
+        raise ValueError("cached generation batch limits must be positive")
+    model._adaptive_generation_batch_size = batch_size
+    model._adaptive_generation_token_budget = token_budget
 
 
 def _predict_next_batch_free_bytes(
@@ -1147,6 +1158,7 @@ def run():
                             {
                                 "status": "PASS",
                                 "batch_size": int(cached["batch_size"]),
+                                "token_budget": int(cached["token_budget"]),
                                 "validation": revalidation,
                             },
                         )
@@ -1159,10 +1171,11 @@ def run():
                         )
                     cached = None
             if cached is not None:
-                model._adaptive_generation_batch_size = int(cached["batch_size"])
+                _restore_cached_generation_batch(model, cached)
                 tuning = {
                     "status": "PASS",
                     "batch_size": int(cached["batch_size"]),
+                    "token_budget": int(cached["token_budget"]),
                     "probes": [],
                     "validation": cached["validation"],
                     "cache": "reused",

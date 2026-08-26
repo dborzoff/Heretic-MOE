@@ -70,6 +70,7 @@ def _record(batch_size: int = 40) -> dict:
         {
             "status": "PASS",
             "batch_size": batch_size,
+            "token_budget": batch_size * 200,
             "validation": {
                 "status": "PASS",
                 "batch_size": batch_size,
@@ -161,3 +162,36 @@ def test_tokenizer_fingerprint_uses_public_tokenizer_contract_only() -> None:
     changed = Tokenizer()
     changed.chat_template = "other"
     assert tokenizer_fingerprint(changed) != first
+
+
+def test_cache_preserves_generation_token_budget_for_resume(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    record = build_cache_record(
+        context.key,
+        {
+            "status": "PASS",
+            "batch_size": 1,
+            "token_budget": 5636,
+            "validation": {
+                "status": "PASS",
+                "batch_size": 1,
+                "rows": 1,
+                "max_new_tokens": 100,
+                "baseline_free_bytes": 20 * 1024**3,
+                "min_free_bytes": 8 * 1024**3,
+                "working_set_bytes": 12 * 1024**3,
+                "required_free_bytes": 2 * 1024**3,
+                "recovered_free_bytes": 20 * 1024**3,
+                "peak_allocated_bytes": 16 * 1024**3,
+                "elapsed_seconds": 0.5,
+                "generated_tokens": 100,
+                "tokens_per_second": 200.0,
+            },
+        },
+    )
+
+    store_generation_batch_cache(context, record)
+    cached = load_generation_batch_cache(context)
+
+    assert cached is not None
+    assert cached["token_budget"] == 5636

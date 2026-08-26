@@ -185,6 +185,10 @@ class GenerationBatchCacheContext:
 
 def _validate_contract(record: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(record)
+    if int(payload.get("schema_version", 0)) != 2:
+        raise ValueError("generation batch cache schema is unsupported")
+    if int(payload.get("token_budget", 0)) <= 0:
+        raise ValueError("generation batch cache token budget is invalid")
     contract = payload.get("contract_sha256")
     if not isinstance(contract, str) or len(contract) != 64:
         raise ValueError("generation batch cache contract hash is invalid")
@@ -206,6 +210,9 @@ def build_cache_record(
     batch_size = int(tuning.get("batch_size", 0))
     if batch_size <= 0 or int(validation.get("batch_size", -1)) != batch_size:
         raise ValueError("cache batch size does not match its validation")
+    token_budget = int(tuning.get("token_budget", 0))
+    if token_budget <= 0:
+        raise ValueError("cache token budget must be positive")
     baseline_free = int(validation["baseline_free_bytes"])
     min_free = int(validation["min_free_bytes"])
     working_set = int(validation["working_set_bytes"])
@@ -215,10 +222,11 @@ def build_cache_record(
     int(validation["recovered_free_bytes"])
     int(validation["peak_allocated_bytes"])
     record = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "PASS",
         "key": dict(key),
         "batch_size": batch_size,
+        "token_budget": token_budget,
         "validation": dict(validation),
     }
     _assert_text_free(record)
